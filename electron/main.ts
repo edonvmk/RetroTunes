@@ -72,6 +72,13 @@ import {
   checkAndUpdateTranscoderBinaries,
 } from './transcoder/binaryManager';
 import {
+  getAiModelCacheStatus,
+  prepareAiModel,
+  cancelPrepareAiModel,
+  disposeAiModel,
+  runAiAgentTurn,
+} from './ai/llamaService';
+import {
   getStorefrontHome,
   searchStoreCatalog,
   requestStoreItem,
@@ -554,6 +561,24 @@ function registerAllHandlers() {
   registerChannel('transcoder:getBinaryStatus', () => getTranscoderBinaryStatus());
   registerChannel('transcoder:checkUpdateBinaries', (opts?: { forceDownload?: boolean; autoDownload?: boolean }) =>
     checkAndUpdateTranscoderBinaries(opts)
+  );
+  registerChannel('ai:model-cache-status', (models: { id: string; filename?: string }[]) =>
+    getAiModelCacheStatus(models)
+  );
+  registerChannel(
+    'ai:prepare-model',
+    (params: { modelId: string; uri: string; filename: string; contextWindow?: number }) =>
+      prepareAiModel(params)
+  );
+  registerChannel('ai:cancel-prepare', () => cancelPrepareAiModel());
+  registerChannel('ai:dispose-model', () => disposeAiModel());
+  registerChannel(
+    'ai:agent-turn',
+    (input: {
+      prompt: string;
+      history?: { role: 'user' | 'assistant'; content: string }[];
+      excludedTrackIds?: number[];
+    }) => runAiAgentTurn(input)
   );
   registerChannel('devices:getAutoOpenOnMtp', () => platformDriver.getAutoOpenOnMtp());
   registerChannel('devices:setAutoOpenOnMtp', (enabled: boolean) => {

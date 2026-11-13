@@ -14,6 +14,7 @@ RetroTunes (`rTunes`) is built on the shoulders of open-source libraries, multim
 | **TypeScript** | Static type checking across frontend (`src/`) and backend (`electron/`) | Apache-2.0 | Microsoft Corporation |
 | **Vite & `@vitejs/plugin-react`** | Frontend module bundler and HMR development server | MIT | Evan You & Vite Contributors |
 | **better-sqlite3** | Synchronous embedded SQLite3 bindings powering the library index & FTS5 search | MIT | Joshua Wise |
+| **node-llama-cpp** | Local GGUF model download, quantized LLM inference, and JSON-schema function calling for the AI Playlist Generator | MIT | Gilad Shoham & `node-llama-cpp` Contributors |
 | **SQLite + FTS5** | High-performance relational storage and full-text search engine | Public Domain | SQLite Development Team |
 | **lucide-react** | Crisp vector UI iconography | ISC | Lucide Contributors |
 | **concurrently, wait-on & cross-env** | Development and cross-platform CLI orchestration scripts | MIT | Kent C. Dodds & Open-source Contributors |

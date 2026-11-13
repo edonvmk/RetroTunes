@@ -70,6 +70,7 @@ import { DeviceSummaryView } from './components/DeviceSummaryView';
 import { DownloadsQueueView, StorefrontView } from './components/StorefrontView';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { UploadMediaWizardModal } from './components/UploadMediaWizardModal';
+import { AiPlaylistModal } from './components/AiPlaylistModal';
 
 type NavSelection =
   | { kind: 'music' }
@@ -209,6 +210,7 @@ export const App: React.FC = () => {
   const [showPreferences, setShowPreferences] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [showSmartModal, setShowSmartModal] = useState(false);
+  const [showAiPlaylistModal, setShowAiPlaylistModal] = useState(false);
   const [editingPlaylist, setEditingPlaylist] = useState<PlaylistRow | null>(null);
   const [showNewPlaylistModal, setShowNewPlaylistModal] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('New Playlist');
@@ -1686,24 +1688,40 @@ export const App: React.FC = () => {
             {/* PLAYLISTS */}
             <div className="source-section-header">
               <span>PLAYLISTS</span>
-              <button
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: '#2563eb',
-                  fontWeight: 700,
-                  fontSize: 10,
-                }}
-                onClick={() => {
-                  setNewPlaylistName('New Playlist');
-                  setNewPlaylistMediaType('mixed');
-                  setShowNewPlaylistModal(true);
-                }}
-                title="Create a new Music, Video, or Mixed Playlist"
-              >
-                + New
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: '#6d28d9',
+                    fontWeight: 700,
+                    fontSize: 10,
+                  }}
+                  onClick={() => setShowAiPlaylistModal(true)}
+                  title="Open AI Playlist Generator (Pre-Alpha)"
+                >
+                  ✦ AI
+                </button>
+                <button
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    color: '#2563eb',
+                    fontWeight: 700,
+                    fontSize: 10,
+                  }}
+                  onClick={() => {
+                    setNewPlaylistName('New Playlist');
+                    setNewPlaylistMediaType('mixed');
+                    setShowNewPlaylistModal(true);
+                  }}
+                  title="Create a new Music, Video, or Mixed Playlist"
+                >
+                  + New
+                </button>
+              </div>
             </div>
             {playlists.map((pl) => {
               const isSelected = nav.kind === 'playlist' && nav.id === pl.id;
@@ -3904,6 +3922,13 @@ export const App: React.FC = () => {
           </button>
           <button
             className="aqua-btn"
+            onClick={() => setShowAiPlaylistModal(true)}
+            title="Open AI Playlist Generator (Pre-Alpha)"
+          >
+            <Sparkles size={12} color="#1d4ed8" /> AI Playlist...
+          </button>
+          <button
+            className="aqua-btn"
             onClick={() => setShowAddDeviceWizard(true)}
             title="Open Universal ePod Provisioning Wizard"
           >
@@ -4276,6 +4301,17 @@ export const App: React.FC = () => {
           liveEntries={liveLogs}
           onClose={() => setShowDiagnostics(false)}
           onCleared={() => setLiveLogs([])}
+        />
+      )}
+
+      {showAiPlaylistModal && (
+        <AiPlaylistModal
+          onClose={() => setShowAiPlaylistModal(false)}
+          onSaved={async (savedId) => {
+            setShowAiPlaylistModal(false);
+            await refreshAllData();
+            setNav({ kind: 'playlist', id: savedId });
+          }}
         />
       )}
 

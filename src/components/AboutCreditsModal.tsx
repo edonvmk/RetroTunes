@@ -34,6 +34,9 @@ export const FossCreditsContent: React.FC = () => (
           <strong>better-sqlite3 & SQLite FTS5</strong> — High-performance embedded relational database and Full-Text Search indexing engine by Joshua Wise & SQLite Team (MIT / Public Domain).
         </li>
         <li>
+          <strong>node-llama-cpp</strong> — Local GGUF inference &amp; structured tool-calling runtime for the AI Playlist Generator by Gilad Shoham &amp; Contributors (MIT License).
+        </li>
+        <li>
           <strong>Lucide Icons (lucide-react)</strong> — Clean vector iconography (ISC License).
         </li>
         <li>

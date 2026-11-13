@@ -141,3 +141,15 @@ Any commit that adds:
 
 - All background workers and services (`DEVICE_SYNC`, `INDEXER`, `TRANSCODE`, `CACHE`, `ARR_STORE`, `LISTENBRAINZ`, `LRCLIB`, `AUTH_OIDC`, `PLAYBACK`, `DB`, `SYSTEM`, `IPC`) **must** emit structured logs via `electron/logger.ts` (`logger.info`, `logger.warn`, `logger.error`, `logger.debug`) with subsystem tags, metadata objects, and optional duration in ms.
 - All logs must remain compatible with the in-app **`> Logs`** Diagnostics modal (`DiagnosticsModal.tsx`) and JSON diagnostic export.
+
+---
+
+## 10. Pre-Alpha AI Playlist Generator Rules
+
+- **Zero Install-Time or Startup Model Downloads:** Never add `postinstall` scripts, build-time fetches, or app-launch background downloads for LLM/GGUF weights. No model files may be downloaded until the user explicitly opens the **AI Playlist Generator**, chooses a model from the dropdown, and clicks **Continue**.
+- **Pre-Alpha Model Selector:** Expose a model dropdown in the AI Playlist Generator UI with `Qwen 3.5 — 0.8B (Q4_K_M)` (`qwen3.5-0.8b-q4`) as the active default, plus disabled `Coming Soon` / `Future Docker` placeholders for larger local models (`qwen3.5-2b-q4`) and the remote `rTunes Companion Server (MCP)` (`rtunes-companion-mcp`).
+- **Two-Phase Loading Bar (`0%–50%` / `50%–100%`):**
+  - `0%` to `50%` is strictly for downloading the GGUF file to `app.getPath('userData')/models/` (if already cached on disk, skip immediately to `50%`).
+  - `50%` to `100%` is strictly for loading the GGUF weights into RAM/VRAM and creating the inference context.
+  - Provide a working **Cancel** button (`AbortController`) during download/load and always dispose of the model and context (`context.dispose()`, `model.dispose()`) when the modal closes or cancels.
+- **Single-Purpose Scope:** The AI agent's sole job is interviewing the user and assembling playlists from owned tracks using structured tool calls (`search_local_catalog`, `discover_via_lastfm`, `lookup_musicbrainz`, `ask_user_followup`, `finalize_playlist`)—never dump the entire 95k+ track library into the prompt context.

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { app, BrowserWindow } from 'electron';
 import { getDb, searchTracksFts, TrackRow } from '../db';
 import { getSettings } from '../settings';
@@ -43,6 +44,69 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as <
   specifier: string
 ) => Promise<T>;
 
+async function loadLlamaModule(): Promise<any> {
+  try {
+    const resolved = require.resolve('node-llama-cpp');
+    return await dynamicImport(pathToFileURL(resolved).href);
+  } catch {
+    return await dynamicImport('node-llama-cpp');
+  }
+}
+
+function getModelsManifestPath(): string {
+  return path.join(getAiModelsDir(), 'models-manifest.json');
+}
+
+function readModelsManifest(): Record<string, string> {
+  try {
+    const p = getModelsManifestPath();
+    if (fs.existsSync(p)) {
+      return JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, string>;
+    }
+  } catch {
+    // ignore
+  }
+  return {};
+}
+
+function saveModelManifestEntry(modelId: string, modelPath: string) {
+  try {
+    const manifest = readModelsManifest();
+    manifest[modelId] = modelPath;
+    fs.writeFileSync(getModelsManifestPath(), JSON.stringify(manifest, null, 2), 'utf8');
+  } catch {
+    // ignore
+  }
+}
+
+function resolveCachedModelPath(modelId: string, filename?: string): string | null {
+  const manifest = readModelsManifest();
+  const fromManifest = manifest[modelId];
+  if (fromManifest && fs.existsSync(fromManifest)) {
+    try {
+      if (fs.statSync(fromManifest).size > 1024 * 1024) {
+        return fromManifest;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (filename) {
+    const defaultPath = path.join(getAiModelsDir(), filename);
+    if (fs.existsSync(defaultPath)) {
+      try {
+        if (fs.statSync(defaultPath).size > 1024 * 1024) {
+          saveModelManifestEntry(modelId, defaultPath);
+          return defaultPath;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null;
+}
+
 let activeLlama: any = null;
 let activeModel: any = null;
 let activeContext: any = null;
@@ -68,20 +132,16 @@ export function getAiModelCacheStatus(
 ): AiModelCacheStatus[] {
   const modelsDir = getAiModelsDir();
   return models.map((m) => {
-    if (!m.filename) {
-      return { modelId: m.id, cached: false, filePath: '', sizeBytes: 0 };
-    }
-    const filePath = path.join(modelsDir, m.filename);
-    try {
-      if (fs.existsSync(filePath)) {
-        const st = fs.statSync(filePath);
-        if (st.isFile() && st.size > 1024 * 1024) {
-          return { modelId: m.id, cached: true, filePath, sizeBytes: st.size };
-        }
+    const cachedPath = resolveCachedModelPath(m.id, m.filename);
+    if (cachedPath) {
+      try {
+        const st = fs.statSync(cachedPath);
+        return { modelId: m.id, cached: true, filePath: cachedPath, sizeBytes: st.size };
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore stat error
     }
+    const filePath = m.filename ? path.join(modelsDir, m.filename) : '';
     return { modelId: m.id, cached: false, filePath, sizeBytes: 0 };
   });
 }
@@ -151,12 +211,13 @@ export async function prepareAiModel(params: {
   let modelPath = path.join(modelsDir, filename);
 
   try {
-    const llamaModule = await dynamicImport<any>('node-llama-cpp');
+    const llamaModule = await loadLlamaModule();
     const { getLlama, createModelDownloader } = llamaModule;
 
     // PHASE 1: 0% -> 50% (Download GGUF if missing; skip immediately to 50% if cached)
-    const alreadyCached = fs.existsSync(modelPath) && fs.statSync(modelPath).size > 1024 * 1024;
-    if (alreadyCached) {
+    const cachedPath = resolveCachedModelPath(modelId, filename);
+    if (cachedPath) {
+      modelPath = cachedPath;
       broadcastPrepareProgress({
         modelId,
         percent: 50,
@@ -175,6 +236,7 @@ export async function prepareAiModel(params: {
         modelUri: uri,
         dirPath: modelsDir,
         fileName: filename,
+        skipExisting: true,
         deleteTempFileOnCancel: true,
         onProgress: ({ totalSize, downloadedSize }: { totalSize: number; downloadedSize: number }) => {
           if (signal.aborted) return;
@@ -197,6 +259,8 @@ export async function prepareAiModel(params: {
       if (signal.aborted) {
         throw new Error('Download aborted');
       }
+
+      saveModelManifestEntry(modelId, modelPath);
 
       broadcastPrepareProgress({
         modelId,
@@ -534,7 +598,7 @@ export async function runAiAgentTurn(input: {
     throw new Error('AI model is not loaded. Please prepare the model first.');
   }
 
-  const llamaModule = await dynamicImport<any>('node-llama-cpp');
+  const llamaModule = await loadLlamaModule();
   const { LlamaChatSession, defineChatSessionFunction } = llamaModule;
 
   if (!activeSession) {

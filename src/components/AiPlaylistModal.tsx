@@ -20,13 +20,29 @@ interface AiPlaylistModalProps {
   onSaved: (playlistId: number) => void;
 }
 
+const RANDOM_PLAYLIST_IDEAS: string[] = [
+  'Late-night indie & synth-pop drive, around 20 tracks, moody with a steady pulse',
+  '90s alternative & grunge deep cuts from my library, ~25 tracks, high energy',
+  'Sunday morning acoustic, folk, and mellow singer-songwriter favorites, 15 tracks',
+  'Upbeat workout mix: electronic, hip-hop, and rock bangers, ~30 tracks',
+  'Rainy afternoon shoegaze, dream pop, and ambient post-rock, 18 tracks',
+  'Classic 70s & 80s soul, funk, and disco grooves for cooking dinner, 20 tracks',
+  'Focus & deep work: instrumental, jazz, and lo-fi beats without heavy vocals, 25 tracks',
+  'Road trip sing-alongs: loved tracks and top-rated anthems across all eras, 30 tracks',
+  'Dark wave, industrial, and post-punk classics for midnight listening, 20 tracks',
+  'Hidden gems: high relative-popularity deep cuts I have rated 4+ stars, 20 tracks',
+];
+
+function pickRandomIdea(exclude?: string): string {
+  const pool = RANDOM_PLAYLIST_IDEAS.filter((i) => i !== exclude);
+  return pool[Math.floor(Math.random() * pool.length)] || RANDOM_PLAYLIST_IDEAS[0];
+}
+
 export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSaved }) => {
   const [step, setStep] = useState<'setup' | 'loading' | 'chat'>('setup');
   const [selectedModelId, setSelectedModelId] = useState<string>(getDefaultAiModel().id);
   const [cacheStatuses, setCacheStatuses] = useState<Record<string, AiModelCacheStatus>>({});
-  const [initialPrompt, setInitialPrompt] = useState<string>(
-    'Late-night indie & synth-pop drive, around 20 tracks, high energy with a few deep cuts'
-  );
+  const [initialPrompt, setInitialPrompt] = useState<string>(() => pickRandomIdea());
 
   // Two-phase loading state (0-50% download, 50-100% load)
   const [loadPercent, setLoadPercent] = useState<number>(0);
@@ -255,9 +271,19 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
               </div>
 
               <div className="epod-capacity-card">
-                <label style={{ display: 'block', fontWeight: 700, marginBottom: 6 }}>
-                  2. Describe Your Playlist (Mood, Genre, Era, Energy, Track Count):
-                </label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <label style={{ fontWeight: 700 }}>
+                    2. Describe Your Playlist (Mood, Genre, Era, Energy, Track Count):
+                  </label>
+                  <button
+                    type="button"
+                    className="aqua-btn"
+                    style={{ padding: '2px 8px', fontSize: 11 }}
+                    onClick={() => setInitialPrompt((prev) => pickRandomIdea(prev))}
+                  >
+                    🎲 Random Idea
+                  </button>
+                </div>
                 <textarea
                   className="aqua-input"
                   rows={4}

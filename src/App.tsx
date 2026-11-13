@@ -59,6 +59,7 @@ import {
   subscribeEvent,
 } from './bridge';
 import { PreferencesModal } from './components/PreferencesModal';
+import { AboutCreditsModal } from './components/AboutCreditsModal';
 import { SmartPlaylistModal } from './components/SmartPlaylistModal';
 import { AddDeviceWizardModal } from './components/AddDeviceWizardModal';
 import { DeviceSummaryView } from './components/DeviceSummaryView';
@@ -202,6 +203,7 @@ export const App: React.FC = () => {
 
   // Modals & Drag-and-Drop Playlist state
   const [showPreferences, setShowPreferences] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [showSmartModal, setShowSmartModal] = useState(false);
   const [editingPlaylist, setEditingPlaylist] = useState<PlaylistRow | null>(null);
   const [showNewPlaylistModal, setShowNewPlaylistModal] = useState(false);
@@ -308,7 +310,16 @@ export const App: React.FC = () => {
       }
     });
 
+    const unsubOpenAbout = subscribeEvent<void>('ui:openAbout', () => {
+      setShowAbout(true);
+    });
+    const unsubOpenPrefs = subscribeEvent<void>('ui:openPreferences', () => {
+      setShowPreferences(true);
+    });
+
     return () => {
+      unsubOpenAbout();
+      unsubOpenPrefs();
       unsubLog();
       unsubIdx();
       unsubBatch();
@@ -1114,6 +1125,14 @@ export const App: React.FC = () => {
             title="Open Aqua Preferences & API Connection Testers"
           >
             <Settings size={13} /> Prefs
+          </button>
+
+          <button
+            className="aqua-btn"
+            onClick={() => setShowAbout(true)}
+            title="About RetroTunes (rTunes) & FOSS Credits"
+          >
+            About
           </button>
 
           <button
@@ -3586,6 +3605,8 @@ export const App: React.FC = () => {
       {/* =====================================================================
           MODALS: PREFERENCES, SMART PLAYLIST, ADD DEVICE WIZARD, DIAGNOSTICS
           ===================================================================== */}
+      {showAbout && <AboutCreditsModal onClose={() => setShowAbout(false)} />}
+
       {showPreferences && settings && (
         <PreferencesModal
           settings={settings}

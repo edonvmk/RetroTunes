@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron';
 import path from 'path';
 import http from 'http';
 import fs from 'fs';
@@ -610,6 +610,95 @@ function startHttpRpcFallbackServer(port = 42815) {
   });
 }
 
+function sendUiEvent(channel: string) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send(channel);
+    }
+  }
+}
+
+function setupApplicationMenu() {
+  const isMac = process.platform === 'darwin';
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(isMac
+      ? [
+          {
+            label: 'RetroTunes',
+            submenu: [
+              {
+                label: 'About RetroTunes (rTunes) & Credits',
+                click: () => sendUiEvent('ui:openAbout'),
+              },
+              { type: 'separator' as const },
+              {
+                label: 'Preferences...',
+                accelerator: 'CmdOrCtrl+,',
+                click: () => sendUiEvent('ui:openPreferences'),
+              },
+              { type: 'separator' as const },
+              { role: 'services' as const },
+              { type: 'separator' as const },
+              { role: 'hide' as const },
+              { role: 'hideOthers' as const },
+              { role: 'unhide' as const },
+              { type: 'separator' as const },
+              { role: 'quit' as const },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        ...(!isMac
+          ? [
+              {
+                label: 'Preferences...',
+                accelerator: 'CmdOrCtrl+,',
+                click: () => sendUiEvent('ui:openPreferences'),
+              },
+              { type: 'separator' as const },
+            ]
+          : []),
+        isMac ? { role: 'close' as const } : { role: 'quit' as const },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' as const },
+        { role: 'redo' as const },
+        { type: 'separator' as const },
+        { role: 'cut' as const },
+        { role: 'copy' as const },
+        { role: 'paste' as const },
+        { role: 'selectAll' as const },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' as const },
+        { role: 'forceReload' as const },
+        { role: 'toggleDevTools' as const },
+        { type: 'separator' as const },
+        { role: 'togglefullscreen' as const },
+      ],
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'About RetroTunes (rTunes) & FOSS Credits',
+          click: () => sendUiEvent('ui:openAbout'),
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createMainWindow() {
   const win = new BrowserWindow({
     width: 1360,
@@ -641,6 +730,7 @@ app.whenReady().then(async () => {
   await startMediaServer();
   registerAllHandlers();
   startHttpRpcFallbackServer(42815);
+  setupApplicationMenu();
   createMainWindow();
   startMtpUsbPoller();
   void autoMountSharesOnStartup();

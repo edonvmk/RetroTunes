@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { AppSettings, AuthState, ConnectionTestResult, NetworkShareRow } from '../types';
 import { invokeRpc } from '../bridge';
+import { FossCreditsContent } from './AboutCreditsModal';
 
 interface PreferencesModalProps {
   settings: AppSettings;
@@ -1155,70 +1156,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             </>
           )}
 
-          {tab === 'about' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div className="epod-capacity-card">
-                <h3 style={{ margin: '0 0 6px 0', fontSize: 16 }}>
-                  RetroTunes (rTunes) — Client Code: ePod Suite v1.0.0
-                </h3>
-                <p style={{ margin: 0, fontSize: 11.5, color: '#334155', lineHeight: 1.5 }}>
-                  RetroTunes is a classic late-2000s brushed-metal desktop media player, local library manager, homelab request storefront, and universal portable device synchronization suite.
-                </p>
-              </div>
-
-              <div className="epod-capacity-card">
-                <strong style={{ display: 'block', marginBottom: 8 }}>
-                  Open-Source Libraries & Runtime Credits
-                </strong>
-                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, color: '#334155', lineHeight: 1.65 }}>
-                  <li>
-                    <strong>Electron & Chromium</strong> — Cross-platform desktop application shell (MIT License).
-                  </li>
-                  <li>
-                    <strong>React 19 & TypeScript</strong> — User interface rendering and static type system (MIT / Apache-2.0 License).
-                  </li>
-                  <li>
-                    <strong>better-sqlite3 & SQLite FTS5</strong> — High-performance embedded relational database and Full-Text Search indexing engine (MIT / Public Domain).
-                  </li>
-                  <li>
-                    <strong>music-metadata</strong> — Pure JavaScript ID3v2, Vorbis, FLAC, and MP4/M4A audio tag and cover art parser by Borewit (MIT License).
-                  </li>
-                  <li>
-                    <strong>FFmpeg & FFprobe (ffmpeg-static / ffprobe-static)</strong> — Hardware-accelerated 360p H.264/AAC video transcoding, live MKV/AVI remuxing, and 500×500 baseline JPEG cover art sanitization (LGPL / GPL).
-                  </li>
-                  <li>
-                    <strong>Lucide Icons (lucide-react)</strong> — Clean vector iconography (ISC License).
-                  </li>
-                </ul>
-              </div>
-
-              <div className="epod-capacity-card">
-                <strong style={{ display: 'block', marginBottom: 8 }}>
-                  External Metadata, Lyrics, Popularity & Homelab APIs
-                </strong>
-                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, color: '#334155', lineHeight: 1.65 }}>
-                  <li>
-                    <strong>MusicBrainz & ListenBrainz (MetaBrainz Foundation)</strong> — Artist/Recording MBID resolution, global listen counts, artist-relative median popularity normalization, and two-way Loved track feedback.
-                  </li>
-                  <li>
-                    <strong>LRCLIB (lrclib.net)</strong> — Crowd-sourced synchronized karaoke lyrics (<code>.lrc</code>) API for desktop playback and portable device synchronization.
-                  </li>
-                  <li>
-                    <strong>TVMaze API (tvmaze.com)</strong> — Television series discovery, episode metadata, and automatic show poster artwork hydration (CC BY-SA).
-                  </li>
-                  <li>
-                    <strong>Deezer Public API & IMDb Media Catalog</strong> — Album chart discovery, artist release recommendations, and feature film poster lookup.
-                  </li>
-                  <li>
-                    <strong>Lidarr, Radarr & Sonarr (*arr Suite)</strong> — Automated homelab music, movie, and television PVR request management and live download queue monitoring (GPLv3).
-                  </li>
-                  <li>
-                    <strong>Authentik OIDC / OAuth2 PKCE</strong> — Self-hosted Single Sign-On identity provider integration with OS Keychain credential persistence.
-                  </li>
-                </ul>
-              </div>
-            </div>
-          )}
+          {tab === 'about' && <FossCreditsContent />}
 
           {tab === 'devices' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

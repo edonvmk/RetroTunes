@@ -27,6 +27,7 @@ export interface TrackRow {
   last_played: string | null;
   date_added: string;
   metadata_loaded?: number;
+  exclude_from_smart_playlists?: number;
 }
 
 export interface VideoRow {
@@ -177,7 +178,8 @@ export type SmartField =
   | 'global_listen_count'
   | 'artist_median_listen_count'
   | 'artist_relative_popularity_score'
-  | 'duration';
+  | 'duration'
+  | 'remote_nfs_path';
 
 export type SmartOperator =
   | 'is'
@@ -251,6 +253,38 @@ export interface StorageBreakdown {
   otherBytes: number;
   freeBytes: number;
   mounted: boolean;
+}
+
+export type DeviceCatalogCategory =
+  | 'music'
+  | 'movies'
+  | 'tv'
+  | 'music_videos'
+  | 'audiobooks'
+  | 'books'
+  | 'photos'
+  | 'playlists';
+
+export interface DeviceCatalogItem {
+  devicePath: string;
+  storageId?: string;
+  mediaType: DeviceCatalogCategory;
+  localTrackId?: number | null;
+  localItemId?: number | null;
+  title: string;
+  artist?: string;
+  album?: string;
+  showName?: string;
+  duration?: number;
+  size: number;
+}
+
+export interface DeviceCatalog {
+  version: 1;
+  deviceUuid: string;
+  updatedAt: string;
+  items: DeviceCatalogItem[];
+  playlists: { name: string; devicePath: string; trackCount: number; storageId?: string }[];
 }
 
 export interface DeviceInfo {

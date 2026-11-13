@@ -16,7 +16,8 @@ export type SmartField =
   | 'global_listen_count'
   | 'artist_median_listen_count'
   | 'artist_relative_popularity_score'
-  | 'duration';
+  | 'duration'
+  | 'remote_nfs_path';
 
 export type SmartOperator =
   | 'is'
@@ -61,6 +62,7 @@ const ALLOWED_FIELDS: Record<SmartField, 'text' | 'number'> = {
   artist_median_listen_count: 'number',
   artist_relative_popularity_score: 'number',
   duration: 'number',
+  remote_nfs_path: 'text',
 };
 
 function compileCondition(node: SmartRule | SmartRuleGroup, params: unknown[]): string {
@@ -159,7 +161,8 @@ export function evaluateSmartPlaylist(
   rulesGroup: SmartRuleGroup,
   limitType = 'tracks',
   limitValue: number | null = null,
-  selectionMethod = 'popularity_desc'
+  selectionMethod = 'popularity_desc',
+  smartPlaylistId?: number | string | null
 ): { tracks: TrackRow[]; compiledSql: string } {
   const start = Date.now();
   const db = getDb();
@@ -167,7 +170,13 @@ export function evaluateSmartPlaylist(
   const whereClause = compileCondition(rulesGroup, params);
   const orderBy = getOrderByClause(selectionMethod);
 
-  let sql = `SELECT * FROM tracks WHERE ${whereClause} ORDER BY ${orderBy}`;
+  let exclusionClause = 'COALESCE(exclude_from_smart_playlists, 0) = 0';
+  if (smartPlaylistId !== undefined && smartPlaylistId !== null) {
+    exclusionClause += ' AND id NOT IN (SELECT track_id FROM smart_playlist_exclusions WHERE smart_playlist_id = ?)';
+    params.push(String(smartPlaylistId));
+  }
+
+  let sql = `SELECT * FROM tracks WHERE (${whereClause}) AND ${exclusionClause} ORDER BY ${orderBy}`;
   if (limitType === 'tracks' && limitValue && limitValue > 0) {
     sql += ` LIMIT ${Math.floor(limitValue)}`;
   }
@@ -231,7 +240,8 @@ export function getPlaylistTracks(playlistId: number): TrackRow[] {
         rules,
         playlist.limit_type || 'tracks',
         limitVal,
-        playlist.selection_method || 'popularity_desc'
+        playlist.selection_method || 'popularity_desc',
+        playlist.id
       ).tracks;
     } catch (err) {
       logger.error('SMART_PLAYLIST', `Invalid smart_rules_json for playlist ${playlist.name}`, err);
@@ -285,4 +295,83 @@ export function generateRelativeM3u8(
     lines.push(relPath);
   }
   return lines.join('\n') + '\n';
+}
+
+export interface SmartPlaylistExcludedItem {
+  track: TrackRow;
+  scope: 'playlist' | 'global';
+}
+
+export function ignoreTrackInSmartPlaylist(
+  smartPlaylistId: number | string,
+  trackId: number
+): { ok: boolean } {
+  const db = getDb();
+  db.prepare(
+    'INSERT OR IGNORE INTO smart_playlist_exclusions (smart_playlist_id, track_id) VALUES (?, ?)'
+  ).run(String(smartPlaylistId), trackId);
+  return { ok: true };
+}
+
+export function excludeTrackFromAllSmartPlaylists(
+  trackId: number,
+  excluded = true
+): { ok: boolean } {
+  const db = getDb();
+  db.prepare('UPDATE tracks SET exclude_from_smart_playlists = ? WHERE id = ?').run(
+    excluded ? 1 : 0,
+    trackId
+  );
+  return { ok: true };
+}
+
+export function getSmartPlaylistExclusions(
+  smartPlaylistId: number | string
+): SmartPlaylistExcludedItem[] {
+  const db = getDb();
+  const perPlaylist = db
+    .prepare(
+      `SELECT t.* FROM smart_playlist_exclusions spe
+       JOIN tracks t ON t.id = spe.track_id
+       WHERE spe.smart_playlist_id = ?
+       ORDER BY t.artist COLLATE NOCASE ASC, t.title COLLATE NOCASE ASC`
+    )
+    .all(String(smartPlaylistId)) as TrackRow[];
+
+  const globalExcluded = db
+    .prepare(
+      `SELECT * FROM tracks
+       WHERE COALESCE(exclude_from_smart_playlists, 0) = 1
+       ORDER BY artist COLLATE NOCASE ASC, title COLLATE NOCASE ASC`
+    )
+    .all() as TrackRow[];
+
+  const results: SmartPlaylistExcludedItem[] = [];
+  const seenGlobal = new Set<number>();
+  for (const t of globalExcluded) {
+    seenGlobal.add(t.id);
+    results.push({ track: t, scope: 'global' });
+  }
+  for (const t of perPlaylist) {
+    if (!seenGlobal.has(t.id)) {
+      results.push({ track: t, scope: 'playlist' });
+    }
+  }
+  return results;
+}
+
+export function restoreSmartPlaylistExclusion(
+  smartPlaylistId: number | string,
+  trackId: number,
+  scope: 'playlist' | 'global'
+): { ok: boolean } {
+  const db = getDb();
+  if (scope === 'global') {
+    db.prepare('UPDATE tracks SET exclude_from_smart_playlists = 0 WHERE id = ?').run(trackId);
+  } else {
+    db.prepare(
+      'DELETE FROM smart_playlist_exclusions WHERE smart_playlist_id = ? AND track_id = ?'
+    ).run(String(smartPlaylistId), trackId);
+  }
+  return { ok: true };
 }

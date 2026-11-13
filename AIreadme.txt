@@ -54,13 +54,13 @@ Do **not** duplicate existing handlers. Always reuse or extend the existing chan
 - **Extended Media & Sync:** `books:list`, `audiobooks:list`, `photos:list`, `musicVideos:list`, `media:syncPlexAndAbs`
 - **Indexer:** `indexer:scan`, `indexer:cancel`, `indexer:progress`, `indexer:syncPopularity`, `indexer:recalculateMedians`, `indexer:cleanAllTitles`, `indexer:scanExtended`
 - **Cache:** `cache:stats`, `cache:clear`, `cache:toggleTrack`, `cache:toggleAlbum`, `cache:toggleVideo`, `cache:toggleShow`, `cache:precacheAllPlaylists`, `transcoder:getBinaryStatus`, `transcoder:checkUpdateBinaries`
-- **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`
-- **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`
+- **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`, `playlists:getExclusions`, `playlists:ignoreTrack`, `playlists:excludeTrackGlobally`, `playlists:restoreExclusion`
+- **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`, `devices:getCatalog`, `devices:removeItem`
 - **Shares & Upload:** `shares:list`, `shares:save`, `shares:delete`, `shares:mount`, `shares:unmount`, `shares:autoDetect`, `upload:searchMetadata`, `upload:previewPlan`, `upload:execute`
 - **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `auth:getState`, `auth:login`, `auth:logout`
 
 ### SQLite Schema (`electron/db.ts`)
-Core tables: `tracks`, `tracks_fts` (FTS5), `videos`, `videos_fts` (FTS5), `playlists`, `playlist_tracks`, `playlist_videos`, `devices`, `cache_jobs`, `settings`, `network_shares`, `device_play_state`, `books`, `audiobooks`, `photos`.
+Core tables: `tracks`, `tracks_fts` (FTS5), `videos`, `videos_fts` (FTS5), `playlists`, `playlist_tracks`, `playlist_videos`, `smart_playlist_exclusions`, `devices`, `cache_jobs`, `settings`, `network_shares`, `device_play_state`, `books`, `audiobooks`, `photos`.
 
 ---
 

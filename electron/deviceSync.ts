@@ -32,6 +32,44 @@ export interface MtpStoragePool {
   manifestJson?: string;
 }
 
+export type DeviceCatalogCategory =
+  | 'music'
+  | 'movies'
+  | 'tv'
+  | 'music_videos'
+  | 'audiobooks'
+  | 'books'
+  | 'photos'
+  | 'playlists';
+
+export interface DeviceCatalogItem {
+  devicePath: string;
+  storageId?: string;
+  mediaType: DeviceCatalogCategory;
+  localTrackId?: number | null;
+  localItemId?: number | null;
+  title: string;
+  artist?: string;
+  album?: string;
+  showName?: string;
+  duration?: number;
+  size: number;
+}
+
+export interface DeviceCatalog {
+  version: 1;
+  deviceUuid: string;
+  updatedAt: string;
+  items: DeviceCatalogItem[];
+  playlists: { name: string; devicePath: string; trackCount: number; storageId?: string }[];
+}
+
+function broadcastDeviceCatalogUpdated(uuid: string, catalog: DeviceCatalog) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('devices:catalogUpdated', { uuid, catalog });
+  }
+}
+
 export interface DeviceProfile {
   uuid: string;
   name: string;
@@ -1677,12 +1715,15 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
     return sdId;
   };
 
+  const catalogItems: DeviceCatalogItem[] = [];
+  const catalogPlaylists: DeviceCatalog['playlists'] = [];
+
   const queueIfNeeded = async (
     localFile: string,
     remoteRelPath: string,
     kind: 'video' | 'music' | 'other' = 'other'
-  ) => {
-    if (!isMtp) return;
+  ): Promise<string | undefined> => {
+    if (!isMtp) return undefined;
     try {
       const st = await fsp.stat(localFile);
       const targetStorageId = chooseTargetStorageForItem(kind, st.size);
@@ -1691,11 +1732,12 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         (mtpUploadedLedger[ledgerKey] === st.size || mtpUploadedLedger[remoteRelPath] === st.size) &&
         st.size > 0
       ) {
-        return; // Already present on MTP storage with identical byte size
+        return targetStorageId; // Already present on MTP storage with identical byte size
       }
       pendingMtpUploads.push({ storageId: targetStorageId, localPath: localFile, remotePath: remoteRelPath });
+      return targetStorageId;
     } catch {
-      // ignore
+      return undefined;
     }
   };
 
@@ -2162,15 +2204,28 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         }
       }
 
+      let trackSize = track.file_size || 0;
       try {
         const st = await fsp.stat(localFileForMtp);
+        trackSize = st.size;
         totalAudioBytesSynced += st.size;
       } catch {
         // ignore
       }
 
-      await queueIfNeeded(localFileForMtp, remoteRelAudioPath, 'music');
+      const assignedStorage = await queueIfNeeded(localFileForMtp, remoteRelAudioPath, 'music');
       deviceAudioFileMap.set(track.id, targetAudioPath);
+      catalogItems.push({
+        devicePath: remoteRelAudioPath,
+        storageId: assignedStorage,
+        mediaType: 'music',
+        localTrackId: track.id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        duration: track.duration || 0,
+        size: trackSize,
+      });
       tracksSynced++;
 
       // Cover art 500x500 baseline JPEG
@@ -2276,14 +2331,27 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         await fsp.copyFile(sourceVideoPath, targetVideoPath);
       }
 
+      let vidSize = video.file_size || 0;
       try {
         const st = await fsp.stat(sourceVideoPath);
+        vidSize = st.size;
         totalVideoBytesSynced += st.size;
       } catch {
         // ignore
       }
 
-      await queueIfNeeded(isMtp ? sourceVideoPath : targetVideoPath, remoteRelVideoPath, 'video');
+      const vidStorage = await queueIfNeeded(isMtp ? sourceVideoPath : targetVideoPath, remoteRelVideoPath, 'video');
+      catalogItems.push({
+        devicePath: remoteRelVideoPath,
+        storageId: vidStorage,
+        mediaType: video.type === 'tv' ? 'tv' : video.type === 'music_video' ? 'music_videos' : 'movies',
+        localItemId: video.id,
+        title: video.title,
+        artist: video.artist || undefined,
+        showName: video.show_name || undefined,
+        duration: video.duration || 0,
+        size: vidSize,
+      });
       videosSynced++;
     }
 
@@ -2304,7 +2372,19 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         await downscalePhotoTo480x360(srcPhoto, dstPhoto, settings.ffmpegBinaryPath);
       }
       if (fs.existsSync(dstPhoto)) {
-        await queueIfNeeded(dstPhoto, `/Pictures/${safeAlbum}/${fname}`);
+        const pPath = `/Pictures/${safeAlbum}/${fname}`;
+        const pStorage = await queueIfNeeded(dstPhoto, pPath);
+        let pSize = photo.file_size || 0;
+        try { pSize = (await fsp.stat(dstPhoto)).size; } catch { /* ignore */ }
+        catalogItems.push({
+          devicePath: pPath,
+          storageId: pStorage,
+          mediaType: 'photos',
+          localItemId: photo.id,
+          title: photo.title,
+          album: photo.album_name,
+          size: pSize,
+        });
       }
     }
 
@@ -2320,7 +2400,17 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
       if (!isMtp && !fs.existsSync(dstBook)) {
         await fsp.copyFile(book.remote_nfs_path, dstBook);
       }
-      await queueIfNeeded(isMtp ? book.remote_nfs_path : dstBook, `/Books/${safeAuthor}/${fname}`);
+      const bPath = `/Books/${safeAuthor}/${fname}`;
+      const bStorage = await queueIfNeeded(isMtp ? book.remote_nfs_path : dstBook, bPath);
+      catalogItems.push({
+        devicePath: bPath,
+        storageId: bStorage,
+        mediaType: 'books',
+        localItemId: book.id,
+        title: book.title,
+        artist: book.author,
+        size: book.file_size || 0,
+      });
     }
 
     // 5. Audiobooks: Root/Audiobooks/<Author>/<Book Title>/<Chapters>
@@ -2336,10 +2426,18 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
       if (!isMtp && !fs.existsSync(dstAb)) {
         await fsp.copyFile(ab.remote_nfs_path, dstAb);
       }
-      await queueIfNeeded(
-        isMtp ? ab.remote_nfs_path : dstAb,
-        `/Audiobooks/${safeAuthor}/${safeBook}/${fname}`
-      );
+      const abPath = `/Audiobooks/${safeAuthor}/${safeBook}/${fname}`;
+      const abStorage = await queueIfNeeded(isMtp ? ab.remote_nfs_path : dstAb, abPath);
+      catalogItems.push({
+        devicePath: abPath,
+        storageId: abStorage,
+        mediaType: 'audiobooks',
+        localItemId: ab.id,
+        title: ab.title,
+        artist: ab.author,
+        duration: ab.duration || 0,
+        size: ab.file_size || 0,
+      });
     }
 
     // =========================================================================
@@ -2381,12 +2479,40 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
       const safePlName = pl.name.replace(/[/\\?%*:|"<>]/g, '_');
       const ext = profile.playlistFormat === 'm3u' ? '.m3u' : '.m3u8';
       const localPlFile = path.join(playlistRootOnDevice, `${safePlName}${ext}`);
+      const remotePlPath = `/Playlists/${safePlName}${ext}`;
       await fsp.writeFile(localPlFile, m3u8Text, 'utf8');
-      await queueIfNeeded(localPlFile, `/Playlists/${safePlName}${ext}`, 'music');
+      const plStorage = await queueIfNeeded(localPlFile, remotePlPath, 'music');
+      catalogPlaylists.push({
+        name: pl.name,
+        devicePath: remotePlPath,
+        trackCount: plTracks.length,
+        storageId: plStorage,
+      });
 
       const hash = crypto.createHash('md5').update(m3u8Text).digest('hex');
       db.prepare('UPDATE playlists SET last_synced_hash = ? WHERE id = ?').run(hash, pl.id);
     }
+
+    // Write .retrotunes_catalog.json manifest alongside .retrotunes_device.json
+    const deviceCatalog: DeviceCatalog = {
+      version: 1,
+      deviceUuid: uuid,
+      updatedAt: new Date().toISOString(),
+      items: catalogItems,
+      playlists: catalogPlaylists,
+    };
+    const catalogJson = JSON.stringify(deviceCatalog, null, 2);
+    const catalogLocalPath = path.join(localRootPath, '.retrotunes_catalog.json');
+    await fsp.writeFile(catalogLocalPath, catalogJson, 'utf8');
+    await saveCachedDeviceCatalog(uuid, deviceCatalog);
+    if (isMtp) {
+      pendingMtpUploads.push({
+        storageId: mtpStorageId,
+        localPath: catalogLocalPath,
+        remotePath: '/.retrotunes_catalog.json',
+      });
+    }
+    broadcastDeviceCatalogUpdated(uuid, deviceCatalog);
 
     // =========================================================================
     // PHASE 4: MTP BATCH TRANSFER OR UMS DOT_CLEAN
@@ -2539,4 +2665,340 @@ export async function ejectDevice(uuid: string): Promise<{ ok: boolean; message:
     ok: true,
     message: `"${row.name}" is already unmounted and safe to disconnect.`,
   };
+}
+
+function getCatalogCachePath(uuid: string): string {
+  const cacheDir = getSettings().localCachePath || process.cwd();
+  fs.mkdirSync(cacheDir, { recursive: true });
+  return path.join(cacheDir, `.catalog_${uuid}.json`);
+}
+
+async function saveCachedDeviceCatalog(uuid: string, catalog: DeviceCatalog): Promise<void> {
+  try {
+    await fsp.writeFile(getCatalogCachePath(uuid), JSON.stringify(catalog, null, 2), 'utf8');
+  } catch {
+    // ignore cache write errors
+  }
+}
+
+function emptyCatalog(uuid: string): DeviceCatalog {
+  return {
+    version: 1,
+    deviceUuid: uuid,
+    updatedAt: new Date().toISOString(),
+    items: [],
+    playlists: [],
+  };
+}
+
+function getMtpDefaultStorageId(mountPath: string): string {
+  if (!mountPath.startsWith('mtp://')) return 'sFFFF0001';
+  const parts = mountPath.replace('mtp://', '').split('/');
+  return parts[1] || 'sFFFF0001';
+}
+
+function inferCategoryFromDevicePath(relPosix: string): DeviceCatalogCategory | null {
+  const lower = relPosix.toLowerCase();
+  if (lower.startsWith('/music/')) return 'music';
+  if (lower.startsWith('/videos/tv shows/')) return 'tv';
+  if (lower.startsWith('/videos/music videos/')) return 'music_videos';
+  if (lower.startsWith('/videos/')) return 'movies';
+  if (lower.startsWith('/audiobooks/')) return 'audiobooks';
+  if (lower.startsWith('/books/')) return 'books';
+  if (lower.startsWith('/pictures/')) return 'photos';
+  if (lower.startsWith('/playlists/')) return 'playlists';
+  return null;
+}
+
+const reconcilingCatalogs = new Set<string>();
+
+export async function reconcileDeviceCatalog(uuid: string): Promise<DeviceCatalog | null> {
+  if (reconcilingCatalogs.has(uuid)) return null;
+  reconcilingCatalogs.add(uuid);
+  try {
+    const db = getDb();
+    const row = db.prepare('SELECT * FROM devices WHERE uuid = ?').get(uuid) as DeviceRow | undefined;
+    if (!row) return null;
+
+    const isMtp = row.transport_mode === 'mtp' || row.mount_path.startsWith('mtp://');
+    let current = emptyCatalog(uuid);
+    try {
+      const cachePath = getCatalogCachePath(uuid);
+      if (fs.existsSync(cachePath)) {
+        current = JSON.parse(await fsp.readFile(cachePath, 'utf8')) as DeviceCatalog;
+      }
+    } catch {
+      // ignore
+    }
+
+    if (!isMtp && fs.existsSync(row.mount_path)) {
+      const deviceManifestPath = path.join(row.mount_path, '.retrotunes_catalog.json');
+      if (fs.existsSync(deviceManifestPath)) {
+        try {
+          current = JSON.parse(await fsp.readFile(deviceManifestPath, 'utf8')) as DeviceCatalog;
+        } catch {
+          // ignore
+        }
+      }
+
+      const existingByPath = new Map(current.items.map((it) => [it.devicePath, it]));
+      const existingPlByPath = new Map(current.playlists.map((pl) => [pl.devicePath, pl]));
+      const scannedItems: DeviceCatalogItem[] = [];
+      const scannedPlaylists: DeviceCatalog['playlists'] = [];
+
+      const scanRoots = [
+        'Music',
+        'Videos',
+        'Audiobooks',
+        'Books',
+        'Pictures',
+        'Playlists',
+      ];
+
+      const walkDir = async (dir: string) => {
+        await yieldToEventLoop();
+        let entries: fs.Dirent[];
+        try {
+          entries = await fsp.readdir(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            await walkDir(full);
+          } else if (entry.isFile()) {
+            const relPosix = '/' + path.relative(row.mount_path, full).split(path.sep).join('/');
+            const cat = inferCategoryFromDevicePath(relPosix);
+            if (!cat) continue;
+            if (cat === 'playlists') {
+              const lower = entry.name.toLowerCase();
+              if (!lower.endsWith('.m3u8') && !lower.endsWith('.m3u')) continue;
+              const prevPl = existingPlByPath.get(relPosix);
+              if (prevPl) {
+                scannedPlaylists.push(prevPl);
+              } else {
+                let trackCount = 0;
+                try {
+                  const txt = await fsp.readFile(full, 'utf8');
+                  trackCount = txt.split(/\r?\n/).filter((l) => l.trim() && !l.startsWith('#')).length;
+                } catch {
+                  // ignore
+                }
+                scannedPlaylists.push({
+                  name: entry.name.replace(/\.(m3u8|m3u)$/i, ''),
+                  devicePath: relPosix,
+                  trackCount,
+                });
+              }
+            } else {
+              if (entry.name.toLowerCase() === 'cover.jpg' || entry.name.toLowerCase().endsWith('.lrc')) {
+                continue;
+              }
+              const prev = existingByPath.get(relPosix);
+              if (prev) {
+                scannedItems.push(prev);
+              } else {
+                let size = 0;
+                try {
+                  size = (await fsp.stat(full)).size;
+                } catch {
+                  // ignore
+                }
+                const segs = relPosix.split('/').filter(Boolean);
+                scannedItems.push({
+                  devicePath: relPosix,
+                  mediaType: cat,
+                  title: entry.name.replace(/\.[^.]+$/, ''),
+                  artist: segs.length >= 3 ? segs[1] : undefined,
+                  album: segs.length >= 4 ? segs[2] : undefined,
+                  size,
+                });
+              }
+            }
+          }
+        }
+      };
+
+      for (const root of scanRoots) {
+        const fullRoot = path.join(row.mount_path, root);
+        if (fs.existsSync(fullRoot)) {
+          await walkDir(fullRoot);
+        }
+      }
+
+      const changed =
+        scannedItems.length !== current.items.length ||
+        scannedPlaylists.length !== current.playlists.length;
+
+      const updated: DeviceCatalog = {
+        version: 1,
+        deviceUuid: uuid,
+        updatedAt: new Date().toISOString(),
+        items: scannedItems,
+        playlists: scannedPlaylists,
+      };
+      await saveCachedDeviceCatalog(uuid, updated);
+      try {
+        await fsp.writeFile(deviceManifestPath, JSON.stringify(updated, null, 2), 'utf8');
+      } catch {
+        // ignore read-only mount
+      }
+      if (changed) {
+        broadcastDeviceCatalogUpdated(uuid, updated);
+      }
+      return updated;
+    }
+
+    if (isMtp && !ejectedMtpUuids.has(uuid)) {
+      const storageId = getMtpDefaultStorageId(row.mount_path);
+      const tmpDest = path.join(getSettings().localCachePath || process.cwd(), `.tmp_catalog_${uuid}.json`);
+      try {
+        const res = await runMtpCommand(['get', storageId, '/.retrotunes_catalog.json', tmpDest], 12000);
+        if (res.ok && fs.existsSync(tmpDest)) {
+          const parsed = JSON.parse(await fsp.readFile(tmpDest, 'utf8')) as DeviceCatalog;
+          await saveCachedDeviceCatalog(uuid, parsed);
+          if (parsed.items.length !== current.items.length || parsed.playlists.length !== current.playlists.length) {
+            broadcastDeviceCatalogUpdated(uuid, parsed);
+          }
+          try { fs.unlinkSync(tmpDest); } catch { /* ignore */ }
+          return parsed;
+        }
+      } catch {
+        // ignore if manifest not yet present on MTP
+      }
+    }
+
+    return current;
+  } finally {
+    reconcilingCatalogs.delete(uuid);
+  }
+}
+
+export async function getDeviceCatalog(uuid: string): Promise<DeviceCatalog> {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM devices WHERE uuid = ?').get(uuid) as DeviceRow | undefined;
+  let catalog = emptyCatalog(uuid);
+
+  if (row && !(row.transport_mode === 'mtp' || row.mount_path.startsWith('mtp://'))) {
+    const devManifest = path.join(row.mount_path, '.retrotunes_catalog.json');
+    if (fs.existsSync(devManifest)) {
+      try {
+        catalog = JSON.parse(await fsp.readFile(devManifest, 'utf8')) as DeviceCatalog;
+        await saveCachedDeviceCatalog(uuid, catalog);
+      } catch {
+        // fallback to cache
+      }
+    }
+  }
+
+  if (catalog.items.length === 0 && catalog.playlists.length === 0) {
+    try {
+      const cachePath = getCatalogCachePath(uuid);
+      if (fs.existsSync(cachePath)) {
+        catalog = JSON.parse(await fsp.readFile(cachePath, 'utf8')) as DeviceCatalog;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Trigger non-blocking background reconcile
+  setTimeout(() => {
+    void reconcileDeviceCatalog(uuid);
+  }, 50);
+
+  return catalog;
+}
+
+export async function removeDeviceCatalogItem(
+  uuid: string,
+  devicePath: string,
+  storageId?: string
+): Promise<DeviceCatalog> {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM devices WHERE uuid = ?').get(uuid) as DeviceRow | undefined;
+  if (!row) throw new Error('Device not found');
+
+  const isMtp = row.transport_mode === 'mtp' || row.mount_path.startsWith('mtp://');
+  if (isMtp) {
+    const targetStorage = storageId || getMtpDefaultStorageId(row.mount_path);
+    await runMtpCommand(['rm', targetStorage, devicePath], 15000);
+  } else {
+    const localTarget = path.join(row.mount_path, ...devicePath.replace(/^\/+/, '').split('/'));
+    if (fs.existsSync(localTarget)) {
+      await fsp.rm(localTarget, { force: true });
+    }
+  }
+
+  const catalog = await getDeviceCatalog(uuid);
+  const updated: DeviceCatalog = {
+    version: 1,
+    deviceUuid: uuid,
+    updatedAt: new Date().toISOString(),
+    items: catalog.items.filter((it) => it.devicePath !== devicePath),
+    playlists: catalog.playlists.filter((pl) => pl.devicePath !== devicePath),
+  };
+
+  await saveCachedDeviceCatalog(uuid, updated);
+  if (isMtp) {
+    const tmpCatalog = path.join(getSettings().localCachePath || process.cwd(), `.tmp_put_catalog_${uuid}.json`);
+    await fsp.writeFile(tmpCatalog, JSON.stringify(updated, null, 2), 'utf8');
+    await runMtpCommand(['put', getMtpDefaultStorageId(row.mount_path), tmpCatalog, '/.retrotunes_catalog.json'], 15000);
+    try { fs.unlinkSync(tmpCatalog); } catch { /* ignore */ }
+  } else if (fs.existsSync(row.mount_path)) {
+    await fsp.writeFile(path.join(row.mount_path, '.retrotunes_catalog.json'), JSON.stringify(updated, null, 2), 'utf8');
+  }
+
+  broadcastDeviceCatalogUpdated(uuid, updated);
+  logger.info('DEVICE_SYNC', `Removed ${devicePath} from device "${row.name}" (master library untouched).`);
+  return updated;
+}
+
+export async function reexportSyncedPlaylistM3u8(playlistId: number): Promise<void> {
+  const db = getDb();
+  const pl = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as PlaylistRow | undefined;
+  if (!pl) return;
+
+  const devices = db.prepare('SELECT * FROM devices').all() as DeviceRow[];
+  const plTracks = getPlaylistTracks(playlistId);
+  const safePlName = pl.name.replace(/[/\\?%*:|"<>]/g, '_');
+
+  for (const dev of devices) {
+    let profile: DeviceProfile;
+    try {
+      profile = JSON.parse(dev.profile_json) as DeviceProfile;
+    } catch {
+      continue;
+    }
+    if (!profile.syncAllMusic && !(profile.syncPlaylistIds || []).includes(playlistId)) {
+      continue;
+    }
+
+    const isMtp = dev.transport_mode === 'mtp' || dev.mount_path.startsWith('mtp://');
+    const ext = profile.playlistFormat === 'm3u' ? '.m3u' : '.m3u8';
+    const remotePlPath = `/Playlists/${safePlName}${ext}`;
+
+    // Build track path map from cached catalog if available
+    const catalog = await getDeviceCatalog(dev.uuid);
+    const trackMap = new Map<number, string>();
+    for (const item of catalog.items) {
+      if (item.mediaType === 'music' && item.localTrackId) {
+        trackMap.set(item.localTrackId, item.devicePath);
+      }
+    }
+
+    const m3u8Text = generateRelativeM3u8(plTracks, trackMap, '/Playlists');
+    if (!isMtp && fs.existsSync(dev.mount_path)) {
+      const playlistDir = path.join(dev.mount_path, profile.playlistSubdir || 'Playlists');
+      await fsp.mkdir(playlistDir, { recursive: true });
+      await fsp.writeFile(path.join(playlistDir, `${safePlName}${ext}`), m3u8Text, 'utf8');
+    } else if (isMtp && !ejectedMtpUuids.has(dev.uuid) && m3u8Text.trim().length > 0) {
+      const tmpPl = path.join(getSettings().localCachePath || process.cwd(), `.tmp_pl_${playlistId}${ext}`);
+      await fsp.writeFile(tmpPl, m3u8Text, 'utf8');
+      await runMtpCommand(['put', getMtpDefaultStorageId(dev.mount_path), tmpPl, remotePlPath], 15000);
+      try { fs.unlinkSync(tmpPl); } catch { /* ignore */ }
+    }
+  }
 }

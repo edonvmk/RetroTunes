@@ -43,6 +43,10 @@ import {
   evaluateSmartPlaylist,
   getPlaylistTracks,
   getPlaylistVideos,
+  ignoreTrackInSmartPlaylist,
+  excludeTrackFromAllSmartPlaylists,
+  getSmartPlaylistExclusions,
+  restoreSmartPlaylistExclusion,
   SmartRuleGroup,
 } from './smartPlaylists';
 import {
@@ -58,6 +62,9 @@ import {
   ejectDevice,
   migrateDeviceToMtp,
   startMtpUsbPoller,
+  getDeviceCatalog,
+  removeDeviceCatalogItem,
+  reexportSyncedPlaylistM3u8,
   DeviceProfile,
 } from './deviceSync';
 import {
@@ -429,12 +436,41 @@ function registerAllHandlers() {
   });
   registerChannel('playlists:removeTrack', (playlistId: number, trackId: number) => {
     const db = getDb();
-    db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(
-      playlistId,
-      trackId
-    );
+    const compactTx = db.transaction(() => {
+      db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(
+        playlistId,
+        trackId
+      );
+      const remaining = db
+        .prepare(
+          'SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC, track_id ASC'
+        )
+        .all(playlistId) as { track_id: number }[];
+      const updatePos = db.prepare(
+        'UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?'
+      );
+      remaining.forEach((row, idx) => {
+        updatePos.run(idx, playlistId, row.track_id);
+      });
+    });
+    compactTx();
+    void reexportSyncedPlaylistM3u8(playlistId);
     return { ok: true };
   });
+  registerChannel('playlists:getExclusions', (playlistId: number | string) =>
+    getSmartPlaylistExclusions(playlistId)
+  );
+  registerChannel('playlists:ignoreTrack', (playlistId: number | string, trackId: number) =>
+    ignoreTrackInSmartPlaylist(playlistId, trackId)
+  );
+  registerChannel('playlists:excludeTrackGlobally', (trackId: number) =>
+    excludeTrackFromAllSmartPlaylists(trackId, true)
+  );
+  registerChannel(
+    'playlists:restoreExclusion',
+    (playlistId: number | string, trackId: number, scope: 'playlist' | 'global') =>
+      restoreSmartPlaylistExclusion(playlistId, trackId, scope)
+  );
   registerChannel('playlists:addVideo', (playlistId: number, videoId: number) => {
     const db = getDb();
     const pl = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
@@ -505,6 +541,10 @@ function registerAllHandlers() {
   );
   registerChannel('devices:sync', (uuid: string) => syncDevice(uuid));
   registerChannel('devices:delete', (uuid: string) => deleteRegisteredDevice(uuid));
+  registerChannel('devices:getCatalog', (uuid: string) => getDeviceCatalog(uuid));
+  registerChannel('devices:removeItem', (uuid: string, devicePath: string, storageId?: string) =>
+    removeDeviceCatalogItem(uuid, devicePath, storageId)
+  );
   registerChannel('devices:cancelSync', () => {
     cancelDeviceSync();
     return { ok: true };

@@ -33,6 +33,7 @@ const FIELD_OPTIONS: { value: SmartField; label: string; isNumber: boolean }[] =
   { value: 'year', label: 'Year', isNumber: true },
   { value: 'bitrate', label: 'Bitrate (kbps)', isNumber: true },
   { value: 'format', label: 'Format (FLAC, MP3, AAC...)', isNumber: false },
+  { value: 'remote_nfs_path', label: 'File Path', isNumber: false },
   { value: 'play_count', label: 'Play Count', isNumber: true },
   { value: 'duration', label: 'Duration (seconds)', isNumber: true },
 ];

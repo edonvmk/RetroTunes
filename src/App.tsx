@@ -43,6 +43,9 @@ import {
   AuthState,
   BookRow,
   CacheStats,
+  DeviceCatalog,
+  DeviceCatalogCategory,
+  DeviceCatalogItem,
   DeviceInfo,
   IndexProgress,
   LogEntry,
@@ -79,7 +82,7 @@ type NavSelection =
   | { kind: 'cache' }
   | { kind: 'store' }
   | { kind: 'downloads' }
-  | { kind: 'device'; uuid: string }
+  | { kind: 'device'; uuid: string; category?: DeviceCatalogCategory }
   | { kind: 'playlist'; id: number };
 
 export interface TableColumnConfig {
@@ -213,6 +216,25 @@ export const App: React.FC = () => {
   const [dragOverPlaylistId, setDragOverPlaylistId] = useState<number | null>(null);
   const [dragOverDeviceUuid, setDragOverDeviceUuid] = useState<string | null>(null);
   const [dragOverView, setDragOverView] = useState<'tv' | 'movies' | null>(null);
+  const [expandedDevices, setExpandedDevices] = useState<Record<string, boolean>>({});
+  const [deviceCatalogs, setDeviceCatalogs] = useState<Record<string, DeviceCatalog>>({});
+  const [selectedTrackIds, setSelectedTrackIds] = useState<number[]>([]);
+  const [hoveredTrackId, setHoveredTrackId] = useState<number | null>(null);
+  const [smartExclusions, setSmartExclusions] = useState<
+    { track: TrackRow; scope: 'playlist' | 'global' }[]
+  >([]);
+  const [showIgnoredModal, setShowIgnoredModal] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    kind: 'playlist_track' | 'smart_track' | 'device_item';
+    track?: TrackRow;
+    playlistId?: number;
+    deviceUuid?: string;
+    devicePath?: string;
+    storageId?: string;
+    title?: string;
+  } | null>(null);
   const [toastBanner, setToastBanner] = useState<string | null>(null);
   const [showAddDeviceWizard, setShowAddDeviceWizard] = useState(false);
   const [showUploadWizard, setShowUploadWizard] = useState(false);
@@ -307,6 +329,12 @@ export const App: React.FC = () => {
     const unsubDevChanged = subscribeEvent('devices:changed', () => {
       void invokeRpc<DeviceInfo[]>('devices:list').then(setDevices);
     });
+    const unsubCatalogUpdated = subscribeEvent<{ uuid: string; catalog: DeviceCatalog }>(
+      'devices:catalogUpdated',
+      ({ uuid, catalog }) => {
+        setDeviceCatalogs((prev) => ({ ...prev, [uuid]: catalog }));
+      }
+    );
     const unsubMtpLock = subscribeEvent<string | null>('devices:mtpLockWarning', (msg) => {
       if (msg) {
         setToastBanner(msg);
@@ -339,9 +367,77 @@ export const App: React.FC = () => {
       unsubSync();
       unsubAuth();
       unsubDevChanged();
+      unsubCatalogUpdated();
       unsubMtpLock();
     };
   }, []);
+
+  // Load device catalogs for connected devices
+  useEffect(() => {
+    for (const dev of devices) {
+      const connected = Boolean(dev.storage?.mounted || dev.mtp_connected);
+      if (connected && !deviceCatalogs[dev.uuid]) {
+        void invokeRpc<DeviceCatalog>('devices:getCatalog', dev.uuid)
+          .then((cat) => setDeviceCatalogs((prev) => ({ ...prev, [dev.uuid]: cat })))
+          .catch(() => {});
+      }
+    }
+  }, [devices]);
+
+  // Load smart playlist exclusions when viewing a smart playlist
+  useEffect(() => {
+    setSelectedTrackIds([]);
+    if (nav.kind === 'playlist') {
+      const pl = playlists.find((p) => p.id === nav.id);
+      if (pl?.is_smart) {
+        void invokeRpc<{ track: TrackRow; scope: 'playlist' | 'global' }[]>(
+          'playlists:getExclusions',
+          pl.id
+        )
+          .then(setSmartExclusions)
+          .catch(() => setSmartExclusions([]));
+        return;
+      }
+    }
+    setSmartExclusions([]);
+  }, [nav, playlists]);
+
+  // Dismiss context menu on outside click or Escape, and support Delete/Backspace in manual playlists
+  useEffect(() => {
+    const closeMenu = () => setContextMenu(null);
+    const onKeyDown = async (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        return;
+      }
+      if (
+        (e.key === 'Delete' || e.key === 'Backspace') &&
+        nav.kind === 'playlist' &&
+        selectedTrackIds.length > 0
+      ) {
+        const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+        const pl = playlists.find((p) => p.id === nav.id);
+        if (!pl || pl.is_smart) return;
+        e.preventDefault();
+        for (const tid of selectedTrackIds) {
+          await invokeRpc('playlists:removeTrack', pl.id, tid);
+        }
+        setSelectedTrackIds([]);
+        const trks = await invokeRpc<TrackRow[]>('playlists:getTracks', pl.id);
+        setPlaylistTracks(trks);
+        const updatedPls = await invokeRpc<PlaylistRow[]>('playlists:list');
+        setPlaylists(updatedPls);
+        showToast(`Removed ${selectedTrackIds.length} track(s) from "${pl.name}".`);
+      }
+    };
+    window.addEventListener('click', closeMenu);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('click', closeMenu);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [nav, selectedTrackIds, playlists]);
 
   // Poll *arr live queue periodically
   useEffect(() => {
@@ -1418,88 +1514,171 @@ export const App: React.FC = () => {
               }
 
               return visibleDevices.map((dev) => {
-                const isSelected = nav.kind === 'device' && nav.uuid === dev.uuid;
+                const isSelected = nav.kind === 'device' && nav.uuid === dev.uuid && !nav.category;
                 const connected = isDevConnected(dev);
                 const isDragOver = dragOverDeviceUuid === dev.uuid;
+                const isExpanded = Boolean(expandedDevices[dev.uuid]);
+                const catalog = deviceCatalogs[dev.uuid];
+                const subCategories: {
+                  key: DeviceCatalogCategory;
+                  label: string;
+                  count: number;
+                }[] = catalog
+                  ? (
+                      [
+                        { key: 'music', label: 'Music', count: catalog.items.filter((i) => i.mediaType === 'music').length },
+                        { key: 'movies', label: 'Movies', count: catalog.items.filter((i) => i.mediaType === 'movies').length },
+                        { key: 'tv', label: 'TV Shows', count: catalog.items.filter((i) => i.mediaType === 'tv').length },
+                        { key: 'music_videos', label: 'Music Videos', count: catalog.items.filter((i) => i.mediaType === 'music_videos').length },
+                        { key: 'audiobooks', label: 'Audiobooks', count: catalog.items.filter((i) => i.mediaType === 'audiobooks').length },
+                        { key: 'books', label: 'Books', count: catalog.items.filter((i) => i.mediaType === 'books').length },
+                        { key: 'photos', label: 'Photos', count: catalog.items.filter((i) => i.mediaType === 'photos').length },
+                        { key: 'playlists', label: 'Playlists', count: catalog.playlists.length },
+                      ] as { key: DeviceCatalogCategory; label: string; count: number }[]
+                    ).filter((c) => c.count > 0)
+                  : [];
+
                 return (
-                  <div
-                    key={dev.uuid}
-                    className={`source-item ${isSelected ? 'selected' : ''}`}
-                    style={{
-                      ...(!connected ? { opacity: 0.72 } : {}),
-                      ...(isDragOver
-                        ? {
-                            outline: '2px solid #2563eb',
-                            background: isSelected ? undefined : '#dbeafe',
-                          }
-                        : {}),
-                    }}
-                    onClick={() => setNav({ kind: 'device', uuid: dev.uuid })}
-                    onDragEnter={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      e.dataTransfer.dropEffect = 'copy';
-                      setDragOverDeviceUuid(dev.uuid);
-                    }}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      e.dataTransfer.dropEffect = 'copy';
-                      if (dragOverDeviceUuid !== dev.uuid) {
-                        setDragOverDeviceUuid(dev.uuid);
-                      }
-                    }}
-                    onDragLeave={(e) => {
-                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                        setDragOverDeviceUuid(null);
-                      }
-                    }}
-                    onDrop={(e) => void handleDropOnDevice(dev, e)}
-                  >
+                  <React.Fragment key={dev.uuid}>
                     <div
-                      className="source-item-left"
+                      className={`source-item ${isSelected ? 'selected' : ''}`}
                       style={{
-                        minWidth: 0,
-                        flex: 1,
-                        pointerEvents: isDragOver ? 'none' : undefined,
+                        ...(!connected ? { opacity: 0.72 } : {}),
+                        ...(isDragOver
+                          ? {
+                              outline: '2px solid #2563eb',
+                              background: isSelected ? undefined : '#dbeafe',
+                            }
+                          : {}),
                       }}
+                      onClick={() => setNav({ kind: 'device', uuid: dev.uuid })}
+                      onDragEnter={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.dataTransfer.dropEffect = 'copy';
+                        setDragOverDeviceUuid(dev.uuid);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.dataTransfer.dropEffect = 'copy';
+                        if (dragOverDeviceUuid !== dev.uuid) {
+                          setDragOverDeviceUuid(dev.uuid);
+                        }
+                      }}
+                      onDragLeave={(e) => {
+                        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                          setDragOverDeviceUuid(null);
+                        }
+                      }}
+                      onDrop={(e) => void handleDropOnDevice(dev, e)}
                     >
-                      <Usb
-                        size={14}
-                        color={isSelected ? '#fff' : connected ? '#0284c7' : '#94a3b8'}
-                      />
-                      <span className="source-item-label">{dev.name}</span>
-                      {!connected && (
-                        <span
+                      <div
+                        className="source-item-left"
+                        style={{
+                          minWidth: 0,
+                          flex: 1,
+                          pointerEvents: isDragOver ? 'none' : undefined,
+                        }}
+                      >
+                        <button
+                          type="button"
+                          title={isExpanded ? 'Collapse device contents' : 'Expand device contents'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const nextExpanded = !isExpanded;
+                            setExpandedDevices((prev) => ({ ...prev, [dev.uuid]: nextExpanded }));
+                            if (nextExpanded) {
+                              void invokeRpc<DeviceCatalog>('devices:getCatalog', dev.uuid)
+                                .then((cat) =>
+                                  setDeviceCatalogs((prev) => ({ ...prev, [dev.uuid]: cat }))
+                                )
+                                .catch(() => {});
+                            }
+                          }}
                           style={{
-                            fontSize: 9,
-                            fontWeight: 600,
-                            padding: '1px 5px',
-                            borderRadius: 4,
-                            background: isSelected ? 'rgba(255,255,255,0.2)' : '#e2e8f0',
-                            color: isSelected ? '#fff' : '#475569',
-                            whiteSpace: 'nowrap',
+                            border: 'none',
+                            background: 'transparent',
+                            padding: '0 2px',
+                            cursor: 'pointer',
+                            color: isSelected ? '#fff' : '#64748b',
+                            fontSize: 11,
+                            lineHeight: 1,
                             flexShrink: 0,
                           }}
                         >
-                          Not Connected
-                        </span>
+                          {isExpanded ? '▾' : '▸'}
+                        </button>
+                        <Usb
+                          size={14}
+                          color={isSelected ? '#fff' : connected ? '#0284c7' : '#94a3b8'}
+                        />
+                        <span className="source-item-label">{dev.name}</span>
+                        {!connected && (
+                          <span
+                            style={{
+                              fontSize: 9,
+                              fontWeight: 600,
+                              padding: '1px 5px',
+                              borderRadius: 4,
+                              background: isSelected ? 'rgba(255,255,255,0.2)' : '#e2e8f0',
+                              color: isSelected ? '#fff' : '#475569',
+                              whiteSpace: 'nowrap',
+                              flexShrink: 0,
+                            }}
+                          >
+                            Not Connected
+                          </span>
+                        )}
+                      </div>
+                      {connected && (
+                        <button
+                          className="eject-mini-btn"
+                          title="Safely Eject Device"
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            await invokeRpc('devices:eject', dev.uuid);
+                            await refreshAllData();
+                          }}
+                        >
+                          ⏏
+                        </button>
                       )}
                     </div>
-                    {connected && (
-                      <button
-                        className="eject-mini-btn"
-                        title="Safely Eject Device"
-                        onClick={async (e) => {
-                          e.stopPropagation();
-                          await invokeRpc('devices:eject', dev.uuid);
-                          await refreshAllData();
-                        }}
-                      >
-                        ⏏
-                      </button>
-                    )}
-                  </div>
+                    {isExpanded &&
+                      subCategories.map((cat) => {
+                        const isCatSelected =
+                          nav.kind === 'device' &&
+                          nav.uuid === dev.uuid &&
+                          nav.category === cat.key;
+                        return (
+                          <div
+                            key={`${dev.uuid}:${cat.key}`}
+                            className={`source-item ${isCatSelected ? 'selected' : ''}`}
+                            style={{ paddingLeft: 28, fontSize: 11.5 }}
+                            onClick={() =>
+                              setNav({ kind: 'device', uuid: dev.uuid, category: cat.key })
+                            }
+                          >
+                            <div className="source-item-left" style={{ minWidth: 0, flex: 1 }}>
+                              <span className="source-item-label">{cat.label}</span>
+                            </div>
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '0 6px',
+                                borderRadius: 9,
+                                background: isCatSelected ? 'rgba(255,255,255,0.25)' : '#d5dde9',
+                                color: isCatSelected ? '#fff' : '#334155',
+                              }}
+                            >
+                              {cat.count}
+                            </span>
+                          </div>
+                        );
+                      })}
+                  </React.Fragment>
                 );
               });
             })()}
@@ -1661,16 +1840,31 @@ export const App: React.FC = () => {
                             {pl.is_smart ? 'Smart' : pl.media_type || 'music'}
                           </span>
                           {pl.is_smart === 1 && (
-                            <button
-                              className="aqua-btn"
-                              style={{ padding: '1px 8px' }}
-                              onClick={() => {
-                                setEditingPlaylist(pl);
-                                setShowSmartModal(true);
-                              }}
-                            >
-                              <Sparkles size={11} /> Edit Smart Rules
-                            </button>
+                            <>
+                              <button
+                                className="aqua-btn"
+                                style={{ padding: '1px 8px' }}
+                                onClick={() => {
+                                  setEditingPlaylist(pl);
+                                  setShowSmartModal(true);
+                                }}
+                              >
+                                <Sparkles size={11} /> Edit Smart Rules
+                              </button>
+                              <button
+                                className="aqua-btn"
+                                style={{
+                                  padding: '1px 9px',
+                                  borderRadius: 10,
+                                  fontWeight: 700,
+                                  color: smartExclusions.length > 0 ? '#b45309' : '#475569',
+                                }}
+                                onClick={() => setShowIgnoredModal(true)}
+                                title="View and restore ignored/excluded tracks in this Smart Playlist"
+                              >
+                                Ignored ({smartExclusions.length})
+                              </button>
+                            </>
                           )}
                           <button
                             className="aqua-btn"
@@ -2114,12 +2308,45 @@ export const App: React.FC = () => {
                         <>
                           {filteredTracks.slice(0, visibleTrackLimit).map((track, idx) => {
                             const isCurrent = currentTrack?.id === track.id;
+                            const isSelectedRow = selectedTrackIds.includes(track.id);
+                            const activePlaylist =
+                              nav.kind === 'playlist'
+                                ? playlists.find((p) => p.id === nav.id)
+                                : undefined;
                             const visibleCols = tableColumns.filter((c) => c.visible);
                             return (
                               <tr
                                 key={track.id}
-                                className={isCurrent ? 'active-row' : ''}
+                                className={isCurrent || isSelectedRow ? 'active-row' : ''}
                                 draggable
+                                onMouseEnter={() => setHoveredTrackId(track.id)}
+                                onMouseLeave={() =>
+                                  setHoveredTrackId((prev) => (prev === track.id ? null : prev))
+                                }
+                                onClick={(e) => {
+                                  if (e.ctrlKey || e.metaKey) {
+                                    setSelectedTrackIds((prev) =>
+                                      prev.includes(track.id)
+                                        ? prev.filter((id) => id !== track.id)
+                                        : [...prev, track.id]
+                                    );
+                                  } else {
+                                    setSelectedTrackIds([track.id]);
+                                  }
+                                }}
+                                onContextMenu={(e) => {
+                                  if (!activePlaylist) return;
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setSelectedTrackIds([track.id]);
+                                  setContextMenu({
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    kind: activePlaylist.is_smart ? 'smart_track' : 'playlist_track',
+                                    track,
+                                    playlistId: activePlaylist.id,
+                                  });
+                                }}
                                 onDragStart={(e) => {
                                   const payload = JSON.stringify({ kind: 'track', id: track.id, title: track.title });
                                   e.dataTransfer.effectAllowed = 'copy';
@@ -2153,7 +2380,56 @@ export const App: React.FC = () => {
                                     case 'title':
                                       return (
                                         <td key={col.id} style={{ fontWeight: isCurrent ? 700 : 500 }}>
-                                          {track.title}
+                                          <div
+                                            style={{
+                                              display: 'flex',
+                                              alignItems: 'center',
+                                              justifyContent: 'space-between',
+                                              gap: 6,
+                                            }}
+                                          >
+                                            <span>{track.title}</span>
+                                            {activePlaylist &&
+                                              !activePlaylist.is_smart &&
+                                              hoveredTrackId === track.id && (
+                                                <button
+                                                  type="button"
+                                                  title="Remove from Playlist"
+                                                  onClick={async (e) => {
+                                                    e.stopPropagation();
+                                                    await invokeRpc(
+                                                      'playlists:removeTrack',
+                                                      activePlaylist.id,
+                                                      track.id
+                                                    );
+                                                    const trks = await invokeRpc<TrackRow[]>(
+                                                      'playlists:getTracks',
+                                                      activePlaylist.id
+                                                    );
+                                                    setPlaylistTracks(trks);
+                                                    const updatedPls =
+                                                      await invokeRpc<PlaylistRow[]>('playlists:list');
+                                                    setPlaylists(updatedPls);
+                                                    showToast(
+                                                      `Removed "${track.title}" from "${activePlaylist.name}".`
+                                                    );
+                                                  }}
+                                                  style={{
+                                                    border: 'none',
+                                                    background: 'rgba(239,68,68,0.12)',
+                                                    color: isCurrent || isSelectedRow ? '#fff' : '#dc2626',
+                                                    borderRadius: 4,
+                                                    padding: '0 5px',
+                                                    fontSize: 12,
+                                                    fontWeight: 700,
+                                                    cursor: 'pointer',
+                                                    lineHeight: 1.3,
+                                                  }}
+                                                >
+                                                  ×
+                                                </button>
+                                              )}
+                                          </div>
                                         </td>
                                       );
                                     case 'duration':
@@ -3454,11 +3730,135 @@ export const App: React.FC = () => {
             />
           )}
 
-          {/* 6. EPOD DEVICE SUMMARY TAB */}
+          {/* 6. EPOD DEVICE SUMMARY OR DEVICE-SCOPED CATALOG TAB */}
           {nav.kind === 'device' &&
             (() => {
               const dev = devices.find((d) => d.uuid === nav.uuid);
               if (!dev) return null;
+              if (nav.category) {
+                const catalog = deviceCatalogs[dev.uuid];
+                const isPlaylists = nav.category === 'playlists';
+                const scopedItems: DeviceCatalogItem[] = catalog
+                  ? catalog.items.filter((it) => it.mediaType === nav.category)
+                  : [];
+                const scopedPlaylists = catalog && isPlaylists ? catalog.playlists : [];
+                const categoryTitleMap: Record<DeviceCatalogCategory, string> = {
+                  music: 'Music',
+                  movies: 'Movies',
+                  tv: 'TV Shows',
+                  music_videos: 'Music Videos',
+                  audiobooks: 'Audiobooks',
+                  books: 'Books',
+                  photos: 'Photos',
+                  playlists: 'Playlists',
+                };
+                return (
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        height: 36,
+                        padding: '0 16px',
+                        background: 'linear-gradient(180deg, #f3f6fa 0%, #dce2ec 100%)',
+                        borderBottom: '1px solid #98a2b3',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <strong>
+                          {dev.name} — {categoryTitleMap[nav.category]} (
+                          {isPlaylists ? scopedPlaylists.length : scopedItems.length})
+                        </strong>
+                        <span style={{ fontSize: 11, color: '#475569' }}>
+                          Right-click any row to remove it from this device only
+                        </span>
+                      </div>
+                      <button
+                        className="aqua-btn"
+                        onClick={() => setNav({ kind: 'device', uuid: dev.uuid })}
+                      >
+                        Back to Device Summary
+                      </button>
+                    </div>
+                    <div className="rtunes-table-container">
+                      <table className="rtunes-table">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>{isPlaylists ? 'Tracks' : 'Artist / Show'}</th>
+                            <th>{isPlaylists ? 'Device Path' : 'Album / Details'}</th>
+                            {!isPlaylists && <th style={{ width: 70 }}>Time</th>}
+                            {!isPlaylists && <th style={{ width: 85 }}>Size</th>}
+                            <th>Device Path</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {isPlaylists ? (
+                            scopedPlaylists.map((pl) => (
+                              <tr
+                                key={pl.devicePath}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setContextMenu({
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    kind: 'device_item',
+                                    deviceUuid: dev.uuid,
+                                    devicePath: pl.devicePath,
+                                    storageId: pl.storageId,
+                                    title: pl.name,
+                                  });
+                                }}
+                              >
+                                <td style={{ fontWeight: 600 }}>{pl.name}</td>
+                                <td>{pl.trackCount} tracks</td>
+                                <td>{pl.devicePath}</td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                                  {pl.storageId || 'UMS'}
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            scopedItems.map((item) => (
+                              <tr
+                                key={item.devicePath}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setContextMenu({
+                                    x: e.clientX,
+                                    y: e.clientY,
+                                    kind: 'device_item',
+                                    deviceUuid: dev.uuid,
+                                    devicePath: item.devicePath,
+                                    storageId: item.storageId,
+                                    title: item.title,
+                                  });
+                                }}
+                              >
+                                <td style={{ fontWeight: 600 }}>{item.title}</td>
+                                <td>{item.artist || item.showName || '—'}</td>
+                                <td>{item.album || item.storageId || '—'}</td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                                  {item.duration ? formatDuration(item.duration) : '—'}
+                                </td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                                  {formatBytes(item.size)}
+                                </td>
+                                <td style={{ fontFamily: 'var(--font-mono)', fontSize: 10.5, color: '#475569' }}>
+                                  {item.devicePath}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              }
               return (
                 <DeviceSummaryView
                   device={dev}
@@ -3877,6 +4277,245 @@ export const App: React.FC = () => {
           onClose={() => setShowDiagnostics(false)}
           onCleared={() => setLiveLogs([])}
         />
+      )}
+
+      {/* =====================================================================
+          SMART PLAYLIST IGNORED / EXCLUDED TRACKS MODAL
+          ===================================================================== */}
+      {showIgnoredModal && nav.kind === 'playlist' && (
+        <div className="aqua-modal-backdrop" onClick={() => setShowIgnoredModal(false)}>
+          <div
+            className="aqua-window"
+            style={{ width: 620, maxWidth: '94vw' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="aqua-window-titlebar">
+              <span>Ignored &amp; Excluded Tracks ({smartExclusions.length})</span>
+              <button
+                className="aqua-btn"
+                onClick={() => setShowIgnoredModal(false)}
+                style={{ padding: '1px 6px' }}
+              >
+                <X size={13} />
+              </button>
+            </div>
+            <div style={{ padding: 14, maxHeight: '60vh', overflowY: 'auto' }}>
+              {smartExclusions.length === 0 ? (
+                <div style={{ padding: 24, textAlign: 'center', color: '#64748b', fontSize: 12 }}>
+                  No tracks are currently ignored or excluded from this Smart Playlist.
+                </div>
+              ) : (
+                <table className="rtunes-table">
+                  <thead>
+                    <tr>
+                      <th>Track</th>
+                      <th>Artist</th>
+                      <th>Scope</th>
+                      <th style={{ width: 90 }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {smartExclusions.map((ex) => (
+                      <tr key={`${ex.scope}:${ex.track.id}`}>
+                        <td style={{ fontWeight: 600 }}>{ex.track.title}</td>
+                        <td>{ex.track.artist}</td>
+                        <td>
+                          <span
+                            style={{
+                              fontSize: 10,
+                              fontWeight: 700,
+                              padding: '1px 6px',
+                              borderRadius: 4,
+                              background: ex.scope === 'global' ? '#fee2e2' : '#fef3c7',
+                              color: ex.scope === 'global' ? '#b91c1c' : '#92400e',
+                            }}
+                          >
+                            {ex.scope === 'global' ? 'All Smart Playlists' : 'This Playlist'}
+                          </span>
+                        </td>
+                        <td>
+                          <button
+                            className="aqua-btn primary"
+                            style={{ padding: '1px 8px', fontSize: 11 }}
+                            onClick={async () => {
+                              await invokeRpc(
+                                'playlists:restoreExclusion',
+                                nav.id,
+                                ex.track.id,
+                                ex.scope
+                              );
+                              const [nextEx, trks] = await Promise.all([
+                                invokeRpc<{ track: TrackRow; scope: 'playlist' | 'global' }[]>(
+                                  'playlists:getExclusions',
+                                  nav.id
+                                ),
+                                invokeRpc<TrackRow[]>('playlists:getTracks', nav.id),
+                              ]);
+                              setSmartExclusions(nextEx);
+                              setPlaylistTracks(trks);
+                              showToast(`Restored "${ex.track.title}".`);
+                            }}
+                          >
+                            Restore
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          AQUA RIGHT-CLICK CONTEXT MENU
+          ===================================================================== */}
+      {contextMenu && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'fixed',
+            top: Math.min(contextMenu.y, window.innerHeight - 130),
+            left: Math.min(contextMenu.x, window.innerWidth - 260),
+            zIndex: 9999,
+            minWidth: 230,
+            background: 'rgba(248, 250, 252, 0.98)',
+            border: '1px solid #94a3b8',
+            borderRadius: 6,
+            boxShadow: '0 8px 24px rgba(15, 23, 42, 0.25)',
+            padding: '4px 0',
+            fontSize: 12,
+          }}
+        >
+          {contextMenu.kind === 'playlist_track' && contextMenu.track && contextMenu.playlistId && (
+            <button
+              type="button"
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left',
+                padding: '6px 14px',
+                border: 'none',
+                background: 'transparent',
+                cursor: 'pointer',
+                color: '#b91c1c',
+                fontWeight: 600,
+              }}
+              onClick={async () => {
+                const { playlistId, track } = contextMenu;
+                setContextMenu(null);
+                await invokeRpc('playlists:removeTrack', playlistId, track!.id);
+                const trks = await invokeRpc<TrackRow[]>('playlists:getTracks', playlistId!);
+                setPlaylistTracks(trks);
+                const updatedPls = await invokeRpc<PlaylistRow[]>('playlists:list');
+                setPlaylists(updatedPls);
+                showToast(`Removed "${track!.title}" from playlist.`);
+              }}
+            >
+              Remove from Playlist
+            </button>
+          )}
+
+          {contextMenu.kind === 'smart_track' && contextMenu.track && contextMenu.playlistId && (
+            <>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#1e293b',
+                  fontWeight: 600,
+                }}
+                onClick={async () => {
+                  const { playlistId, track } = contextMenu;
+                  setContextMenu(null);
+                  await invokeRpc('playlists:ignoreTrack', playlistId, track!.id);
+                  const [nextEx, trks] = await Promise.all([
+                    invokeRpc<{ track: TrackRow; scope: 'playlist' | 'global' }[]>(
+                      'playlists:getExclusions',
+                      playlistId!
+                    ),
+                    invokeRpc<TrackRow[]>('playlists:getTracks', playlistId!),
+                  ]);
+                  setSmartExclusions(nextEx);
+                  setPlaylistTracks(trks);
+                  showToast(`Ignored "${track!.title}" in this Smart Playlist.`);
+                }}
+              >
+                Ignore Track in This Playlist
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#b91c1c',
+                  fontWeight: 600,
+                }}
+                onClick={async () => {
+                  const { playlistId, track } = contextMenu;
+                  setContextMenu(null);
+                  await invokeRpc('playlists:excludeTrackGlobally', track!.id);
+                  const [nextEx, trks] = await Promise.all([
+                    invokeRpc<{ track: TrackRow; scope: 'playlist' | 'global' }[]>(
+                      'playlists:getExclusions',
+                      playlistId!
+                    ),
+                    invokeRpc<TrackRow[]>('playlists:getTracks', playlistId!),
+                  ]);
+                  setSmartExclusions(nextEx);
+                  setPlaylistTracks(trks);
+                  showToast(`Excluded "${track!.title}" from all Smart Playlists.`);
+                }}
+              >
+                Exclude Track from All Smart Playlists
+              </button>
+            </>
+          )}
+
+          {contextMenu.kind === 'device_item' && contextMenu.deviceUuid && contextMenu.devicePath && (
+            <button
+              type="button"
+              style={{
+                display: 'block',
+                width: '100%',
+                textAlign: 'left',
+                padding: '6px 14px',
+                border: 'none',
+                background: 'transparent',
+                cursor: 'pointer',
+                color: '#b91c1c',
+                fontWeight: 600,
+              }}
+              onClick={async () => {
+                const { deviceUuid, devicePath, storageId, title } = contextMenu;
+                setContextMenu(null);
+                const updatedCatalog = await invokeRpc<DeviceCatalog>(
+                  'devices:removeItem',
+                  deviceUuid,
+                  devicePath,
+                  storageId
+                );
+                setDeviceCatalogs((prev) => ({ ...prev, [deviceUuid!]: updatedCatalog }));
+                showToast(`Removed "${title || devicePath}" from device (master library untouched).`);
+              }}
+            >
+              Remove from Device
+            </button>
+          )}
+        </div>
       )}
     </div>
   );

@@ -34,6 +34,7 @@ export interface TrackRow {
   last_played: string | null;
   date_added: string;
   metadata_loaded?: number;
+  exclude_from_smart_playlists?: number;
 }
 
 export interface VideoRow {
@@ -466,6 +467,13 @@ export function initDatabase(customPath?: string): Database.Database {
       taken_at TEXT,
       date_added TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS smart_playlist_exclusions (
+      smart_playlist_id TEXT NOT NULL,
+      track_id INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (smart_playlist_id, track_id)
+    );
   `);
 
   // Safe migration for existing databases
@@ -473,6 +481,9 @@ export function initDatabase(customPath?: string): Database.Database {
     const cols = db.prepare("PRAGMA table_info('tracks')").all() as { name: string }[];
     if (!cols.some((c) => c.name === 'metadata_loaded')) {
       db.exec('ALTER TABLE tracks ADD COLUMN metadata_loaded INTEGER DEFAULT 0');
+    }
+    if (!cols.some((c) => c.name === 'exclude_from_smart_playlists')) {
+      db.exec('ALTER TABLE tracks ADD COLUMN exclude_from_smart_playlists INTEGER DEFAULT 0');
     }
     const vCols = db.prepare("PRAGMA table_info('videos')").all() as { name: string }[];
     if (!vCols.some((c) => c.name === 'poster_path')) {

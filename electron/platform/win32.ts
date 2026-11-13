@@ -201,4 +201,54 @@ export const win32Driver: PlatformDriver = {
     order.push('libx264');
     return order;
   },
+
+  async getAutoOpenOnMtp(): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync(
+        'reg.exe',
+        [
+          'query',
+          'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoplayHandlers\\EventHandlers\\MTPMediaPlayerArrival',
+          '/v',
+          'RetroTunesMtpHandler',
+        ],
+        { timeout: 5000 }
+      );
+      return stdout.includes('RetroTunesMtpHandler');
+    } catch {
+      return false;
+    }
+  },
+
+  async setAutoOpenOnMtp(enabled: boolean, appLaunchCommand: string): Promise<{ ok: boolean; message: string }> {
+    const handlerKey =
+      'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoplayHandlers\\Handlers\\RetroTunesMtpHandler';
+    const eventKey =
+      'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\AutoplayHandlers\\EventHandlers\\MTPMediaPlayerArrival';
+    const progKey = 'HKCU\\Software\\Classes\\RetroTunes.MtpAutoPlay\\shell\\open\\command';
+
+    try {
+      if (enabled) {
+        await execFileAsync('reg.exe', ['add', progKey, '/ve', '/t', 'REG_SZ', '/d', appLaunchCommand, '/f'], { timeout: 5000 });
+        await execFileAsync('reg.exe', ['add', handlerKey, '/v', 'Action', '/t', 'REG_SZ', '/d', 'Open with RetroTunes (rTunes)', '/f'], { timeout: 5000 });
+        await execFileAsync('reg.exe', ['add', handlerKey, '/v', 'Provider', '/t', 'REG_SZ', '/d', 'RetroTunes', '/f'], { timeout: 5000 });
+        await execFileAsync('reg.exe', ['add', handlerKey, '/v', 'InvokeProgID', '/t', 'REG_SZ', '/d', 'RetroTunes.MtpAutoPlay', '/f'], { timeout: 5000 });
+        await execFileAsync('reg.exe', ['add', handlerKey, '/v', 'InvokeVerb', '/t', 'REG_SZ', '/d', 'open', '/f'], { timeout: 5000 });
+        await execFileAsync('reg.exe', ['add', eventKey, '/v', 'RetroTunesMtpHandler', '/t', 'REG_SZ', '/d', '', '/f'], { timeout: 5000 });
+        return {
+          ok: true,
+          message: 'Registered RetroTunes in Windows AutoPlay for MTP devices (MTPMediaPlayerArrival).',
+        };
+      }
+      await execFileAsync('reg.exe', ['delete', eventKey, '/v', 'RetroTunesMtpHandler', '/f'], { timeout: 5000 }).catch(() => {});
+      await execFileAsync('reg.exe', ['delete', handlerKey, '/f'], { timeout: 5000 }).catch(() => {});
+      await execFileAsync('reg.exe', ['delete', 'HKCU\\Software\\Classes\\RetroTunes.MtpAutoPlay', '/f'], { timeout: 5000 }).catch(() => {});
+      return { ok: true, message: 'Removed RetroTunes Windows AutoPlay MTP handler.' };
+    } catch (err) {
+      return {
+        ok: false,
+        message: `Failed to update Windows AutoPlay registry: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  },
 };

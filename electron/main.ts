@@ -499,6 +499,13 @@ function registerAllHandlers() {
   });
   registerChannel('devices:syncProgress', () => getSyncProgress());
   registerChannel('devices:eject', (uuid: string) => ejectDevice(uuid));
+  registerChannel('devices:getAutoOpenOnMtp', () => platformDriver.getAutoOpenOnMtp());
+  registerChannel('devices:setAutoOpenOnMtp', (enabled: boolean) => {
+    const launchCmd = app.isPackaged
+      ? `"${process.execPath}"`
+      : `"${process.execPath}" "${app.getAppPath()}"`;
+    return platformDriver.setAutoOpenOnMtp(enabled, launchCmd);
+  });
 
   // --- Priority 2: Direct NFS / SMB Mount Manager ---
   registerChannel('shares:list', () => listNetworkShares());

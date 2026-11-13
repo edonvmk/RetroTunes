@@ -361,6 +361,38 @@ export async function refreshMtpState(force = false): Promise<MtpDetectResult> {
   });
 }
 
+function classifyMtpStorages(storages: MtpStoragePool[]): {
+  internal: MtpStoragePool;
+  sdCard: MtpStoragePool | null;
+  isMultiDrive: boolean;
+} {
+  if (storages.length <= 1) {
+    return { internal: storages[0], sdCard: null, isMultiDrive: false };
+  }
+  const sdMatch = (s: MtpStoragePool) =>
+    /sd|card|external|removable|0xffff0002|ffff0002/i.test(`${s.description} ${s.storageId}`);
+  const intMatch = (s: MtpStoragePool) =>
+    /internal|phone|device|0xffff0001|ffff0001/i.test(`${s.description} ${s.storageId}`);
+
+  let sdCard = storages.find(sdMatch) || null;
+  let internal = storages.find((s) => s !== sdCard && intMatch(s)) || null;
+
+  if (!internal || !sdCard) {
+    const sortedAsc = [...storages].sort((a, b) => (a.maxCapacity || 0) - (b.maxCapacity || 0));
+    if (!internal) internal = sortedAsc.find((s) => s !== sdCard) || sortedAsc[0];
+    if (!sdCard) sdCard = sortedAsc.find((s) => s !== internal) || null;
+  }
+
+  return { internal, sdCard, isMultiDrive: Boolean(sdCard && sdCard.storageId !== internal.storageId) };
+}
+
+function detectPresetForMtp(mtp: MtpDetectResult): 'epod_y2' | 'classic_dap' | 'phone' {
+  const label = `${mtp.friendlyName || ''} ${mtp.manufacturer || ''} ${mtp.product || ''}`;
+  if (/pixel|android|samsung|galaxy|oneplus|xiaomi|phone/i.test(label)) return 'phone';
+  if (/rockbox|ipod|dap/i.test(label)) return 'classic_dap';
+  return 'epod_y2';
+}
+
 function reconcileMtpDeviceWithDatabase(mtp: MtpDetectResult) {
   if (!mtp.connected || !mtp.storages || mtp.storages.length === 0) return;
   const db = getDb();
@@ -387,10 +419,12 @@ function reconcileMtpDeviceWithDatabase(mtp: MtpDetectResult) {
     }
   }
 
-  // Pick largest storage pool as default if no manifest storage found
+  const classified = classifyMtpStorages(mtp.storages);
+  // Pick primary storage pool (prefer manifest storage, else SD card / largest pool)
   const defaultStorage =
     mtp.storages.find((s) => s.storageId === matchedStorageId) ||
-    [...mtp.storages].sort((a, b) => b.maxCapacity - a.maxCapacity)[0];
+    classified.sdCard ||
+    classified.internal;
 
   if (matchedUuid && parsedManifest) {
     const existingRow = db
@@ -398,7 +432,7 @@ function reconcileMtpDeviceWithDatabase(mtp: MtpDetectResult) {
       .get(matchedUuid) as DeviceRow | undefined;
 
     let mergedProfile: DeviceProfile = {
-      ...getDefaultProfileForPreset('epod_y2', parsedManifest.name, matchedUuid),
+      ...getDefaultProfileForPreset(parsedManifest.deviceType || detectPresetForMtp(mtp), parsedManifest.name, matchedUuid),
       ...parsedManifest,
       transportMode: 'mtp',
       mtpSerial: serial,
@@ -414,12 +448,19 @@ function reconcileMtpDeviceWithDatabase(mtp: MtpDetectResult) {
           ...dbProf,
           transportMode: 'mtp',
           mtpSerial: serial,
-          selectedStorageId: dbProf.selectedStorageId || matchedStorageId || defaultStorage.storageId,
+          selectedStorageId:
+            (dbProf.selectedStorageId && mtp.storages.some((s) => s.storageId === dbProf.selectedStorageId)
+              ? dbProf.selectedStorageId
+              : null) ||
+            matchedStorageId ||
+            defaultStorage.storageId,
           videoSubdir: 'Videos',
         };
       } catch {
         // ignore
       }
+    } else {
+      logger.info('DEVICE_SYNC', `Recognized MTP device via .retrotunes_device.json: "${mergedProfile.name}" (${matchedUuid})`);
     }
 
     const mountUri = `mtp://${serial}/${mergedProfile.selectedStorageId}`;
@@ -427,6 +468,7 @@ function reconcileMtpDeviceWithDatabase(mtp: MtpDetectResult) {
       INSERT INTO devices (uuid, name, mount_path, device_type, profile_json, transport_mode, mtp_serial, last_connected)
       VALUES (?, ?, ?, ?, ?, 'mtp', ?, datetime('now'))
       ON CONFLICT(uuid) DO UPDATE SET
+        name = excluded.name,
         mount_path = excluded.mount_path,
         transport_mode = 'mtp',
         mtp_serial = excluded.mtp_serial,
@@ -468,20 +510,23 @@ function reconcileMtpDeviceWithDatabase(mtp: MtpDetectResult) {
     return;
   }
 
-  // 3. If there are no devices in SQLite at all, auto-register this MTP device
-  const countRow = db.prepare('SELECT COUNT(*) as c FROM devices').get() as { c: number };
-  if (countRow.c === 0) {
-    const devName = mtp.friendlyName || mtp.product || 'Innioasis Y2 (ePod)';
-    const newProf = getDefaultProfileForPreset('epod_y2', devName);
-    newProf.transportMode = 'mtp';
-    newProf.mtpSerial = serial;
-    newProf.selectedStorageId = defaultStorage.storageId;
-    const mountUri = `mtp://${serial}/${defaultStorage.storageId}`;
-    db.prepare(`
-      INSERT INTO devices (uuid, name, mount_path, device_type, profile_json, transport_mode, mtp_serial, last_connected)
-      VALUES (?, ?, ?, 'epod_y2', ?, 'mtp', ?, datetime('now'))
-    `).run(newProf.uuid, newProf.name, mountUri, JSON.stringify(newProf), serial);
-  }
+  // 3. Auto-register ANY newly connected MTP device (even if other devices already exist in SQLite)
+  const preset = detectPresetForMtp(mtp);
+  const devName = mtp.friendlyName || mtp.product || 'Portable MTP Device';
+  const newProf = getDefaultProfileForPreset(preset, devName);
+  newProf.transportMode = 'mtp';
+  newProf.mtpSerial = serial;
+  newProf.selectedStorageId = defaultStorage.storageId;
+  const mountUri = `mtp://${serial}/${defaultStorage.storageId}`;
+  db.prepare(`
+    INSERT INTO devices (uuid, name, mount_path, device_type, profile_json, transport_mode, mtp_serial, last_connected)
+    VALUES (?, ?, ?, ?, ?, 'mtp', ?, datetime('now'))
+  `).run(newProf.uuid, newProf.name, mountUri, preset, JSON.stringify(newProf), serial);
+  logger.info('DEVICE_SYNC', `Auto-registered new MTP device "${newProf.name}" (${serial})`, {
+    uuid: newProf.uuid,
+    preset,
+    storages: mtp.storages.length,
+  });
 }
 
 export function startMtpUsbPoller(): void {
@@ -868,7 +913,7 @@ export function getRegisteredDevices(): (DeviceRow & {
       profile.transportMode = 'mtp';
       profile.mtpSerial = cachedMtpState.serial;
       profile.selectedStorageId = targetSt.storageId;
-      storage = getMtpStorageBreakdown(row.uuid, targetSt);
+      storage = getMtpStorageBreakdown(row.uuid, cachedMtpState.storages, targetSt);
     } else {
       storage = getDeviceStorageBreakdown(row.mount_path);
     }
@@ -886,9 +931,13 @@ export function getRegisteredDevices(): (DeviceRow & {
   });
 }
 
-function getMtpStorageBreakdown(deviceUuid: string, pool: MtpStoragePool): StorageBreakdown {
-  const totalBytes = pool.maxCapacity || 0;
-  const freeBytes = pool.freeSpaceInBytes || 0;
+function getMtpStorageBreakdown(
+  deviceUuid: string,
+  storages: MtpStoragePool[],
+  primaryPool: MtpStoragePool
+): StorageBreakdown {
+  const totalBytes = storages.reduce((acc, s) => acc + (s.maxCapacity || 0), 0);
+  const freeBytes = storages.reduce((acc, s) => acc + (s.freeSpaceInBytes || 0), 0);
   const usedBytes = Math.max(0, totalBytes - freeBytes);
 
   // Estimate audio vs video breakdown from local sync ledger if available, else proportional
@@ -898,7 +947,7 @@ function getMtpStorageBreakdown(deviceUuid: string, pool: MtpStoragePool): Stora
     const settings = getSettings();
     const ledgerPath = path.join(
       settings.localCachePath,
-      `mtp_ledger_${deviceUuid}_${pool.storageId}.json`
+      `mtp_ledger_${deviceUuid}_${primaryPool.storageId}.json`
     );
     if (fs.existsSync(ledgerPath)) {
       const ledger = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')) as {
@@ -964,7 +1013,7 @@ export function provisionDevice(
       (s) => s.storageId === fullProfile.selectedStorageId
     );
     const storage = pool
-      ? getMtpStorageBreakdown(fullProfile.uuid, pool)
+      ? getMtpStorageBreakdown(fullProfile.uuid, cachedMtpState.storages || [pool], pool)
       : { totalBytes: 0, audioBytes: 0, videoBytes: 0, otherBytes: 0, freeBytes: 0, mounted: true };
 
     return {
@@ -1364,8 +1413,7 @@ export async function syncDevice(uuid: string): Promise<SyncProgress> {
  * and streams progress updates to the UI.
  */
 async function executeMtpBatchUpload(
-  storageId: string,
-  items: { localPath: string; remotePath: string }[],
+  items: { storageId: string; localPath: string; remotePath: string }[],
   onItemUploaded: (idx: number, total: number, remotePath: string) => void
 ): Promise<number> {
   if (items.length === 0) return 0;
@@ -1386,49 +1434,67 @@ async function executeMtpBatchUpload(
 
   if (filtered.length === 0) return 0;
 
+  const byStorage = new Map<string, { localPath: string; remotePath: string }[]>();
+  for (const item of filtered) {
+    const list = byStorage.get(item.storageId) || [];
+    list.push({ localPath: item.localPath, remotePath: item.remotePath });
+    byStorage.set(item.storageId, list);
+  }
+
   const settings = getSettings();
-  const batchFile = path.join(settings.localCachePath, `mtp_batch_${Date.now()}.txt`);
-  await fsp.mkdir(path.dirname(batchFile), { recursive: true });
-  const batchContent = filtered.map((i) => `${i.localPath}\t${i.remotePath}`).join('\n') + '\n';
-  await fsp.writeFile(batchFile, batchContent, 'utf8');
+  const totalCount = filtered.length;
+  let globalIdx = 0;
+  let uploadedCount = 0;
 
-  return withMtpLock(
-    () =>
-      new Promise<number>((resolve) => {
-        const bin = getRtunesMtpBinaryPath();
-        const child = spawn(bin, ['batch-put', storageId, batchFile]);
-        let uploadedCount = 0;
-        let buffer = '';
+  for (const [storageId, poolItems] of byStorage.entries()) {
+    if (cancelSyncRequested) break;
+    const batchFile = path.join(settings.localCachePath, `mtp_batch_${Date.now()}_${storageId}.txt`);
+    await fsp.mkdir(path.dirname(batchFile), { recursive: true });
+    const batchContent = poolItems.map((i) => `${i.localPath}\t${i.remotePath}`).join('\n') + '\n';
+    await fsp.writeFile(batchFile, batchContent, 'utf8');
 
-        child.stdout.on('data', (chunk: Buffer) => {
-          buffer += chunk.toString('utf8');
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            if (line.startsWith('BATCH_OK ')) {
-              uploadedCount++;
-              const m = line.match(/^BATCH_OK\s+(\d+)\/(\d+)\s+(.+)$/);
-              if (m) {
-                onItemUploaded(Number(m[1]), Number(m[2]), m[3]);
+    const poolUploaded = await withMtpLock(
+      () =>
+        new Promise<number>((resolve) => {
+          const bin = getRtunesMtpBinaryPath();
+          const child = spawn(bin, ['batch-put', storageId, batchFile]);
+          let count = 0;
+          let buffer = '';
+
+          child.stdout.on('data', (chunk: Buffer) => {
+            buffer += chunk.toString('utf8');
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+              if (line.startsWith('BATCH_OK ')) {
+                count++;
+                globalIdx++;
+                const m = line.match(/^BATCH_OK\s+(\d+)\/(\d+)\s+(.+)$/);
+                if (m) {
+                  onItemUploaded(globalIdx, totalCount, m[3]);
+                }
               }
             }
-          }
-          if (cancelSyncRequested) {
-            child.kill('SIGTERM');
-          }
-        });
+            if (cancelSyncRequested) {
+              child.kill('SIGTERM');
+            }
+          });
 
-        child.on('close', () => {
-          fsp.rm(batchFile, { force: true }).catch(() => {});
-          resolve(uploadedCount);
-        });
+          child.on('close', () => {
+            fsp.rm(batchFile, { force: true }).catch(() => {});
+            resolve(count);
+          });
 
-        child.on('error', () => {
-          fsp.rm(batchFile, { force: true }).catch(() => {});
-          resolve(uploadedCount);
-        });
-      })
-  );
+          child.on('error', () => {
+            fsp.rm(batchFile, { force: true }).catch(() => {});
+            resolve(count);
+          });
+        })
+    );
+    uploadedCount += poolUploaded;
+  }
+
+  return uploadedCount;
 }
 
 /**
@@ -1500,15 +1566,85 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
     }
   }
 
-  const pendingMtpUploads: { localPath: string; remotePath: string }[] = [];
-  const queueIfNeeded = async (localFile: string, remoteRelPath: string) => {
+  const pendingMtpUploads: { storageId: string; localPath: string; remotePath: string }[] = [];
+
+  // Dynamic multi-drive MTP storage allocator:
+  // - Videos -> Internal Storage (up to 80% of internal capacity), overflowing to SD Card
+  // - Music / Other -> SD Card, overflowing to Internal Storage (up to 80% of internal capacity)
+  const mtpPools = isMtp && cachedMtpState.storages?.length ? cachedMtpState.storages : [];
+  const classifiedPools = mtpPools.length > 0 ? classifyMtpStorages(mtpPools) : null;
+  let internalUsedBytes = classifiedPools
+    ? Math.max(0, (classifiedPools.internal.maxCapacity || 0) - (classifiedPools.internal.freeSpaceInBytes || 0))
+    : 0;
+  const internalCap80Bytes = classifiedPools
+    ? Math.floor((classifiedPools.internal.maxCapacity || 0) * 0.8)
+    : 0;
+  let sdUsedBytes = classifiedPools?.sdCard
+    ? Math.max(0, (classifiedPools.sdCard.maxCapacity || 0) - (classifiedPools.sdCard.freeSpaceInBytes || 0))
+    : 0;
+  const sdCap98Bytes = classifiedPools?.sdCard
+    ? Math.floor((classifiedPools.sdCard.maxCapacity || 0) * 0.98)
+    : 0;
+
+  const chooseTargetStorageForItem = (
+    kind: 'video' | 'music' | 'other',
+    fileSize: number
+  ): string => {
+    if (!classifiedPools || !classifiedPools.isMultiDrive || !classifiedPools.sdCard) {
+      return mtpStorageId;
+    }
+    const internalId = classifiedPools.internal.storageId;
+    const sdId = classifiedPools.sdCard.storageId;
+
+    if (kind === 'video') {
+      if (internalUsedBytes + fileSize <= internalCap80Bytes) {
+        internalUsedBytes += fileSize;
+        return internalId;
+      }
+      if (sdUsedBytes + fileSize <= sdCap98Bytes) {
+        sdUsedBytes += fileSize;
+        return sdId;
+      }
+      const intFree = Math.max(0, (classifiedPools.internal.maxCapacity || 0) - internalUsedBytes);
+      const sdFree = Math.max(0, (classifiedPools.sdCard.maxCapacity || 0) - sdUsedBytes);
+      if (intFree >= sdFree) {
+        internalUsedBytes += fileSize;
+        return internalId;
+      }
+      sdUsedBytes += fileSize;
+      return sdId;
+    }
+
+    // Music / Playlists / Other: prefer SD card, overflow to Internal up to 80%, then SD card
+    if (sdUsedBytes + fileSize <= sdCap98Bytes) {
+      sdUsedBytes += fileSize;
+      return sdId;
+    }
+    if (internalUsedBytes + fileSize <= internalCap80Bytes) {
+      internalUsedBytes += fileSize;
+      return internalId;
+    }
+    sdUsedBytes += fileSize;
+    return sdId;
+  };
+
+  const queueIfNeeded = async (
+    localFile: string,
+    remoteRelPath: string,
+    kind: 'video' | 'music' | 'other' = 'other'
+  ) => {
     if (!isMtp) return;
     try {
       const st = await fsp.stat(localFile);
-      if (mtpUploadedLedger[remoteRelPath] === st.size && st.size > 0) {
+      const targetStorageId = chooseTargetStorageForItem(kind, st.size);
+      const ledgerKey = `${targetStorageId}:${remoteRelPath}`;
+      if (
+        (mtpUploadedLedger[ledgerKey] === st.size || mtpUploadedLedger[remoteRelPath] === st.size) &&
+        st.size > 0
+      ) {
         return; // Already present on MTP storage with identical byte size
       }
-      pendingMtpUploads.push({ localPath: localFile, remotePath: remoteRelPath });
+      pendingMtpUploads.push({ storageId: targetStorageId, localPath: localFile, remotePath: remoteRelPath });
     } catch {
       // ignore
     }
@@ -1984,7 +2120,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         // ignore
       }
 
-      await queueIfNeeded(localFileForMtp, remoteRelAudioPath);
+      await queueIfNeeded(localFileForMtp, remoteRelAudioPath, 'music');
       deviceAudioFileMap.set(track.id, targetAudioPath);
       tracksSynced++;
 
@@ -2000,7 +2136,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
           );
         }
         if (fs.existsSync(deviceCoverPath)) {
-          await queueIfNeeded(deviceCoverPath, `/Music/${safeArtist}/${safeAlbum}/cover.jpg`);
+          await queueIfNeeded(deviceCoverPath, `/Music/${safeArtist}/${safeAlbum}/cover.jpg`, 'music');
         }
         sanitizedAlbums.add(albumKey);
       }
@@ -2027,7 +2163,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
           }
         }
         if (fs.existsSync(targetLrcPath)) {
-          await queueIfNeeded(targetLrcPath, remoteRelLrcPath);
+          await queueIfNeeded(targetLrcPath, remoteRelLrcPath, 'music');
         }
       }
     }
@@ -2098,7 +2234,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         // ignore
       }
 
-      await queueIfNeeded(isMtp ? sourceVideoPath : targetVideoPath, remoteRelVideoPath);
+      await queueIfNeeded(isMtp ? sourceVideoPath : targetVideoPath, remoteRelVideoPath, 'video');
       videosSynced++;
     }
 
@@ -2177,12 +2313,12 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
     );
     const favPlaylistPath = path.join(playlistRootOnDevice, 'Favorites.m3u8');
     await fsp.writeFile(favPlaylistPath, favM3uContent, 'utf8');
-    await queueIfNeeded(favPlaylistPath, '/Playlists/Favorites.m3u8');
+    await queueIfNeeded(favPlaylistPath, '/Playlists/Favorites.m3u8', 'music');
 
     const rootFavM3uContent = generateRelativeM3u8(lovedTracks, deviceAudioFileMap, localRootPath);
     const rootFavPath = path.join(localRootPath, 'Favorites.m3u');
     await fsp.writeFile(rootFavPath, rootFavM3uContent, 'utf8');
-    await queueIfNeeded(rootFavPath, '/Favorites.m3u');
+    await queueIfNeeded(rootFavPath, '/Favorites.m3u', 'music');
 
     const playlists = db.prepare('SELECT * FROM playlists').all() as PlaylistRow[];
     for (const pl of playlists) {
@@ -2193,7 +2329,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
       const ext = profile.playlistFormat === 'm3u' ? '.m3u' : '.m3u8';
       const localPlFile = path.join(playlistRootOnDevice, `${safePlName}${ext}`);
       await fsp.writeFile(localPlFile, m3u8Text, 'utf8');
-      await queueIfNeeded(localPlFile, `/Playlists/${safePlName}${ext}`);
+      await queueIfNeeded(localPlFile, `/Playlists/${safePlName}${ext}`, 'music');
 
       const hash = crypto.createHash('md5').update(m3u8Text).digest('hex');
       db.prepare('UPDATE playlists SET last_synced_hash = ? WHERE id = ?').run(hash, pl.id);
@@ -2206,12 +2342,11 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
     if (isMtp) {
       if (pendingMtpUploads.length > 0 && !cancelSyncRequested) {
         broadcastSyncProgress({
-          stage: `Uploading ${pendingMtpUploads.length} files over MTP to ${mtpStorageId}...`,
+          stage: `Uploading ${pendingMtpUploads.length} files over MTP...`,
           processed: 0,
           total: pendingMtpUploads.length,
         });
         await executeMtpBatchUpload(
-          mtpStorageId,
           pendingMtpUploads,
           (idx, tot, remotePath) => {
             broadcastSyncProgress({
@@ -2227,6 +2362,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         for (const item of pendingMtpUploads) {
           try {
             const st = await fsp.stat(item.localPath);
+            mtpUploadedLedger[`${item.storageId}:${item.remotePath}`] = st.size;
             mtpUploadedLedger[item.remotePath] = st.size;
           } catch {
             // ignore

@@ -235,4 +235,12 @@ export const darwinDriver: PlatformDriver = {
     }
     return ['libx264'];
   },
+
+  async getAutoOpenOnMtp(): Promise<boolean> {
+    return false;
+  },
+
+  async setAutoOpenOnMtp(): Promise<{ ok: boolean; message: string }> {
+    return { ok: false, message: 'Windows AutoPlay registration is only supported on Windows.' };
+  },
 };

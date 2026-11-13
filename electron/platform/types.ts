@@ -40,4 +40,8 @@ export interface PlatformDriver {
     mode: 'auto' | 'vt_h264' | 'nvenc' | 'qsv' | 'software',
     availableEncodersOutput: string
   ): string[];
+
+  // OS AutoPlay / Auto-Open on MTP Arrival
+  getAutoOpenOnMtp(): Promise<boolean>;
+  setAutoOpenOnMtp(enabled: boolean, appLaunchCommand: string): Promise<{ ok: boolean; message: string }>;
 }

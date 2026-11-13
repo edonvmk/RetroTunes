@@ -188,4 +188,12 @@ export const linuxDriver: PlatformDriver = {
     order.push('libx264');
     return order;
   },
+
+  async getAutoOpenOnMtp(): Promise<boolean> {
+    return false;
+  },
+
+  async setAutoOpenOnMtp(): Promise<{ ok: boolean; message: string }> {
+    return { ok: false, message: 'Windows AutoPlay registration is only supported on Windows.' };
+  },
 };

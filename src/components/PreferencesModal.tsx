@@ -81,8 +81,13 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     }
   };
 
+  const [autoOpenOnMtp, setAutoOpenOnMtp] = React.useState(false);
+
   React.useEffect(() => {
     void loadShares();
+    invokeRpc<boolean>('devices:getAutoOpenOnMtp')
+      .then((v) => setAutoOpenOnMtp(Boolean(v)))
+      .catch(() => {});
   }, []);
 
   const updateField = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
@@ -1187,6 +1192,38 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 </label>
                 <div style={{ marginTop: 6, marginLeft: 22, fontSize: 11, color: '#64748b' }}>
                   When enabled, offline devices remain listed with a dimmed icon and a <strong>Not Connected</strong> status badge.
+                </div>
+
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #e2e8f0' }}>
+                  <label
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: '#1e293b',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={autoOpenOnMtp}
+                      onChange={async (e) => {
+                        const next = e.target.checked;
+                        const res = await invokeRpc<{ ok: boolean; message: string }>(
+                          'devices:setAutoOpenOnMtp',
+                          next
+                        );
+                        if (res.ok) setAutoOpenOnMtp(next);
+                        setStatusBanner(res.message);
+                      }}
+                    />
+                    <span>Auto-open RetroTunes when an MTP device is connected (Windows AutoPlay)</span>
+                  </label>
+                  <div style={{ marginTop: 6, marginLeft: 22, fontSize: 11, color: '#64748b' }}>
+                    Registers RetroTunes as a Windows AutoPlay handler for MTP media players so connecting your ePod/Y2 can launch rTunes automatically.
+                  </div>
                 </div>
               </div>
             </div>

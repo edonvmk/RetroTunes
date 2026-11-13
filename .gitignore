@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-electron/
+release/
+out/
+
+# Local toolchain binaries (Node, compiled sidecar)
+.toolchain/
+
+# Logs
+logs/
+*.log
+
+# Databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# OS & Environment
+.DS_Store
+.env*

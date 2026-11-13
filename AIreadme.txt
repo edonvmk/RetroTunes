@@ -36,10 +36,14 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
   - `electron/smartPlaylists.ts` — SQL/filter evaluator for Smart Playlists.
   - `electron/storeArr.ts` — rTunes Store catalog, multi-source Top Charts (Deezer, Last.fm, TheAudioDB, Library Relative), and Lidarr/Radarr/Sonarr integration.
   - `electron/uploadWizard.ts` — Metadata lookup, `*arr` naming preview, file transfer, and `*arr` scan trigger.
-  - `electron/authOidc.ts` — Authentik OIDC / OAuth2 PKCE flow and token management.
+  - `electron/authOidc.ts` — Underlying Authentik OIDC / OAuth2 PKCE flow and token management.
+  - `electron/auth/authentik.ts` — Isolated SSO boundary (returns a guest/standalone context when `isDev === false`).
+  - `electron/providers/standaloneLocal.ts` — Active default provider for local SQLite + direct NFS/SMB access (never modify for SSO or Docker server changes).
+  - `electron/providers/remoteServer.ts` — Isolated stub/preview provider for future `rTunes-Server` Docker HTTPS/WebSocket API (gated behind `isDev === true`).
+  - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>`).
   - `electron/mediaServer.ts` — Local HTTP range-streaming server for audio/video playback.
-  - `electron/platform/` *(target refactor location for cross-platform OS drivers)* — `darwin.ts`, `win32.ts`, `linux.ts`.
-- `native/` — Native C helpers (`native/rtunes_mtp.c` compiled to `.toolchain/bin/rtunes-mtp` via `libmtp`/`libusb`).
+  - `electron/platform/` — Cross-platform OS drivers: `darwin.ts`, `win32.ts`, `linux.ts`.
+- `native/` — Native helpers (`native/rtunes_mtp.c` on macOS, `native/rtunes_wpd.cs` on Windows, compiled to `.toolchain/bin/rtunes-mtp`).
 
 ### Registered IPC Channels (`electron/main.ts`)
 Do **not** duplicate existing handlers. Always reuse or extend the existing channels:

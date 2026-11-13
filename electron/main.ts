@@ -85,14 +85,19 @@ import {
   UploadMediaType,
 } from './uploadWizard';
 import {
-  initAuthFromKeychain,
-  getPublicAuthState,
-  startAuthentikPkceLogin,
-  logoutAuthentikSso,
-} from './authOidc';
+  initAuthentikAuth,
+  getAuthentikAuthState,
+  loginWithAuthentik,
+  logoutAuthentik,
+} from './auth/authentik';
 import { startMediaServer, getMediaServerPort } from './mediaServer';
 import { logger, LogLevel, LogSubsystem } from './logger';
 import { platformDriver } from './platform';
+
+export const isDev =
+  (!app.isPackaged && process.env.NODE_ENV !== 'production') ||
+  process.env.NODE_ENV === 'development' ||
+  process.argv.includes('--dev');
 
 type HandlerFn = (...args: any[]) => Promise<any> | any;
 const handlerRegistry = new Map<string, HandlerFn>();
@@ -116,6 +121,7 @@ function registerChannel(channel: string, fn: HandlerFn) {
 
 function registerAllHandlers() {
   // --- System & Diagnostics ---
+  registerChannel('system:isDev', () => isDev);
   registerChannel('media:port', () => getMediaServerPort());
   registerChannel('logs:get', (filter?: { level?: LogLevel; subsystem?: LogSubsystem; search?: string; limit?: number }) => {
     return {
@@ -563,10 +569,10 @@ function registerAllHandlers() {
   );
   registerChannel('indexer:scanExtended', () => scanExtendedMediaSections());
 
-  // --- Authentik OIDC SSO ---
-  registerChannel('auth:getState', () => getPublicAuthState());
-  registerChannel('auth:login', () => startAuthentikPkceLogin());
-  registerChannel('auth:logout', () => logoutAuthentikSso());
+  // --- Authentik OIDC SSO (gated behind dev mode) ---
+  registerChannel('auth:getState', () => getAuthentikAuthState(isDev));
+  registerChannel('auth:login', () => loginWithAuthentik(isDev));
+  registerChannel('auth:logout', () => logoutAuthentik(isDev));
 }
 
 function startHttpRpcFallbackServer(port = 42815) {
@@ -721,6 +727,7 @@ function createMainWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      additionalArguments: isDev ? ['--rtunes-dev'] : [],
     },
   });
 
@@ -732,9 +739,19 @@ function createMainWindow() {
 }
 
 app.whenReady().then(async () => {
-  logger.info('SYSTEM', 'Booting RetroTunes (rTunes) - Client Code: ePod Suite...');
+  logger.info('SYSTEM', `Booting RetroTunes (rTunes) - Client Code: ePod Suite...`, { isDev });
   initDatabase();
-  initAuthFromKeychain();
+  if (!isDev) {
+    const currentSettings = getSettings();
+    if (currentSettings.backendMode !== 'standalone' || currentSettings.authMode !== 'standalone') {
+      saveSettings({
+        ...currentSettings,
+        backendMode: 'standalone',
+        authMode: 'standalone',
+      });
+    }
+  }
+  initAuthentikAuth(isDev);
   await startMediaServer();
   registerAllHandlers();
   startHttpRpcFallbackServer(42815);

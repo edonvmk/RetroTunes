@@ -36,6 +36,9 @@ export const FossCreditsContent: React.FC = () => (
         <li>
           <strong>Lucide Icons (lucide-react)</strong> — Clean vector iconography (ISC License).
         </li>
+        <li>
+          <strong>concurrently, wait-on &amp; cross-env</strong> — Cross-platform development and headless CLI orchestration scripts (MIT License).
+        </li>
       </ul>
     </div>
 

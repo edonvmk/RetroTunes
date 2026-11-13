@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { ArrQueueItem, AppSettings, ChartTrackItem, ConnectionTestResult, StoreCatalogItem, StoreHomeData } from '../types';
-import { formatBytes, invokeRpc } from '../bridge';
+import { formatBytes, invokeRpc, isDevMode } from '../bridge';
 
 interface StorefrontViewProps {
   settings: AppSettings | null;
@@ -65,7 +65,7 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ settings, onSett
       ((settings.lidarrUrl && settings.lidarrApiKey) ||
         (settings.radarrUrl && settings.radarrApiKey) ||
         (settings.sonarrUrl && settings.sonarrApiKey) ||
-        (settings.authMode === 'authentik' && settings.homelabGatewayUrl))
+        (isDevMode() && settings.authMode === 'authentik' && settings.homelabGatewayUrl))
   );
 
   const loadStoreHome = async (genre: string) => {

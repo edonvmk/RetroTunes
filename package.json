@@ -13,6 +13,7 @@
     "build": "npm run build:mtp && npm run build:electron && vite build",
     "start": "npm run build && node scripts/electron-tasks.mjs launch prod",
     "postinstall": "node scripts/electron-tasks.mjs rebuild-native",
+    "cli": "cross-env ELECTRON_RUN_AS_NODE=1 electron dist-electron/cli.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
     "electron": "^41.2.0",
     "typescript": "^5.8.2",
     "vite": "^6.2.0",

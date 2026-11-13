@@ -1,10 +1,21 @@
 declare global {
   interface Window {
+    electronAPI?: {
+      isDev: boolean;
+    };
     rtunesElectron?: {
+      isDev?: boolean;
       invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
       on: (channel: string, listener: (payload: unknown) => void) => () => void;
     };
   }
+}
+
+export function isDevMode(): boolean {
+  if (typeof window !== 'undefined' && typeof window.electronAPI?.isDev === 'boolean') {
+    return window.electronAPI.isDev;
+  }
+  return Boolean(import.meta.env?.DEV);
 }
 
 export async function invokeRpc<T = any>(channel: string, ...args: unknown[]): Promise<T> {

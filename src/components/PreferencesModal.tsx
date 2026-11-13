@@ -12,8 +12,11 @@ import {
   Usb,
 } from 'lucide-react';
 import { AppSettings, AuthState, ConnectionTestResult, NetworkShareRow } from '../types';
-import { invokeRpc } from '../bridge';
+import { invokeRpc, isDevMode } from '../bridge';
 import { FossCreditsContent } from './AboutCreditsModal';
+
+const COMING_SOON_TOOLTIP =
+  'Coming soon — rTunes is currently focused on direct network shares, local media, and USB/MTP ePod syncing.';
 
 interface PreferencesModalProps {
   settings: AppSettings;
@@ -81,6 +84,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     }
   };
 
+  const isDev = isDevMode();
   const [autoOpenOnMtp, setAutoOpenOnMtp] = React.useState(false);
 
   React.useEffect(() => {
@@ -216,7 +220,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             { id: 'shares', label: 'NFS / SMB Shares', icon: <HardDrive size={18} /> },
             { id: 'devices', label: 'Devices', icon: <Usb size={18} /> },
             { id: 'cache', label: 'Cache & Transcoder', icon: <HardDrive size={18} /> },
-            { id: 'auth', label: 'Authentik SSO', icon: <ShieldCheck size={18} /> },
+            { id: 'auth', label: isDev ? 'Authentik SSO [DEV]' : 'Authentik SSO', icon: <ShieldCheck size={18} /> },
             { id: 'apis', label: 'Store & API Keys', icon: <KeyRound size={18} /> },
             { id: 'about', label: 'About & Credits', icon: <Info size={18} /> },
           ].map((item) => (
@@ -253,9 +257,18 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             <>
               {/* Priority 3: Backend Architecture Mode (Standalone vs Remote Docker Server) */}
               <div className="epod-capacity-card">
-                <strong style={{ display: 'block', marginBottom: 8 }}>
-                  Backend Architecture Mode (MediaDatabaseProvider & FileTransportProvider)
-                </strong>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <strong>
+                    Backend Architecture Mode (MediaDatabaseProvider & FileTransportProvider)
+                  </strong>
+                  {isDev ? (
+                    <span className="aqua-dev-badge">[DEV PREVIEW]</span>
+                  ) : (
+                    <span className="aqua-coming-soon-pill" title={COMING_SOON_TOOLTIP}>
+                      rTunes-Server: Coming Soon
+                    </span>
+                  )}
+                </div>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div>
                     <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
@@ -264,24 +277,28 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                     <select
                       className="aqua-input"
                       style={{ width: '100%' }}
-                      value={form.backendMode || 'standalone'}
+                      value={isDev ? form.backendMode || 'standalone' : 'standalone'}
                       onChange={(e) => updateField('backendMode', e.target.value as any)}
                     >
                       <option value="standalone">
                         Standalone / Direct Share Mode (Local SQLite + Mounted NFS/SMB)
                       </option>
-                      <option value="docker_server">
-                        Remote Docker Server Mode (rTunes-Server + Authentik OIDC JWT)
+                      <option value="docker_server" disabled={!isDev}>
+                        {isDev
+                          ? 'Remote Docker Server Mode (rTunes-Server + Authentik OIDC JWT) [DEV PREVIEW]'
+                          : 'Remote Docker Server Mode (rTunes-Server) — Coming Soon'}
                       </option>
                     </select>
                   </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
-                      rTunes-Server Companion URL:
+                  <div className={!isDev ? 'aqua-gated-disabled' : ''} title={!isDev ? COMING_SOON_TOOLTIP : undefined}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
+                      <span>rTunes-Server Companion URL:</span>
+                      {!isDev && <span className="aqua-coming-soon-pill">Coming Soon</span>}
                     </label>
                     <input
                       className="aqua-input"
                       style={{ width: '100%' }}
+                      disabled={!isDev}
                       placeholder="https://rtunes-server.yourdomain.com"
                       value={form.dockerServerUrl || ''}
                       onChange={(e) => updateField('dockerServerUrl', e.target.value)}
@@ -771,24 +788,55 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
           )}
 
           {tab === 'auth' && (
-            <div className="epod-capacity-card">
+            <div
+              className={`epod-capacity-card ${!isDev ? 'aqua-gated-disabled' : ''}`}
+              title={!isDev ? COMING_SOON_TOOLTIP : undefined}
+            >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <strong>Authentik OIDC / OAuth2 PKCE Single Sign-On (Section 2)</strong>
-                <button className="aqua-btn" onClick={() => runTest('authentik')}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <strong>Authentik OIDC / OAuth2 PKCE Single Sign-On</strong>
+                  {isDev ? (
+                    <span className="aqua-dev-badge">[DEV PREVIEW]</span>
+                  ) : (
+                    <span className="aqua-coming-soon-pill" title={COMING_SOON_TOOLTIP}>
+                      Coming Soon
+                    </span>
+                  )}
+                </div>
+                <button className="aqua-btn" disabled={!isDev} onClick={() => runTest('authentik')}>
                   <Activity size={13} /> Test OIDC Discovery
                 </button>
               </div>
+
+              {!isDev && (
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: '8px 10px',
+                    borderRadius: 6,
+                    background: '#f1f5f9',
+                    border: '1px solid #cbd5e1',
+                    fontSize: 11,
+                    color: '#475569',
+                  }}
+                >
+                  {COMING_SOON_TOOLTIP}
+                </div>
+              )}
 
               <div style={{ marginBottom: 12 }}>
                 <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>Authentication Mode:</label>
                 <select
                   className="aqua-input"
                   style={{ width: '100%' }}
-                  value={form.authMode}
+                  disabled={!isDev}
+                  value={isDev ? form.authMode : 'standalone'}
                   onChange={(e) => updateField('authMode', e.target.value as any)}
                 >
                   <option value="standalone">Standalone Mode (Direct *arr & NFS/SMB connections)</option>
-                  <option value="authentik">Authentik SSO + Homelab Gateway Mode (OAuth2 PKCE)</option>
+                  <option value="authentik" disabled={!isDev}>
+                    Authentik SSO + Homelab Gateway Mode (OAuth2 PKCE)
+                  </option>
                 </select>
               </div>
 
@@ -799,6 +847,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 <input
                   className="aqua-input"
                   style={{ width: '100%' }}
+                  disabled={!isDev}
                   placeholder="https://auth.yourdomain.com/application/o/retrotunes/"
                   value={form.authentikIssuerUrl}
                   onChange={(e) => updateField('authentikIssuerUrl', e.target.value)}
@@ -811,6 +860,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   <input
                     className="aqua-input"
                     style={{ width: '100%' }}
+                    disabled={!isDev}
                     value={form.authentikClientId}
                     onChange={(e) => updateField('authentikClientId', e.target.value)}
                   />
@@ -820,6 +870,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   <input
                     className="aqua-input"
                     style={{ width: '100%' }}
+                    disabled={!isDev}
                     value={form.authentikRedirectUri}
                     onChange={(e) => updateField('authentikRedirectUri', e.target.value)}
                   />
@@ -833,6 +884,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 <input
                   className="aqua-input"
                   style={{ width: '100%' }}
+                  disabled={!isDev}
                   placeholder="https://gateway.yourdomain.com"
                   value={form.homelabGatewayUrl}
                   onChange={(e) => updateField('homelabGatewayUrl', e.target.value)}
@@ -852,17 +904,22 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 }}
               >
                 <div>
-                  {authState.authenticated && authState.user ? (
+                  {authState.authenticated && authState.user && isDev ? (
                     <span style={{ color: '#15803d', fontWeight: 700 }}>
                       Signed in via SSO as {authState.user.name} (@{authState.user.username})
                     </span>
                   ) : (
-                    <span style={{ color: '#475569' }}>Not currently signed in to Authentik SSO.</span>
+                    <span style={{ color: '#475569' }}>
+                      {isDev
+                        ? 'Not currently signed in to Authentik SSO.'
+                        : 'SSO is disabled in production builds (Standalone mode active).'}
+                    </span>
                   )}
                 </div>
-                {authState.authenticated ? (
+                {authState.authenticated && isDev ? (
                   <button
                     className="aqua-btn"
+                    disabled={!isDev}
                     onClick={async () => {
                       const next = await invokeRpc<AuthState>('auth:logout');
                       onAuthChanged(next);
@@ -873,6 +930,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 ) : (
                   <button
                     className="aqua-btn primary"
+                    disabled={!isDev}
                     onClick={async () => {
                       await invokeRpc('settings:save', form);
                       const next = await invokeRpc<AuthState>('auth:login');

@@ -16,7 +16,7 @@ RetroTunes (`rTunes`) is built on the shoulders of open-source libraries, multim
 | **better-sqlite3** | Synchronous embedded SQLite3 bindings powering the library index & FTS5 search | MIT | Joshua Wise |
 | **SQLite + FTS5** | High-performance relational storage and full-text search engine | Public Domain | SQLite Development Team |
 | **lucide-react** | Crisp vector UI iconography | ISC | Lucide Contributors |
-| **concurrently & wait-on** | Development orchestration scripts | MIT | Open-source Contributors |
+| **concurrently, wait-on & cross-env** | Development and cross-platform CLI orchestration scripts | MIT | Kent C. Dodds & Open-source Contributors |
 
 ---
 

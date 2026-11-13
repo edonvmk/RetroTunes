@@ -56,6 +56,7 @@ import {
   formatBytes,
   formatDuration,
   invokeRpc,
+  isDevMode,
   subscribeEvent,
 } from './bridge';
 import { PreferencesModal } from './components/PreferencesModal';
@@ -3402,16 +3403,33 @@ export const App: React.FC = () => {
             style={{
               display: 'inline-flex',
               alignItems: 'center',
-              gap: 4,
+              gap: 5,
               cursor: 'pointer',
               fontWeight: 600,
             }}
             onClick={() => setShowPreferences(true)}
+            title={
+              !isDevMode()
+                ? 'Coming soon — rTunes is currently focused on direct network shares, local media, and USB/MTP ePod syncing.'
+                : undefined
+            }
           >
-            <ShieldCheck size={13} color={authState.authenticated ? '#15803d' : '#475569'} />
-            {authState.authenticated && authState.user
-              ? `SSO: @${authState.user.username}`
-              : 'Mode: Standalone'}
+            <ShieldCheck size={13} color={isDevMode() && authState.authenticated ? '#15803d' : '#475569'} />
+            {isDevMode() ? (
+              authState.authenticated && authState.user ? (
+                <>
+                  SSO: @{authState.user.username} <span className="aqua-dev-badge">[DEV PREVIEW]</span>
+                </>
+              ) : (
+                <>
+                  Mode: Standalone <span className="aqua-dev-badge">[DEV]</span>
+                </>
+              )
+            ) : (
+              <>
+                Mode: Standalone <span className="aqua-coming-soon-pill">SSO: Coming Soon</span>
+              </>
+            )}
           </span>
         </div>
       </footer>

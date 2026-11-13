@@ -2,7 +2,7 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
-import { execFile, spawn } from 'child_process';
+import { ChildProcess, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { BrowserWindow } from 'electron';
 import {
@@ -1300,10 +1300,38 @@ async function fetchLrcFromLrclib(track: TrackRow): Promise<string | null> {
 }
 
 let cancelSyncRequested = false;
+let activeSyncAbortController: AbortController | null = null;
+let activeSyncChildProcess: ChildProcess | null = null;
+
+function killActiveSyncChild(): void {
+  const child = activeSyncChildProcess;
+  activeSyncChildProcess = null;
+  if (!child || !child.pid) return;
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore' });
+    } else {
+      child.kill('SIGKILL');
+    }
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // ignore
+    }
+  }
+}
 
 export function cancelDeviceSync(): void {
   cancelSyncRequested = true;
-  logger.info('DEVICE_SYNC', 'User requested cancellation of active ePod sync.');
+  activeSyncAbortController?.abort();
+  killActiveSyncChild();
+  broadcastSyncProgress({
+    running: false,
+    stage: 'Sync cancelled by user',
+    currentFile: '',
+  });
+  logger.info('DEVICE_SYNC', 'User requested cancellation of active ePod sync (hard-cancelled).');
 }
 
 async function sanitizeCoverArtTo500Baseline(
@@ -1389,6 +1417,7 @@ export async function syncDevice(uuid: string): Promise<SyncProgress> {
     return activeSyncProgress;
   }
   cancelSyncRequested = false;
+  activeSyncAbortController = new AbortController();
   broadcastSyncProgress({
     running: true,
     deviceUuid: uuid,
@@ -1456,12 +1485,36 @@ async function executeMtpBatchUpload(
     const poolUploaded = await withMtpLock(
       () =>
         new Promise<number>((resolve) => {
+          if (cancelSyncRequested) {
+            fsp.rm(batchFile, { force: true }).catch(() => {});
+            resolve(0);
+            return;
+          }
           const bin = getRtunesMtpBinaryPath();
           const child = spawn(bin, ['batch-put', storageId, batchFile]);
+          activeSyncChildProcess = child;
           let count = 0;
           let buffer = '';
+          let watchdog: NodeJS.Timeout | null = null;
+
+          const resetWatchdog = () => {
+            if (watchdog) clearTimeout(watchdog);
+            watchdog = setTimeout(() => {
+              logger.warn('DEVICE_SYNC', `MTP batch transfer stalled >35s on storage ${storageId}; terminating worker.`);
+              killActiveSyncChild();
+            }, 35000);
+          };
+          resetWatchdog();
+
+          const finish = () => {
+            if (watchdog) clearTimeout(watchdog);
+            if (activeSyncChildProcess === child) activeSyncChildProcess = null;
+            fsp.rm(batchFile, { force: true }).catch(() => {});
+            resolve(count);
+          };
 
           child.stdout.on('data', (chunk: Buffer) => {
+            resetWatchdog();
             buffer += chunk.toString('utf8');
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
@@ -1473,22 +1526,18 @@ async function executeMtpBatchUpload(
                 if (m) {
                   onItemUploaded(globalIdx, totalCount, m[3]);
                 }
+              } else if (line.startsWith('BATCH_ERR ')) {
+                globalIdx++;
+                logger.warn('DEVICE_SYNC', `MTP file skipped: ${line}`);
               }
             }
             if (cancelSyncRequested) {
-              child.kill('SIGTERM');
+              killActiveSyncChild();
             }
           });
 
-          child.on('close', () => {
-            fsp.rm(batchFile, { force: true }).catch(() => {});
-            resolve(count);
-          });
-
-          child.on('error', () => {
-            fsp.rm(batchFile, { force: true }).catch(() => {});
-            resolve(count);
-          });
+          child.on('close', finish);
+          child.on('error', finish);
         })
     );
     uploadedCount += poolUploaded;
@@ -2312,13 +2361,17 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
       playlistRootOnDevice
     );
     const favPlaylistPath = path.join(playlistRootOnDevice, 'Favorites.m3u8');
-    await fsp.writeFile(favPlaylistPath, favM3uContent, 'utf8');
-    await queueIfNeeded(favPlaylistPath, '/Playlists/Favorites.m3u8', 'music');
+    if (favM3uContent && favM3uContent.trim().length > 0) {
+      await fsp.writeFile(favPlaylistPath, favM3uContent, 'utf8');
+      await queueIfNeeded(favPlaylistPath, '/Playlists/Favorites.m3u8', 'music');
+    }
 
     const rootFavM3uContent = generateRelativeM3u8(lovedTracks, deviceAudioFileMap, localRootPath);
     const rootFavPath = path.join(localRootPath, 'Favorites.m3u');
-    await fsp.writeFile(rootFavPath, rootFavM3uContent, 'utf8');
-    await queueIfNeeded(rootFavPath, '/Favorites.m3u', 'music');
+    if (rootFavM3uContent && rootFavM3uContent.trim().length > 0) {
+      await fsp.writeFile(rootFavPath, rootFavM3uContent, 'utf8');
+      await queueIfNeeded(rootFavPath, '/Favorites.m3u', 'music');
+    }
 
     const playlists = db.prepare('SELECT * FROM playlists').all() as PlaylistRow[];
     for (const pl of playlists) {
@@ -2422,6 +2475,34 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
     logger.error('DEVICE_SYNC', `Sync failed for device ${uuid}`, err, Date.now() - start);
     throw err;
   }
+}
+
+export function deleteRegisteredDevice(uuid: string): { ok: boolean; message: string } {
+  const db = getDb();
+  const row = db.prepare('SELECT name FROM devices WHERE uuid = ?').get(uuid) as { name: string } | undefined;
+  if (!row) {
+    return { ok: false, message: 'Device not found.' };
+  }
+  db.prepare('DELETE FROM device_play_state WHERE device_uuid = ?').run(uuid);
+  db.prepare('DELETE FROM devices WHERE uuid = ?').run(uuid);
+  ejectedMtpUuids.delete(uuid);
+
+  try {
+    const cacheDir = getSettings().localCachePath;
+    if (fs.existsSync(cacheDir)) {
+      for (const file of fs.readdirSync(cacheDir)) {
+        if (file.startsWith(`mtp_ledger_${uuid}_`) || file.startsWith(`.manifest_${uuid}`)) {
+          fs.rmSync(path.join(cacheDir, file), { force: true });
+        }
+      }
+    }
+  } catch {
+    // ignore cleanup errors
+  }
+
+  broadcastDevicesChanged();
+  logger.info('DEVICE_SYNC', `Deleted registered device "${row.name}" (${uuid}).`);
+  return { ok: true, message: `Forgot device "${row.name}".` };
 }
 
 export async function ejectDevice(uuid: string): Promise<{ ok: boolean; message: string }> {

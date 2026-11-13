@@ -51,6 +51,7 @@ import {
   getRegisteredDevicesAsync,
   provisionDevice,
   updateDeviceProfile,
+  deleteRegisteredDevice,
   syncDevice,
   cancelDeviceSync,
   getSyncProgress,
@@ -59,6 +60,10 @@ import {
   startMtpUsbPoller,
   DeviceProfile,
 } from './deviceSync';
+import {
+  getTranscoderBinaryStatus,
+  checkAndUpdateTranscoderBinaries,
+} from './transcoder/binaryManager';
 import {
   getStorefrontHome,
   searchStoreCatalog,
@@ -499,12 +504,17 @@ function registerAllHandlers() {
     migrateDeviceToMtp(uuid, targetStorageId)
   );
   registerChannel('devices:sync', (uuid: string) => syncDevice(uuid));
+  registerChannel('devices:delete', (uuid: string) => deleteRegisteredDevice(uuid));
   registerChannel('devices:cancelSync', () => {
     cancelDeviceSync();
     return { ok: true };
   });
   registerChannel('devices:syncProgress', () => getSyncProgress());
   registerChannel('devices:eject', (uuid: string) => ejectDevice(uuid));
+  registerChannel('transcoder:getBinaryStatus', () => getTranscoderBinaryStatus());
+  registerChannel('transcoder:checkUpdateBinaries', (opts?: { forceDownload?: boolean; autoDownload?: boolean }) =>
+    checkAndUpdateTranscoderBinaries(opts)
+  );
   registerChannel('devices:getAutoOpenOnMtp', () => platformDriver.getAutoOpenOnMtp());
   registerChannel('devices:setAutoOpenOnMtp', (enabled: boolean) => {
     const launchCmd = app.isPackaged
@@ -634,6 +644,11 @@ function sendUiEvent(channel: string) {
 
 function setupApplicationMenu() {
   const isMac = platformDriver.isMacOsStyleMenu;
+  if (!isMac) {
+    // Remove the native File/Edit/View/Help bar on Windows & Linux so the brushed-metal bar sits flush.
+    Menu.setApplicationMenu(null);
+    return;
+  }
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac
       ? [
@@ -721,6 +736,7 @@ function createMainWindow() {
     minHeight: 680,
     title: 'RetroTunes (rTunes)',
     backgroundColor: '#d4dae2',
+    autoHideMenuBar: !platformDriver.isMacOsStyleMenu,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 14 },
     webPreferences: {
@@ -767,6 +783,11 @@ app.whenReady().then(async () => {
       void startBackgroundMetadataTrickle();
     }
   }, 2500);
+
+  // Non-blocking startup check & auto-update for FFmpeg / HandBrakeCLI
+  setTimeout(() => {
+    void checkAndUpdateTranscoderBinaries({ autoDownload: true });
+  }, 4000);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

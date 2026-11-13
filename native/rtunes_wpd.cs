@@ -293,6 +293,7 @@ namespace RetroTunesWpd {
             }
 
             var fi = new FileInfo(localPath);
+            if (fi.Length == 0) return true;
             var props = (PortableDeviceApiLib.IPortableDeviceValues)new PortableDeviceValuesClass();
             props.SetStringValue(ref WpdKeys.WPD_OBJECT_PARENT_ID, parentId);
             props.SetStringValue(ref WpdKeys.WPD_OBJECT_NAME, Path.GetFileNameWithoutExtension(fileName));
@@ -486,9 +487,23 @@ namespace RetroTunesWpd {
                             var parts = l.Split('\t');
                             if (parts.Length < 2) continue;
                             idx++;
-                            if (s.PutFile(storageId, parts[0], parts[1])) {
-                                Console.WriteLine("BATCH_OK " + idx + "/" + total + " " + parts[1]);
-                                Console.Out.Flush();
+                            bool timedOut = false;
+                            using (var watchdog = new System.Threading.Timer(_ => {
+                                timedOut = true;
+                                try { s.Device.Cancel(); } catch { }
+                            }, null, 30000, System.Threading.Timeout.Infinite)) {
+                                try {
+                                    if (s.PutFile(storageId, parts[0], parts[1])) {
+                                        Console.WriteLine("BATCH_OK " + idx + "/" + total + " " + parts[1]);
+                                        Console.Out.Flush();
+                                    } else {
+                                        Console.WriteLine("BATCH_ERR " + idx + "/" + total + " " + parts[1] + " failed");
+                                        Console.Out.Flush();
+                                    }
+                                } catch (Exception ex) {
+                                    Console.WriteLine("BATCH_ERR " + idx + "/" + total + " " + parts[1] + " " + (timedOut ? "timeout_30s" : ex.Message));
+                                    Console.Out.Flush();
+                                }
                             }
                         }
                         return 0;

@@ -24,6 +24,13 @@ interface PreferencesModalProps {
   onClose: () => void;
   onSaved: (updated: AppSettings) => void;
   onAuthChanged: (auth: AuthState) => void;
+  onOpenUpload?: () => void;
+  onOpenDiagnostics?: () => void;
+  onOpenAbout?: () => void;
+  onOpenNewPlaylist?: () => void;
+  onOpenNewSmartPlaylist?: () => void;
+  onRescanLibrary?: () => void;
+  onDevicesChanged?: () => void;
 }
 
 export const PreferencesModal: React.FC<PreferencesModalProps> = ({
@@ -32,8 +39,18 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   onClose,
   onSaved,
   onAuthChanged,
+  onOpenUpload,
+  onOpenDiagnostics,
+  onOpenAbout,
+  onOpenNewPlaylist,
+  onOpenNewSmartPlaylist,
+  onRescanLibrary,
+  onDevicesChanged,
 }) => {
-  const [tab, setTab] = useState<'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'about'>('paths');
+  const [tab, setTab] = useState<'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'actions' | 'about'>('paths');
+  const [registeredDevices, setRegisteredDevices] = useState<any[]>([]);
+  const [binaryStatus, setBinaryStatus] = useState<any>(null);
+  const [checkingBinaries, setCheckingBinaries] = useState(false);
   const [form, setForm] = useState<AppSettings>({ ...settings });
   const [saving, setSaving] = useState(false);
   const [testingTarget, setTestingTarget] = useState<string | null>(null);
@@ -91,6 +108,12 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     void loadShares();
     invokeRpc<boolean>('devices:getAutoOpenOnMtp')
       .then((v) => setAutoOpenOnMtp(Boolean(v)))
+      .catch(() => {});
+    invokeRpc<any[]>('devices:list')
+      .then((list) => setRegisteredDevices(Array.isArray(list) ? list : []))
+      .catch(() => {});
+    invokeRpc<any>('transcoder:getBinaryStatus')
+      .then((st) => setBinaryStatus(st))
       .catch(() => {});
   }, []);
 
@@ -222,6 +245,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             { id: 'cache', label: 'Cache & Transcoder', icon: <HardDrive size={18} /> },
             { id: 'auth', label: isDev ? 'Authentik SSO [DEV]' : 'Authentik SSO', icon: <ShieldCheck size={18} /> },
             { id: 'apis', label: 'Store & API Keys', icon: <KeyRound size={18} /> },
+            { id: 'actions', label: 'Actions & Help', icon: <Activity size={18} /> },
             { id: 'about', label: 'About & Credits', icon: <Info size={18} /> },
           ].map((item) => (
             <button
@@ -315,53 +339,71 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   </button>
                 </div>
 
-                {[
-                  {
-                    key: 'nfsSharePath' as const,
-                    label: 'NFS / SMB Master Share Root:',
-                    placeholder: '/Volumes/MediaShare or /mnt/nfs/media',
-                  },
-                  {
-                    key: 'musicRootPath' as const,
-                    label: 'Music Library Root (FLAC/MP3/M4A):',
-                    placeholder: '/Volumes/MediaShare/Music',
-                  },
-                  {
-                    key: 'videoRootPath' as const,
-                    label: 'Movies Library Root:',
-                    placeholder: '/Volumes/MediaShare/Movies',
-                  },
-                  {
-                    key: 'tvRootPath' as const,
-                    label: 'TV Shows Library Root:',
-                    placeholder: '/Volumes/MediaShare/TV Shows',
-                  },
-                  {
-                    key: 'musicVideosRootPath' as const,
-                    label: 'Music Videos Library Root:',
-                    placeholder: '/Volumes/MediaShare/Music Videos',
-                  },
-                  {
-                    key: 'booksRootPath' as const,
-                    label: 'Books (eBooks) Library Root (EPUB/PDF/CBZ):',
-                    placeholder: '/Volumes/MediaShare/Books',
-                  },
-                  {
-                    key: 'audiobooksRootPath' as const,
-                    label: 'Audiobooks Library Root (M4B/MP3):',
-                    placeholder: '/Volumes/MediaShare/Audiobooks',
-                  },
-                  {
-                    key: 'photosRootPath' as const,
-                    label: 'Photos / Immich Library Root:',
-                    placeholder: '/Volumes/MediaShare/Photos',
-                  },
-                  {
-                    key: 'localCachePath' as const,
-                    label: 'Local Pre-Cache Directory:',
-                    placeholder: '~/Library/Caches/RetroTunes',
-                  },
-                ].map((row) => (
+                {(() => {
+                  const hostPlatform = window.electronAPI?.platform || 'win32';
+                  const isWin = hostPlatform === 'win32';
+                  const isMac = hostPlatform === 'darwin';
+                  const shareRootPlaceholder = isWin
+                    ? '\\\\NAS-SERVER\\MediaShare or Z:\\MediaShare'
+                    : isMac
+                    ? '/Volumes/MediaShare'
+                    : '/mnt/nfs/media';
+                  const sep = isWin ? '\\' : '/';
+                  const sub = (folder: string) =>
+                    isWin ? `Z:\\MediaShare\\${folder}` : isMac ? `/Volumes/MediaShare/${folder}` : `/mnt/nfs/media/${folder}`;
+                  const cachePlaceholder = isWin
+                    ? 'C:\\Users\\<username>\\AppData\\Local\\RetroTunes\\Cache'
+                    : isMac
+                    ? '~/Library/Caches/RetroTunes'
+                    : '~/.cache/RetroTunes';
+                  return [
+                    {
+                      key: 'nfsSharePath' as const,
+                      label: 'NFS / SMB Master Share Root:',
+                      placeholder: shareRootPlaceholder,
+                    },
+                    {
+                      key: 'musicRootPath' as const,
+                      label: 'Music Library Root (FLAC/MP3/M4A):',
+                      placeholder: sub('Music'),
+                    },
+                    {
+                      key: 'videoRootPath' as const,
+                      label: 'Movies Library Root:',
+                      placeholder: sub('Movies'),
+                    },
+                    {
+                      key: 'tvRootPath' as const,
+                      label: 'TV Shows Library Root:',
+                      placeholder: sub(`TV Shows${sep ? '' : ''}`),
+                    },
+                    {
+                      key: 'musicVideosRootPath' as const,
+                      label: 'Music Videos Library Root:',
+                      placeholder: sub('Music Videos'),
+                    },
+                    {
+                      key: 'booksRootPath' as const,
+                      label: 'Books (eBooks) Library Root (EPUB/PDF/CBZ):',
+                      placeholder: sub('Books'),
+                    },
+                    {
+                      key: 'audiobooksRootPath' as const,
+                      label: 'Audiobooks Library Root (M4B/MP3):',
+                      placeholder: sub('Audiobooks'),
+                    },
+                    {
+                      key: 'photosRootPath' as const,
+                      label: 'Photos / Immich Library Root:',
+                      placeholder: sub('Photos'),
+                    },
+                    {
+                      key: 'localCachePath' as const,
+                      label: 'Local Pre-Cache Directory:',
+                      placeholder: cachePlaceholder,
+                    },
+                  ];
+                })().map((row) => (
                   <div key={row.key} style={{ marginBottom: 10 }}>
                     <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>{row.label}</label>
                     <div style={{ display: 'flex', gap: 6 }}>
@@ -749,6 +791,54 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 >
                   Clear Local Cache
                 </button>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 16,
+                  paddingTop: 14,
+                  borderTop: '1px solid #cbd5e1',
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <strong>Transcoder Binaries (FFmpeg &amp; HandBrakeCLI)</strong>
+                  <button
+                    className="aqua-btn primary"
+                    disabled={checkingBinaries}
+                    onClick={async () => {
+                      setCheckingBinaries(true);
+                      setStatusBanner('Checking / updating FFmpeg & HandBrakeCLI...');
+                      try {
+                        const res = await invokeRpc<any>('transcoder:checkUpdateBinaries', {
+                          forceDownload: true,
+                          autoDownload: true,
+                        });
+                        setBinaryStatus(res);
+                        setStatusBanner('Transcoder binaries checked & updated.');
+                      } catch (err) {
+                        setStatusBanner(`Binary check failed: ${String(err)}`);
+                      } finally {
+                        setCheckingBinaries(false);
+                      }
+                    }}
+                  >
+                    {checkingBinaries ? 'Checking...' : 'Check & Update FFmpeg / HandBrakeCLI'}
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: '#334155', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div>
+                    <strong>FFmpeg:</strong>{' '}
+                    {binaryStatus?.ffmpeg?.found
+                      ? `${binaryStatus.ffmpeg.version || 'Installed'} (${binaryStatus.ffmpeg.path})`
+                      : 'Not found — click Check & Update to auto-install'}
+                  </div>
+                  <div>
+                    <strong>HandBrakeCLI:</strong>{' '}
+                    {binaryStatus?.handbrake?.found
+                      ? `${binaryStatus.handbrake.version || 'Installed'} (${binaryStatus.handbrake.path})`
+                      : 'Not found — click Check & Update to auto-install'}
+                  </div>
+                </div>
               </div>
 
               <div
@@ -1282,6 +1372,119 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   <div style={{ marginTop: 6, marginLeft: 22, fontSize: 11, color: '#64748b' }}>
                     Registers RetroTunes as a Windows AutoPlay handler for MTP media players so connecting your ePod/Y2 can launch rTunes automatically.
                   </div>
+                </div>
+              </div>
+
+              <div className="epod-capacity-card">
+                <strong style={{ display: 'block', marginBottom: 8 }}>
+                  Known &amp; Registered Devices ({registeredDevices.length})
+                </strong>
+                <p style={{ margin: '0 0 10px', fontSize: 11.5, color: '#475569' }}>
+                  Manage saved ePod / MTP device profiles stored in SQLite. Deleting a device removes its saved sync rules and play-state history from this PC (it does not erase media on the device).
+                </p>
+                {registeredDevices.length === 0 ? (
+                  <div style={{ fontSize: 11.5, color: '#64748b', fontStyle: 'italic' }}>
+                    No registered devices found.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {registeredDevices.map((dev) => (
+                      <div
+                        key={dev.uuid}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '8px 10px',
+                          borderRadius: 6,
+                          border: '1px solid #cbd5e1',
+                          background: '#f8fafc',
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 700, fontSize: 12, color: '#0f172a' }}>
+                            {dev.name}{' '}
+                            <span style={{ fontWeight: 500, fontSize: 10.5, color: '#64748b' }}>
+                              ({(dev.transport_mode || dev.profile?.transportMode || 'ums').toUpperCase()})
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 10.5, color: '#64748b', fontFamily: 'var(--font-mono)' }}>
+                            UUID: {dev.uuid}{' '}
+                            {(dev.mtp_serial || dev.profile?.mtpSerial)
+                              ? `• Serial: ${dev.mtp_serial || dev.profile?.mtpSerial}`
+                              : ''}
+                          </div>
+                        </div>
+                        <button
+                          className="aqua-btn"
+                          style={{ color: '#b91c1c', borderColor: '#fca5a5' }}
+                          onClick={async () => {
+                            if (
+                              !window.confirm(
+                                `Forget "${dev.name}" (${dev.uuid}) from RetroTunes? This removes its saved profile and play-state history from SQLite.`
+                              )
+                            ) {
+                              return;
+                            }
+                            const res = await invokeRpc<{ ok: boolean; message: string }>(
+                              'devices:delete',
+                              dev.uuid
+                            );
+                            if (res.ok) {
+                              const next = await invokeRpc<any[]>('devices:list');
+                              setRegisteredDevices(next);
+                              onDevicesChanged?.();
+                            }
+                            setStatusBanner(res.message);
+                          }}
+                        >
+                          Delete / Forget
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === 'actions' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div className="epod-capacity-card">
+                <strong style={{ display: 'block', marginBottom: 8 }}>
+                  Library, Playlists &amp; App Actions
+                </strong>
+                <p style={{ margin: '0 0 12px', fontSize: 11.5, color: '#475569' }}>
+                  Quick access to RetroTunes library, playlist, diagnostics, and help commands.
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
+                  <button className="aqua-btn primary" onClick={() => onOpenUpload?.()}>
+                    Import / Upload Media...
+                  </button>
+                  <button
+                    className="aqua-btn"
+                    onClick={() => {
+                      onRescanLibrary?.();
+                      setStatusBanner('Background library scan triggered.');
+                    }}
+                  >
+                    Rescan Library Now
+                  </button>
+                  <button className="aqua-btn" onClick={() => onOpenNewPlaylist?.()}>
+                    New Playlist...
+                  </button>
+                  <button className="aqua-btn" onClick={() => onOpenNewSmartPlaylist?.()}>
+                    New Smart Playlist...
+                  </button>
+                  <button className="aqua-btn" onClick={() => onOpenDiagnostics?.()}>
+                    Open Live Logs &amp; Diagnostics
+                  </button>
+                  <button className="aqua-btn" onClick={() => onOpenAbout?.()}>
+                    About RetroTunes &amp; Credits
+                  </button>
+                  <button className="aqua-btn" onClick={() => window.location.reload()}>
+                    Reload Interface
+                  </button>
                 </div>
               </div>
             </div>

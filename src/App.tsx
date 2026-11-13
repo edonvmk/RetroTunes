@@ -211,6 +211,8 @@ export const App: React.FC = () => {
   const [newPlaylistName, setNewPlaylistName] = useState('New Playlist');
   const [newPlaylistMediaType, setNewPlaylistMediaType] = useState<'music' | 'video' | 'mixed'>('mixed');
   const [dragOverPlaylistId, setDragOverPlaylistId] = useState<number | null>(null);
+  const [dragOverDeviceUuid, setDragOverDeviceUuid] = useState<string | null>(null);
+  const [dragOverView, setDragOverView] = useState<'tv' | 'movies' | null>(null);
   const [toastBanner, setToastBanner] = useState<string | null>(null);
   const [showAddDeviceWizard, setShowAddDeviceWizard] = useState(false);
   const [showUploadWizard, setShowUploadWizard] = useState(false);
@@ -317,10 +319,19 @@ export const App: React.FC = () => {
     const unsubOpenPrefs = subscribeEvent<void>('ui:openPreferences', () => {
       setShowPreferences(true);
     });
+    const unsubBinaryProgress = subscribeEvent<{ running: boolean; stage: string; percent?: number }>(
+      'transcoder:binaryProgress',
+      (bp) => {
+        if (bp.stage) {
+          setToastBanner(bp.stage);
+        }
+      }
+    );
 
     return () => {
       unsubOpenAbout();
       unsubOpenPrefs();
+      unsubBinaryProgress();
       unsubLog();
       unsubIdx();
       unsubBatch();
@@ -385,12 +396,15 @@ export const App: React.FC = () => {
 
   const handleDropOnPlaylist = async (pl: PlaylistRow, e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setDragOverPlaylistId(null);
     if (pl.is_smart) {
       showToast(`"${pl.name}" is a Smart Playlist (populated automatically by rules).`);
       return;
     }
-    const raw = e.dataTransfer.getData('application/json');
+    const raw =
+      e.dataTransfer.getData('application/x-rtunes-media') ||
+      e.dataTransfer.getData('application/json');
     if (!raw) return;
     try {
       const payload = JSON.parse(raw) as
@@ -432,6 +446,73 @@ export const App: React.FC = () => {
       }
     } catch {
       // ignore invalid drag data
+    }
+  };
+
+  const handleDropOnDevice = async (dev: DeviceInfo, e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverDeviceUuid(null);
+    const raw =
+      e.dataTransfer.getData('application/x-rtunes-media') ||
+      e.dataTransfer.getData('application/json');
+    if (raw) {
+      try {
+        const payload = JSON.parse(raw) as
+          | { kind: 'track'; id: number; title: string }
+          | { kind: 'video'; id: number; title: string }
+          | { kind: 'show'; showName: string };
+
+        if (payload.kind === 'video') {
+          const nextVideos = Array.from(new Set([...(dev.profile.syncVideoIds || []), payload.id]));
+          await invokeRpc('devices:updateProfile', { ...dev.profile, syncVideoIds: nextVideos });
+          showToast(`Added "${payload.title}" to ${dev.name} sync queue.`);
+        } else if (payload.kind === 'show') {
+          const eps = videos
+            .filter((v) => v.type === 'tv' && (v.show_name || v.title) === payload.showName)
+            .map((v) => v.id);
+          const nextVideos = Array.from(new Set([...(dev.profile.syncVideoIds || []), ...eps]));
+          await invokeRpc('devices:updateProfile', { ...dev.profile, syncVideoIds: nextVideos });
+          showToast(`Added ${eps.length} episode(s) of "${payload.showName}" to ${dev.name} sync queue.`);
+        } else if (payload.kind === 'track') {
+          const queueName = `ePod Queue (${dev.name})`;
+          let queuePl = playlists.find((p) => !p.is_smart && p.name === queueName);
+          let queueId = queuePl?.id;
+          if (!queueId) {
+            queueId = await invokeRpc<number>('playlists:save', {
+              name: queueName,
+              isSmart: false,
+              mediaType: 'music',
+            });
+          }
+          await invokeRpc('playlists:addTrack', queueId, payload.id);
+          const nextPls = Array.from(new Set([...(dev.profile.syncPlaylistIds || []), queueId]));
+          await invokeRpc('devices:updateProfile', { ...dev.profile, syncPlaylistIds: nextPls });
+          showToast(`Added "${payload.title}" to ${dev.name} (${queueName}).`);
+        }
+        await refreshAllData();
+        return;
+      } catch {
+        // ignore invalid drag payload
+      }
+    }
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      showToast(
+        `Dropped ${e.dataTransfer.files.length} file(s) onto ${dev.name}. Opening Upload Wizard to import & sync...`
+      );
+      setShowUploadWizard(true);
+    }
+  };
+
+  const handleDropOnLibraryView = (target: 'tv' | 'movies', e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverView(null);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      showToast(
+        `Dropped ${e.dataTransfer.files.length} file(s) onto ${target === 'tv' ? 'TV Shows' : 'Movies'}. Opening Upload Wizard...`
+      );
+      setShowUploadWizard(true);
     }
   };
 
@@ -1339,14 +1420,50 @@ export const App: React.FC = () => {
               return visibleDevices.map((dev) => {
                 const isSelected = nav.kind === 'device' && nav.uuid === dev.uuid;
                 const connected = isDevConnected(dev);
+                const isDragOver = dragOverDeviceUuid === dev.uuid;
                 return (
                   <div
                     key={dev.uuid}
                     className={`source-item ${isSelected ? 'selected' : ''}`}
-                    style={!connected ? { opacity: 0.72 } : undefined}
+                    style={{
+                      ...(!connected ? { opacity: 0.72 } : {}),
+                      ...(isDragOver
+                        ? {
+                            outline: '2px solid #2563eb',
+                            background: isSelected ? undefined : '#dbeafe',
+                          }
+                        : {}),
+                    }}
                     onClick={() => setNav({ kind: 'device', uuid: dev.uuid })}
+                    onDragEnter={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = 'copy';
+                      setDragOverDeviceUuid(dev.uuid);
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      e.dataTransfer.dropEffect = 'copy';
+                      if (dragOverDeviceUuid !== dev.uuid) {
+                        setDragOverDeviceUuid(dev.uuid);
+                      }
+                    }}
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                        setDragOverDeviceUuid(null);
+                      }
+                    }}
+                    onDrop={(e) => void handleDropOnDevice(dev, e)}
                   >
-                    <div className="source-item-left" style={{ minWidth: 0, flex: 1 }}>
+                    <div
+                      className="source-item-left"
+                      style={{
+                        minWidth: 0,
+                        flex: 1,
+                        pointerEvents: isDragOver ? 'none' : undefined,
+                      }}
+                    >
                       <Usb
                         size={14}
                         color={isSelected ? '#fff' : connected ? '#0284c7' : '#94a3b8'}
@@ -2004,10 +2121,10 @@ export const App: React.FC = () => {
                                 className={isCurrent ? 'active-row' : ''}
                                 draggable
                                 onDragStart={(e) => {
-                                  e.dataTransfer.setData(
-                                    'application/json',
-                                    JSON.stringify({ kind: 'track', id: track.id, title: track.title })
-                                  );
+                                  const payload = JSON.stringify({ kind: 'track', id: track.id, title: track.title });
+                                  e.dataTransfer.effectAllowed = 'copy';
+                                  e.dataTransfer.setData('application/x-rtunes-media', payload);
+                                  e.dataTransfer.setData('application/json', payload);
                                 }}
                                 onDoubleClick={() => void playTrack(track)}
                               >
@@ -2286,7 +2403,34 @@ export const App: React.FC = () => {
 
           {/* 2A. TV SHOWS ORGANIZED BY SHOW -> SEASON -> EPISODE */}
           {nav.kind === 'tv' && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                outline: dragOverView === 'tv' ? '2px dashed #2563eb' : undefined,
+                outlineOffset: -4,
+              }}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'copy';
+                setDragOverView('tv');
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'copy';
+                if (dragOverView !== 'tv') setDragOverView('tv');
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                  setDragOverView(null);
+                }
+              }}
+              onDrop={(e) => handleDropOnLibraryView('tv', e)}
+            >
               <div
                 style={{
                   height: 36,
@@ -2374,10 +2518,10 @@ export const App: React.FC = () => {
                           key={show.showName}
                           draggable
                           onDragStart={(e) => {
-                            e.dataTransfer.setData(
-                              'application/json',
-                              JSON.stringify({ kind: 'show', showName: show.showName })
-                            );
+                            const payload = JSON.stringify({ kind: 'show', showName: show.showName });
+                            e.dataTransfer.effectAllowed = 'copy';
+                            e.dataTransfer.setData('application/x-rtunes-media', payload);
+                            e.dataTransfer.setData('application/json', payload);
                           }}
                           onClick={() => {
                             setSelectedTvShow(show.showName);
@@ -2598,10 +2742,10 @@ export const App: React.FC = () => {
                                   key={ep.id}
                                   draggable
                                   onDragStart={(e) => {
-                                    e.dataTransfer.setData(
-                                      'application/json',
-                                      JSON.stringify({ kind: 'video', id: ep.id, title: ep.title })
-                                    );
+                                    const payload = JSON.stringify({ kind: 'video', id: ep.id, title: ep.title });
+                                    e.dataTransfer.effectAllowed = 'copy';
+                                    e.dataTransfer.setData('application/x-rtunes-media', payload);
+                                    e.dataTransfer.setData('application/json', payload);
                                   }}
                                   onDoubleClick={async () => {
                                     setActiveVideo(ep);
@@ -2687,7 +2831,34 @@ export const App: React.FC = () => {
 
           {/* 2B. MOVIES VIEW WITH POSTER ARTWORK */}
           {nav.kind === 'movies' && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                outline: dragOverView === 'movies' ? '2px dashed #2563eb' : undefined,
+                outlineOffset: -4,
+              }}
+              onDragEnter={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'copy';
+                setDragOverView('movies');
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                e.dataTransfer.dropEffect = 'copy';
+                if (dragOverView !== 'movies') setDragOverView('movies');
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                  setDragOverView(null);
+                }
+              }}
+              onDrop={(e) => handleDropOnLibraryView('movies', e)}
+            >
               <div
                 style={{
                   height: 36,
@@ -2751,10 +2922,10 @@ export const App: React.FC = () => {
                               key={v.id}
                               draggable
                               onDragStart={(e) => {
-                                e.dataTransfer.setData(
-                                  'application/json',
-                                  JSON.stringify({ kind: 'video', id: v.id, title: v.title })
-                                );
+                                const payload = JSON.stringify({ kind: 'video', id: v.id, title: v.title });
+                                e.dataTransfer.effectAllowed = 'copy';
+                                e.dataTransfer.setData('application/x-rtunes-media', payload);
+                                e.dataTransfer.setData('application/json', payload);
                               }}
                               onDoubleClick={async () => {
                                 setActiveVideo(v);
@@ -3635,6 +3806,36 @@ export const App: React.FC = () => {
             void refreshAllData();
           }}
           onAuthChanged={setAuthState}
+          onOpenUpload={() => {
+            setShowPreferences(false);
+            setShowUploadWizard(true);
+          }}
+          onOpenDiagnostics={() => {
+            setShowPreferences(false);
+            setShowDiagnostics(true);
+          }}
+          onOpenAbout={() => {
+            setShowPreferences(false);
+            setShowAbout(true);
+          }}
+          onOpenNewPlaylist={() => {
+            setShowPreferences(false);
+            setNewPlaylistName('New Playlist');
+            setNewPlaylistMediaType('mixed');
+            setShowNewPlaylistModal(true);
+          }}
+          onOpenNewSmartPlaylist={() => {
+            setShowPreferences(false);
+            setEditingPlaylist(null);
+            setShowSmartModal(true);
+          }}
+          onRescanLibrary={() => {
+            void invokeRpc('indexer:scan');
+            showToast('Library scan started in background.');
+          }}
+          onDevicesChanged={() => {
+            void invokeRpc<DeviceInfo[]>('devices:list').then(setDevices);
+          }}
         />
       )}
 

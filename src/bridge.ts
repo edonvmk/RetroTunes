@@ -2,6 +2,7 @@ declare global {
   interface Window {
     electronAPI?: {
       isDev: boolean;
+      platform?: NodeJS.Platform;
     };
     rtunesElectron?: {
       isDev?: boolean;

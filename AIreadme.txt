@@ -41,6 +41,7 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
   - `electron/providers/standaloneLocal.ts` — Active default provider for local SQLite + direct NFS/SMB access (never modify for SSO or Docker server changes).
   - `electron/providers/remoteServer.ts` — Isolated stub/preview provider for future `rTunes-Server` Docker HTTPS/WebSocket API (gated behind `isDev === true`).
   - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>`).
+  - `electron/transcoder/binaryManager.ts` — Startup auto-check & updater for managed `FFmpeg` and `HandBrakeCLI` binaries.
   - `electron/mediaServer.ts` — Local HTTP range-streaming server for audio/video playback.
   - `electron/platform/` — Cross-platform OS drivers: `darwin.ts`, `win32.ts`, `linux.ts`.
 - `native/` — Native helpers (`native/rtunes_mtp.c` on macOS, `native/rtunes_wpd.cs` on Windows, compiled to `.toolchain/bin/rtunes-mtp`).
@@ -52,9 +53,9 @@ Do **not** duplicate existing handlers. Always reuse or extend the existing chan
 - **Tracks & Videos:** `tracks:search`, `tracks:rate`, `tracks:recordPlay`, `tracks:hydrate`, `tracks:hydrateAlbum`, `tracks:getLyrics`, `videos:search`, `videos:markWatched`, `videos:hydrateArtwork`, `videos:updateProgress`, `audiobooks:updateProgress`
 - **Extended Media & Sync:** `books:list`, `audiobooks:list`, `photos:list`, `musicVideos:list`, `media:syncPlexAndAbs`
 - **Indexer:** `indexer:scan`, `indexer:cancel`, `indexer:progress`, `indexer:syncPopularity`, `indexer:recalculateMedians`, `indexer:cleanAllTitles`, `indexer:scanExtended`
-- **Cache:** `cache:stats`, `cache:clear`, `cache:toggleTrack`, `cache:toggleAlbum`, `cache:toggleVideo`, `cache:toggleShow`, `cache:precacheAllPlaylists`
+- **Cache:** `cache:stats`, `cache:clear`, `cache:toggleTrack`, `cache:toggleAlbum`, `cache:toggleVideo`, `cache:toggleShow`, `cache:precacheAllPlaylists`, `transcoder:getBinaryStatus`, `transcoder:checkUpdateBinaries`
 - **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`
-- **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`
+- **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`
 - **Shares & Upload:** `shares:list`, `shares:save`, `shares:delete`, `shares:mount`, `shares:unmount`, `shares:autoDetect`, `upload:searchMetadata`, `upload:previewPlan`, `upload:execute`
 - **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `auth:getState`, `auth:login`, `auth:logout`
 

@@ -4,6 +4,7 @@ const isDev = process.argv.includes('--rtunes-dev');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   isDev,
+  platform: process.platform,
 });
 
 contextBridge.exposeInMainWorld('rtunesElectron', {

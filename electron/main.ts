@@ -92,6 +92,7 @@ import {
 } from './authOidc';
 import { startMediaServer, getMediaServerPort } from './mediaServer';
 import { logger, LogLevel, LogSubsystem } from './logger';
+import { platformDriver } from './platform';
 
 type HandlerFn = (...args: any[]) => Promise<any> | any;
 const handlerRegistry = new Map<string, HandlerFn>();
@@ -619,7 +620,7 @@ function sendUiEvent(channel: string) {
 }
 
 function setupApplicationMenu() {
-  const isMac = process.platform === 'darwin';
+  const isMac = platformDriver.isMacOsStyleMenu;
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac
       ? [
@@ -755,7 +756,7 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (platformDriver.quitOnAllWindowsClosed) {
     app.quit();
   }
 });

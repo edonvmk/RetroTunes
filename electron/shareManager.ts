@@ -8,6 +8,7 @@ import { getDb, NetworkShareRow, TrackRow, VideoRow } from './db';
 import { getSettings, saveSettings, getKeychainSecret, setKeychainSecret } from './settings';
 import { getAuthState } from './authOidc';
 import { logger } from './logger';
+import { platformDriver } from './platform';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,7 +83,7 @@ function updateShareSubpaths(db: ReturnType<typeof getDb>, id: number, fm: Share
 export function getMountsRootDir(): string {
   const userData = app?.isReady()
     ? app.getPath('userData')
-    : path.join(process.env.HOME || '/tmp', 'Library/Application Support/RetroTunes');
+    : platformDriver.getFallbackUserDataDir();
   const dir = path.join(userData, 'mounts');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -221,44 +222,23 @@ export async function mountNetworkShare(
 
   let folderMap = rowToFolderMap(row);
 
-  // 1. Check if user specified a local /Volumes/... path in export_path that is already mounted by macOS
-  if (row.export_path.startsWith('/Volumes/') && fs.existsSync(row.export_path)) {
+  // 1. Check if the share is already mounted via the OS driver (e.g. /Volumes/... or UNC)
+  const existingMount = platformDriver.resolveExistingShareMount(row.export_path);
+  if (existingMount) {
     db.prepare("UPDATE network_shares SET mount_point = ?, status = 'mounted', last_error = NULL WHERE id = ?").run(
-      row.export_path,
+      existingMount,
       id
     );
-    const detected = autoDetectShareFolders(row.export_path);
+    const detected = autoDetectShareFolders(existingMount);
     if (Object.values(detected).some(Boolean)) {
       folderMap = { ...folderMap, ...detected };
       updateShareSubpaths(db, id, folderMap);
     }
-    applyShareFolderMappingToSettings(row.export_path, folderMap);
+    applyShareFolderMappingToSettings(existingMount, folderMap);
     return {
       ok: true,
-      mountPoint: row.export_path,
-      message: `Bound to mounted volume at ${row.export_path}`,
-      folderMap,
-    };
-  }
-
-  // Also check if the last segment of export_path is already mounted under /Volumes/<segment>
-  const baseSegment = path.basename(row.export_path.replace(/\/+$/, ''));
-  const candidateVol = path.join('/Volumes', baseSegment);
-  if (baseSegment && fs.existsSync(candidateVol) && isDirectoryNonEmpty(candidateVol)) {
-    db.prepare("UPDATE network_shares SET mount_point = ?, status = 'mounted', last_error = NULL WHERE id = ?").run(
-      candidateVol,
-      id
-    );
-    const detected = autoDetectShareFolders(candidateVol);
-    if (Object.values(detected).some(Boolean)) {
-      folderMap = { ...folderMap, ...detected };
-      updateShareSubpaths(db, id, folderMap);
-    }
-    applyShareFolderMappingToSettings(candidateVol, folderMap);
-    return {
-      ok: true,
-      mountPoint: candidateVol,
-      message: `Connected to existing OS mount at ${candidateVol}`,
+      mountPoint: existingMount,
+      message: `Bound to mounted volume at ${existingMount}`,
       folderMap,
     };
   }
@@ -282,24 +262,15 @@ export async function mountNetworkShare(
   }
 
   try {
-    if (row.protocol === 'nfs') {
-      const exportPath = row.export_path.startsWith('/') ? row.export_path : `/${row.export_path}`;
-      await execFileAsync(
-        '/sbin/mount_nfs',
-        ['-o', 'resvport,nolocks,locallocks,soft,intr,rdirplus', `${row.host}:${exportPath}`, mountPoint],
-        { timeout: 15000 }
-      );
-    } else {
-      const password = getKeychainSecret(`smb_share_${row.id}`) || '';
-      const cleanShare = row.export_path.replace(/^\/+/, '');
-      const authPart = row.username
-        ? password
-          ? `${encodeURIComponent(row.username)}:${encodeURIComponent(password)}@`
-          : `${encodeURIComponent(row.username)}@`
-        : 'guest@';
-      const smbUrl = `//${authPart}${row.host}/${cleanShare}`;
-      await execFileAsync('/sbin/mount_smbfs', ['-N', smbUrl, mountPoint], { timeout: 15000 });
-    }
+    const password = row.protocol === 'smb' ? getKeychainSecret(`smb_share_${row.id}`) || '' : undefined;
+    await platformDriver.mountNetworkShare({
+      protocol: row.protocol,
+      host: row.host,
+      exportPath: row.export_path,
+      mountPoint,
+      username: row.username || undefined,
+      password,
+    });
 
     db.prepare("UPDATE network_shares SET mount_point = ?, status = 'mounted', last_error = NULL WHERE id = ?").run(
       mountPoint,
@@ -341,17 +312,9 @@ export async function unmountNetworkShare(id: number): Promise<{ ok: boolean; me
     return { ok: false, message: 'Share not found.' };
   }
 
-  // Only unmount paths inside our managed mounts directory so we don't accidentally unmount user's /Volumes
+  // Only unmount paths inside our managed mounts directory so we don't accidentally unmount user's OS volumes
   if (row.mount_point.startsWith(getMountsRootDir()) && fs.existsSync(row.mount_point)) {
-    try {
-      await execFileAsync('/sbin/umount', [row.mount_point], { timeout: 8000 });
-    } catch {
-      try {
-        await execFileAsync('/usr/sbin/diskutil', ['unmount', row.mount_point], { timeout: 8000 });
-      } catch {
-        // ignore
-      }
-    }
+    await platformDriver.unmountNetworkShare(row.mount_point);
   }
   db.prepare("UPDATE network_shares SET status = 'unmounted' WHERE id = ?").run(id);
   return { ok: true, message: `Unmounted share "${row.name}".` };

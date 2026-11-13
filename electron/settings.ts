@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { execFileSync } from 'child_process';
 import { getDb } from './db';
 import { logger } from './logger';
+import { platformDriver } from './platform';
 
 // Resolve bundled ffmpeg / ffprobe sidecar paths
 let bundledFfmpegPath = '';
@@ -110,24 +110,8 @@ const SECRET_KEYS: (keyof AppSettings)[] = [
 const KEYCHAIN_SERVICE = 'com.retrotunes.epodsuite';
 
 export function setKeychainSecret(account: string, secret: string): boolean {
-  if (process.platform !== 'darwin') return false;
   try {
-    if (!secret) {
-      try {
-        execFileSync('/usr/bin/security', ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account], {
-          stdio: 'ignore',
-        });
-      } catch {
-        // Ignore if not found
-      }
-      return true;
-    }
-    execFileSync(
-      '/usr/bin/security',
-      ['add-generic-password', '-U', '-s', KEYCHAIN_SERVICE, '-a', account, '-w', secret],
-      { stdio: 'ignore' }
-    );
-    return true;
+    return platformDriver.setSecret(KEYCHAIN_SERVICE, account, secret);
   } catch (err) {
     logger.debug('SYSTEM', `Keychain write fallback for ${account}`, { error: String(err) });
     return false;
@@ -135,21 +119,11 @@ export function setKeychainSecret(account: string, secret: string): boolean {
 }
 
 export function getKeychainSecret(account: string): string | null {
-  if (process.platform !== 'darwin') return null;
-  try {
-    const out = execFileSync(
-      '/usr/bin/security',
-      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    );
-    return out.trim();
-  } catch {
-    return null;
-  }
+  return platformDriver.getSecret(KEYCHAIN_SERVICE, account);
 }
 
 export function getDefaultSettings(): AppSettings {
-  const defaultCacheDir = path.join(os.homedir(), 'Library', 'Caches', 'RetroTunes');
+  const defaultCacheDir = platformDriver.getDefaultCacheDir();
   return {
     backendMode: 'standalone',
     dockerServerUrl: 'https://rtunes-server.local:8443',

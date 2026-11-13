@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process';
 import { BrowserWindow, shell } from 'electron';
 import { getSettings } from './settings';
 import { logger } from './logger';
+import { platformDriver } from './platform';
 
 export interface SsoUserProfile {
   sub: string;
@@ -35,42 +36,15 @@ let currentAuthState: AuthState = {
 let activeCallbackServer: http.Server | null = null;
 
 function saveOidcSessionToKeychain(sessionJson: string) {
-  if (process.platform !== 'darwin') return;
-  try {
-    execFileSync(
-      '/usr/bin/security',
-      ['add-generic-password', '-U', '-s', KEYCHAIN_SERVICE, '-a', 'oidc_session', '-w', sessionJson],
-      { stdio: 'ignore' }
-    );
-  } catch {
-    // ignore
-  }
+  platformDriver.setSecret(KEYCHAIN_SERVICE, 'oidc_session', sessionJson);
 }
 
 function loadOidcSessionFromKeychain(): string | null {
-  if (process.platform !== 'darwin') return null;
-  try {
-    return execFileSync(
-      '/usr/bin/security',
-      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', 'oidc_session', '-w'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    ).trim();
-  } catch {
-    return null;
-  }
+  return platformDriver.getSecret(KEYCHAIN_SERVICE, 'oidc_session');
 }
 
 function deleteOidcSessionFromKeychain() {
-  if (process.platform !== 'darwin') return;
-  try {
-    execFileSync(
-      '/usr/bin/security',
-      ['delete-generic-password', '-s', KEYCHAIN_SERVICE, '-a', 'oidc_session'],
-      { stdio: 'ignore' }
-    );
-  } catch {
-    // ignore
-  }
+  platformDriver.deleteSecret(KEYCHAIN_SERVICE, 'oidc_session');
 }
 
 function broadcastAuthState() {

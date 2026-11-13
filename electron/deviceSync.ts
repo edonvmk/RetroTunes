@@ -18,6 +18,7 @@ import {
 import { getPlaylistTracks, getPlaylistVideos, generateRelativeM3u8 } from './smartPlaylists';
 import { getSettings } from './settings';
 import { logger } from './logger';
+import { platformDriver } from './platform';
 
 const execFileAsync = promisify(execFile);
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -187,9 +188,10 @@ const ejectedMtpUuids = new Set<string>();
 let mtpPollerTimer: NodeJS.Timeout | null = null;
 
 export function getRtunesMtpBinaryPath(): string {
+  const binName = platformDriver.getMtpBinaryName();
   const candidates = [
-    path.join(process.cwd(), '.toolchain', 'bin', 'rtunes-mtp'),
-    path.join(__dirname, '..', '..', '.toolchain', 'bin', 'rtunes-mtp'),
+    path.join(process.cwd(), '.toolchain', 'bin', binName),
+    path.join(__dirname, '..', '..', '.toolchain', 'bin', binName),
   ];
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
@@ -1081,54 +1083,22 @@ export async function updateDeviceProfile(uuid: string, updatedProfile: DevicePr
   } else if (
     nameChanged &&
     currentMountPath &&
-    currentMountPath.startsWith('/Volumes/') &&
-    fs.existsSync(currentMountPath) &&
-    process.platform === 'darwin'
+    fs.existsSync(currentMountPath)
   ) {
-    // Check filesystem type via diskutil info (FAT32 vs exFAT/APFS)
-    let isFat32 = false;
     try {
-      const { stdout } = await execFileAsync('/usr/sbin/diskutil', ['info', currentMountPath], {
-        timeout: 6000,
+      logger.info(
+        'DEVICE_SYNC',
+        `Renaming mounted UMS volume ${currentMountPath} to "${updatedProfile.name.trim()}"...`
+      );
+      const renamed = await platformDriver.renameVolume(currentMountPath, updatedProfile.name);
+      if (renamed.ok && renamed.newMountPath) {
+        currentMountPath = renamed.newMountPath;
+        logger.info('DEVICE_SYNC', `OS volume renamed and remounted at ${currentMountPath}`);
+      }
+    } catch (err) {
+      logger.warn('DEVICE_SYNC', `Could not rename OS volume ${currentMountPath}`, {
+        error: String(err),
       });
-      if (/MS-DOS|FAT32|FAT16/i.test(stdout) && !/exFAT/i.test(stdout)) {
-        isFat32 = true;
-      }
-    } catch {
-      // ignore
-    }
-
-    const cleanVolName = isFat32
-      ? updatedProfile.name
-          .trim()
-          .toUpperCase()
-          .replace(/[^A-Z0-9 _-]/g, '')
-          .slice(0, 11)
-          .trim()
-      : updatedProfile.name
-          .trim()
-          .replace(/[/\\:*?"<>|]/g, '-')
-          .slice(0, 27);
-
-    if (cleanVolName) {
-      try {
-        logger.info(
-          'DEVICE_SYNC',
-          `Renaming mounted UMS volume ${currentMountPath} (${isFat32 ? 'FAT32' : 'exFAT/Native'}) to "${cleanVolName}"...`
-        );
-        await execFileAsync('/usr/sbin/diskutil', ['rename', currentMountPath, cleanVolName], {
-          timeout: 10000,
-        });
-        const candidateNewMount = path.join('/Volumes', cleanVolName);
-        if (fs.existsSync(candidateNewMount)) {
-          currentMountPath = candidateNewMount;
-          logger.info('DEVICE_SYNC', `OS volume renamed and remounted at ${currentMountPath}`);
-        }
-      } catch (err) {
-        logger.warn('DEVICE_SYNC', `Could not rename OS volume ${currentMountPath} via diskutil`, {
-          error: String(err),
-        });
-      }
     }
   }
 
@@ -1312,11 +1282,7 @@ async function sanitizeCoverArtTo500Baseline(
       );
       return fs.existsSync(targetArtPath);
     }
-    if (process.platform === 'darwin') {
-      await fsp.copyFile(sourceArtPath, targetArtPath);
-      await execFileAsync('/usr/bin/sips', ['-Z', '500', '-s', 'format', 'jpeg', targetArtPath], {
-        timeout: 8000,
-      });
+    if (await platformDriver.resizeImageFallback(sourceArtPath, targetArtPath, 500)) {
       return true;
     }
   } catch (err) {
@@ -1352,11 +1318,7 @@ async function downscalePhotoTo480x360(
       );
       return fs.existsSync(targetPhotoPath);
     }
-    if (process.platform === 'darwin') {
-      await fsp.copyFile(sourcePhotoPath, targetPhotoPath);
-      await execFileAsync('/usr/bin/sips', ['-Z', '480', '-s', 'format', 'jpeg', targetPhotoPath], {
-        timeout: 8000,
-      });
+    if (await platformDriver.resizeImageFallback(sourcePhotoPath, targetPhotoPath, 480)) {
       return true;
     }
   } catch {
@@ -1370,50 +1332,7 @@ async function downscalePhotoTo480x360(
  */
 export async function cleanMacMetadataFiles(mountPath: string): Promise<number> {
   if (!mountPath || mountPath.startsWith('mtp://') || !fs.existsSync(mountPath)) return 0;
-  let deletedCount = 0;
-
-  if (process.platform === 'darwin' && fs.existsSync('/usr/sbin/dot_clean')) {
-    try {
-      await execFileAsync('/usr/sbin/dot_clean', ['-m', mountPath], { timeout: 10000 });
-    } catch {
-      // ignore
-    }
-  }
-
-  const walkAndClean = async (dir: string, depth = 0) => {
-    if (depth > 6) return;
-    await yieldToEventLoop();
-    let entries: fs.Dirent[] = [];
-    try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (
-        entry.name === '.DS_Store' ||
-        entry.name.startsWith('._') ||
-        entry.name === '.Spotlight-V100' ||
-        entry.name === '.Trashes' ||
-        entry.name === '.fseventsd'
-      ) {
-        try {
-          await fsp.rm(full, { recursive: true, force: true });
-          deletedCount++;
-        } catch {
-          // ignore
-        }
-        continue;
-      }
-      if (entry.isDirectory()) {
-        await walkAndClean(full, depth + 1);
-      }
-    }
-  };
-
-  await walkAndClean(mountPath);
-  return deletedCount;
+  return platformDriver.cleanOsMetadata(mountPath);
 }
 
 export async function syncDevice(uuid: string): Promise<SyncProgress> {
@@ -2390,32 +2309,14 @@ export async function ejectDevice(uuid: string): Promise<{ ok: boolean; message:
 
   if (fs.existsSync(row.mount_path)) {
     logger.info('DEVICE_SYNC', `Preparing to eject "${row.name}" at ${row.mount_path}...`);
-    if (process.platform === 'darwin' && row.mount_path.startsWith('/Volumes/')) {
-      try {
-        await execFileAsync('/usr/sbin/diskutil', ['unmount', row.mount_path], { timeout: 8000 });
-        logger.info('DEVICE_SYNC', `Safely unmounted volume ${row.mount_path}`);
-        broadcastDevicesChanged();
-        return { ok: true, message: `Safely ejected "${row.name}" (${row.mount_path}).` };
-      } catch (firstErr) {
-        logger.warn(
-          'DEVICE_SYNC',
-          `Standard unmount busy for ${row.mount_path}, trying diskutil unmount force...`,
-          { error: String(firstErr) }
-        );
-        try {
-          await execFileAsync('/usr/sbin/diskutil', ['unmount', 'force', row.mount_path], {
-            timeout: 8000,
-          });
-          logger.info('DEVICE_SYNC', `Force-unmounted volume ${row.mount_path}`);
-          broadcastDevicesChanged();
-          return { ok: true, message: `Safely ejected "${row.name}" (${row.mount_path}).` };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.error('DEVICE_SYNC', `Failed to unmount volume ${row.mount_path}`, { error: msg });
-          return { ok: false, message: `Could not unmount OS volume: ${msg}` };
-        }
-      }
+    const res = await platformDriver.unmountVolume(row.mount_path);
+    if (res.ok) {
+      logger.info('DEVICE_SYNC', res.message);
+      broadcastDevicesChanged();
+    } else {
+      logger.error('DEVICE_SYNC', res.message);
     }
+    return res;
   }
   return {
     ok: true,

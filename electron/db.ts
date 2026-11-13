@@ -1,8 +1,9 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import os from 'os';
+import { app } from 'electron';
 import { logger } from './logger';
+import { platformDriver } from './platform';
 
 export interface TrackRow {
   id: number;
@@ -178,7 +179,12 @@ let dbFilePath = '';
 
 export function getDbPath(): string {
   if (dbFilePath) return dbFilePath;
-  const dataDir = path.join(os.homedir(), 'Library', 'Application Support', 'RetroTunes');
+  let dataDir = '';
+  try {
+    dataDir = app?.getPath ? app.getPath('userData') : platformDriver.getFallbackUserDataDir();
+  } catch {
+    dataDir = platformDriver.getFallbackUserDataDir();
+  }
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     dbFilePath = path.join(dataDir, 'rtunes.sqlite');

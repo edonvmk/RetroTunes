@@ -18,6 +18,13 @@ export interface TrackRow {
   lrc_path: string | null;
   mbid_recording: string | null;
   mbid_artist: string | null;
+  mbid_release?: string | null;
+  mbid_release_group?: string | null;
+  isrc?: string | null;
+  lastfm_id?: string | null;
+  deezer_id?: string | null;
+  theaudiodb_id?: string | null;
+  lidarr_id?: string | null;
   global_listen_count: number;
   artist_median_listen_count: number;
   artist_relative_popularity_score: number;
@@ -47,6 +54,10 @@ export interface VideoRow {
   year: number | null;
   tmdb_id: string | null;
   tvdb_id: string | null;
+  imdb_id?: string | null;
+  radarr_id?: string | null;
+  sonarr_id?: string | null;
+  plex_rating_key?: string | null;
   poster_path?: string | null;
   watched: number;
   view_offset_ms?: number;

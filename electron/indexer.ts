@@ -250,6 +250,8 @@ export function parseVideoFilename(filePath: string, rootPath?: string): {
   episode: number | null;
   year: number | null;
   tvdbId: string | null;
+  tmdbId: string | null;
+  imdbId: string | null;
 } {
   const base = path.basename(filePath, path.extname(filePath));
   const fullNormalized = filePath.split(path.sep).join('/');
@@ -263,11 +265,21 @@ export function parseVideoFilename(filePath: string, rootPath?: string): {
   let folderSeasonNum: number | null = null;
   let folderYear: number | null = null;
   let tvdbId: string | null = null;
+  let tmdbId: string | null = null;
+  let imdbId: string | null = null;
 
   const tvdbMatch = fullNormalized.match(/\{tvdb-(\d+)\}/i);
   if (tvdbMatch) {
     tvdbId = tvdbMatch[1];
     isUnderTvRoot = true;
+  }
+  const tmdbMatch = fullNormalized.match(/\{tmdb-(\d+)\}/i);
+  if (tmdbMatch) {
+    tmdbId = tmdbMatch[1];
+  }
+  const imdbMatch = fullNormalized.match(/\{imdb-(tt\d+)\}/i);
+  if (imdbMatch) {
+    imdbId = imdbMatch[1];
   }
 
   const segments = fullNormalized.split('/').filter(Boolean);
@@ -356,6 +368,8 @@ export function parseVideoFilename(filePath: string, rootPath?: string): {
       episode,
       year,
       tvdbId,
+      tmdbId,
+      imdbId,
     };
   }
 
@@ -378,6 +392,8 @@ export function parseVideoFilename(filePath: string, rootPath?: string): {
       episode: 1,
       year: folderYear,
       tvdbId,
+      tmdbId,
+      imdbId,
     };
   }
 
@@ -393,6 +409,8 @@ export function parseVideoFilename(filePath: string, rootPath?: string): {
       episode: null,
       year,
       tvdbId: null,
+      tmdbId,
+      imdbId,
     };
   }
 
@@ -404,6 +422,8 @@ export function parseVideoFilename(filePath: string, rootPath?: string): {
     episode: null,
     year: null,
     tvdbId: null,
+    tmdbId,
+    imdbId,
   };
 }
 
@@ -561,9 +581,9 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
 
     const fastInsertVideo = db.prepare(`
       INSERT INTO videos (
-        remote_nfs_path, title, type, show_name, season, episode, year, tvdb_id, format, poster_path
+        remote_nfs_path, title, type, show_name, season, episode, year, tvdb_id, tmdb_id, imdb_id, format, poster_path
       ) VALUES (
-        @remote_nfs_path, @title, @type, @show_name, @season, @episode, @year, @tvdb_id, @format, @poster_path
+        @remote_nfs_path, @title, @type, @show_name, @season, @episode, @year, @tvdb_id, @tmdb_id, @imdb_id, @format, @poster_path
       )
       ON CONFLICT(remote_nfs_path) DO UPDATE SET
         title = excluded.title,
@@ -572,6 +592,8 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
         season = COALESCE(excluded.season, videos.season),
         episode = COALESCE(excluded.episode, videos.episode),
         tvdb_id = COALESCE(excluded.tvdb_id, videos.tvdb_id),
+        tmdb_id = COALESCE(excluded.tmdb_id, videos.tmdb_id),
+        imdb_id = COALESCE(excluded.imdb_id, videos.imdb_id),
         poster_path = COALESCE(videos.poster_path, excluded.poster_path)
     `);
 
@@ -612,6 +634,8 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
           episode: parsedV.episode,
           year: parsedV.year,
           tvdb_id: parsedV.tvdbId,
+          tmdb_id: parsedV.tmdbId,
+          imdb_id: parsedV.imdbId,
           format: ext,
           poster_path: albumObj.folderCoverPath,
         });
@@ -829,6 +853,9 @@ export async function hydrateTrackMetadata(
         cover_art_path = COALESCE(?, cover_art_path),
         mbid_recording = COALESCE(?, mbid_recording),
         mbid_artist = COALESCE(?, mbid_artist),
+        mbid_release = COALESCE(?, mbid_release),
+        mbid_release_group = COALESCE(?, mbid_release_group),
+        isrc = COALESCE(?, isrc),
         metadata_loaded = 1
       WHERE id = ?
     `).run(
@@ -848,6 +875,9 @@ export async function hydrateTrackMetadata(
       coverArtPath,
       common.musicbrainz_recordingid || common.musicbrainz_trackid || null,
       common.musicbrainz_artistid?.[0] || null,
+      common.musicbrainz_albumid || null,
+      common.musicbrainz_releasegroupid || null,
+      common.isrc?.[0] || null,
       track.id
     );
 

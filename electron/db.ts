@@ -25,6 +25,13 @@ export interface TrackRow {
   lrc_path: string | null;
   mbid_recording: string | null;
   mbid_artist: string | null;
+  mbid_release?: string | null;
+  mbid_release_group?: string | null;
+  isrc?: string | null;
+  lastfm_id?: string | null;
+  deezer_id?: string | null;
+  theaudiodb_id?: string | null;
+  lidarr_id?: string | null;
   global_listen_count: number;
   artist_median_listen_count: number;
   artist_relative_popularity_score: number;
@@ -54,6 +61,10 @@ export interface VideoRow {
   year: number | null;
   tmdb_id: string | null;
   tvdb_id: string | null;
+  imdb_id?: string | null;
+  radarr_id?: string | null;
+  sonarr_id?: string | null;
+  plex_rating_key?: string | null;
   poster_path: string | null;
   watched: number;
   view_offset_ms?: number;
@@ -485,6 +496,19 @@ export function initDatabase(customPath?: string): Database.Database {
     if (!cols.some((c) => c.name === 'exclude_from_smart_playlists')) {
       db.exec('ALTER TABLE tracks ADD COLUMN exclude_from_smart_playlists INTEGER DEFAULT 0');
     }
+    for (const col of [
+      'mbid_release',
+      'mbid_release_group',
+      'isrc',
+      'lastfm_id',
+      'deezer_id',
+      'theaudiodb_id',
+      'lidarr_id',
+    ]) {
+      if (!cols.some((c) => c.name === col)) {
+        db.exec(`ALTER TABLE tracks ADD COLUMN ${col} TEXT`);
+      }
+    }
     const vCols = db.prepare("PRAGMA table_info('videos')").all() as { name: string }[];
     if (!vCols.some((c) => c.name === 'poster_path')) {
       db.exec('ALTER TABLE videos ADD COLUMN poster_path TEXT');
@@ -495,6 +519,23 @@ export function initDatabase(customPath?: string): Database.Database {
     if (!vCols.some((c) => c.name === 'view_offset_ms')) {
       db.exec('ALTER TABLE videos ADD COLUMN view_offset_ms INTEGER DEFAULT 0');
     }
+    for (const col of ['imdb_id', 'radarr_id', 'sonarr_id', 'plex_rating_key']) {
+      if (!vCols.some((c) => c.name === col)) {
+        db.exec(`ALTER TABLE videos ADD COLUMN ${col} TEXT`);
+      }
+    }
+    // Partial indexes on external IDs (only index non-null rows — zero overhead for unpopulated rows)
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tracks_mbid_rec ON tracks(mbid_recording) WHERE mbid_recording IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tracks_mbid_art ON tracks(mbid_artist) WHERE mbid_artist IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tracks_mbid_rel ON tracks(mbid_release) WHERE mbid_release IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tracks_isrc ON tracks(isrc) WHERE isrc IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tracks_lastfm ON tracks(lastfm_id) WHERE lastfm_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tracks_deezer ON tracks(deezer_id) WHERE deezer_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_videos_tmdb ON videos(tmdb_id) WHERE tmdb_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_videos_tvdb ON videos(tvdb_id) WHERE tvdb_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_videos_imdb ON videos(imdb_id) WHERE imdb_id IS NOT NULL;
+    `);
     const pCols = db.prepare("PRAGMA table_info('playlists')").all() as { name: string }[];
     if (!pCols.some((c) => c.name === 'media_type')) {
       db.exec("ALTER TABLE playlists ADD COLUMN media_type TEXT DEFAULT 'music'");
@@ -670,6 +711,24 @@ export function searchTracksFts(query: string, limit = 200000): TrackRow[] {
       .all(safeLimit) as TrackRow[];
   }
 
+  const isExternalIdQuery =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed) ||
+    /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/i.test(trimmed) ||
+    /^(mbid|isrc|lastfm|deezer):/i.test(trimmed);
+
+  if (isExternalIdQuery) {
+    const rawId = trimmed.replace(/^(mbid|isrc|lastfm|deezer):/i, '').trim();
+    const idMatches = db
+      .prepare(
+        `SELECT * FROM tracks
+         WHERE mbid_recording = ? OR mbid_artist = ? OR mbid_release = ? OR mbid_release_group = ?
+            OR isrc = ? OR lastfm_id = ? OR deezer_id = ?
+         LIMIT ?`
+      )
+      .all(rawId, rawId, rawId, rawId, rawId, rawId, rawId, safeLimit) as TrackRow[];
+    if (idMatches.length > 0) return idMatches;
+  }
+
   // Sanitize FTS5 query tokens into prefix matches
   const sanitizedTokens = trimmed
     .replace(/["'*^():-]/g, ' ')
@@ -715,6 +774,24 @@ export function searchVideosFts(query: string, typeFilter?: 'movie' | 'tv'): Vid
     return db
       .prepare('SELECT * FROM videos ORDER BY title COLLATE NOCASE ASC, season ASC, episode ASC')
       .all() as VideoRow[];
+  }
+
+  const isVideoIdQuery =
+    /^tt\d{5,}$/i.test(trimmed) ||
+    /^\d{4,}$/.test(trimmed) ||
+    /^(tmdb|tvdb|imdb):/i.test(trimmed);
+
+  if (isVideoIdQuery) {
+    const rawId = trimmed.replace(/^(tmdb|tvdb|imdb):/i, '').trim();
+    const sql = typeFilter
+      ? `SELECT * FROM videos WHERE type = ? AND (tmdb_id = ? OR tvdb_id = ? OR imdb_id = ?)`
+      : `SELECT * FROM videos WHERE tmdb_id = ? OR tvdb_id = ? OR imdb_id = ?`;
+    const idMatches = (
+      typeFilter
+        ? db.prepare(sql).all(typeFilter, rawId, rawId, rawId)
+        : db.prepare(sql).all(rawId, rawId, rawId)
+    ) as VideoRow[];
+    if (idMatches.length > 0) return idMatches;
   }
 
   const sanitizedTokens = trimmed

@@ -6,6 +6,7 @@ export type SmartField =
   | 'title'
   | 'artist'
   | 'album'
+  | 'album_artist'
   | 'genre'
   | 'year'
   | 'bitrate'
@@ -13,11 +14,26 @@ export type SmartField =
   | 'play_count'
   | 'local_star_rating'
   | 'is_loved'
+  | 'keep_cached'
   | 'global_listen_count'
+  | 'lastfm_plays'
+  | 'audiodb_plays'
+  | 'combined_global_plays'
   | 'artist_median_listen_count'
   | 'artist_relative_popularity_score'
+  | 'artist_rarity_multiplier'
+  | 'discovery_score'
   | 'duration'
-  | 'remote_nfs_path';
+  | 'track_num'
+  | 'disc_num'
+  | 'file_size'
+  | 'date_added'
+  | 'last_played'
+  | 'remote_nfs_path'
+  | 'has_lyrics'
+  | 'has_artwork'
+  | 'is_unplayed'
+  | 'is_hd_audio';
 
 export type SmartOperator =
   | 'is'
@@ -25,11 +41,28 @@ export type SmartOperator =
   | 'contains'
   | 'not_contains'
   | 'starts_with'
+  | 'ends_with'
   | 'gt'
   | 'gte'
   | 'lt'
   | 'lte'
-  | 'between';
+  | 'between'
+  | 'in_last'
+  | 'not_in_last'
+  | 'in_list'
+  | 'not_in_list'
+  | 'is_empty'
+  | 'not_empty';
+
+export type RegenerateInterval =
+  | 'live'
+  | 'minutely'
+  | 'hourly'
+  | 'daily'
+  | 'weekly'
+  | 'monthly'
+  | 'yearly'
+  | 'manual';
 
 export interface SmartRule {
   id: string;
@@ -45,12 +78,17 @@ export interface SmartRuleGroup {
   type?: 'group';
   match: 'ALL' | 'ANY';
   conditions: (SmartRule | SmartRuleGroup)[];
+  maxPerArtist?: number | null;
+  maxPerAlbum?: number | null;
+  avoidBackToBackArtist?: boolean;
+  regenerateInterval?: RegenerateInterval;
 }
 
-const ALLOWED_FIELDS: Record<SmartField, 'text' | 'number'> = {
+const ALLOWED_FIELDS: Record<SmartField, 'text' | 'number' | 'date'> = {
   title: 'text',
   artist: 'text',
   album: 'text',
+  album_artist: 'text',
   genre: 'text',
   format: 'text',
   year: 'number',
@@ -58,12 +96,82 @@ const ALLOWED_FIELDS: Record<SmartField, 'text' | 'number'> = {
   play_count: 'number',
   local_star_rating: 'number',
   is_loved: 'number',
+  keep_cached: 'number',
   global_listen_count: 'number',
+  lastfm_plays: 'number',
+  audiodb_plays: 'number',
+  combined_global_plays: 'number',
   artist_median_listen_count: 'number',
   artist_relative_popularity_score: 'number',
+  artist_rarity_multiplier: 'number',
+  discovery_score: 'number',
   duration: 'number',
+  track_num: 'number',
+  disc_num: 'number',
+  file_size: 'number',
+  date_added: 'date',
+  last_played: 'date',
   remote_nfs_path: 'text',
+  has_lyrics: 'number',
+  has_artwork: 'number',
+  is_unplayed: 'number',
+  is_hd_audio: 'number',
 };
+
+export function getDistinctSmartFieldValues(field: SmartField, search = ''): string[] {
+  const allowedCols = new Set<SmartField>([
+    'genre',
+    'artist',
+    'album',
+    'album_artist',
+    'format',
+    'title',
+    'year',
+  ]);
+  if (!allowedCols.has(field)) return [];
+  const db = getDb();
+  const q = search.trim();
+  try {
+    if (q) {
+      const rows = db
+        .prepare(
+          `SELECT DISTINCT CAST(${field} AS TEXT) as val FROM tracks
+           WHERE ${field} IS NOT NULL AND CAST(${field} AS TEXT) != ''
+             AND CAST(${field} AS TEXT) LIKE ? COLLATE NOCASE
+           ORDER BY val COLLATE NOCASE ASC
+           LIMIT 200`
+        )
+        .all(`%${q}%`) as { val: string }[];
+      return rows.map((r) => r.val).filter(Boolean);
+    }
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT CAST(${field} AS TEXT) as val FROM tracks
+         WHERE ${field} IS NOT NULL AND CAST(${field} AS TEXT) != ''
+         ORDER BY val COLLATE NOCASE ASC
+         LIMIT 500`
+      )
+      .all() as { val: string }[];
+    return rows.map((r) => r.val).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function getColumnExpr(field: SmartField): string {
+  switch (field) {
+    case 'has_lyrics':
+      return "(CASE WHEN lrc_path IS NOT NULL AND lrc_path != '' THEN 1 ELSE 0 END)";
+    case 'has_artwork':
+      return "(CASE WHEN cover_art_path IS NOT NULL AND cover_art_path != '' THEN 1 ELSE 0 END)";
+    case 'is_unplayed':
+      return '(CASE WHEN COALESCE(play_count, 0) = 0 THEN 1 ELSE 0 END)';
+    case 'is_hd_audio':
+      return "(CASE WHEN LOWER(COALESCE(format, '')) IN ('flac','alac','wav','aiff','dsf') OR COALESCE(bitrate, 0) >= 900 THEN 1 ELSE 0 END)";
+    default:
+      return field;
+  }
+}
 
 function compileCondition(node: SmartRule | SmartRuleGroup, params: unknown[]): string {
   if ('conditions' in node && Array.isArray(node.conditions)) {
@@ -80,8 +188,28 @@ function compileCondition(node: SmartRule | SmartRuleGroup, params: unknown[]): 
   const fieldType = ALLOWED_FIELDS[rule.field];
   if (!fieldType) return '1=1';
 
-  const col = rule.field;
+  const col = getColumnExpr(rule.field);
   const val = fieldType === 'number' ? Number(rule.value || 0) : String(rule.value ?? '');
+
+  if (fieldType === 'date') {
+    const days = Math.max(1, Number(rule.value || 30));
+    if (rule.operator === 'in_last') {
+      params.push(`-${days} days`);
+      return `(${col} IS NOT NULL AND datetime(${col}) >= datetime('now', ?))`;
+    }
+    if (rule.operator === 'not_in_last') {
+      params.push(`-${days} days`);
+      return `(${col} IS NULL OR datetime(${col}) < datetime('now', ?))`;
+    }
+    if (rule.operator === 'gt') {
+      params.push(String(rule.value || '1970-01-01'));
+      return `(${col} IS NOT NULL AND date(${col}) > date(?))`;
+    }
+    if (rule.operator === 'lt') {
+      params.push(String(rule.value || '2099-01-01'));
+      return `(${col} IS NOT NULL AND date(${col}) < date(?))`;
+    }
+  }
 
   switch (rule.operator) {
     case 'is':
@@ -112,6 +240,10 @@ function compileCondition(node: SmartRule | SmartRuleGroup, params: unknown[]): 
       params.push(`${val}%`);
       return `${col} LIKE ? COLLATE NOCASE`;
 
+    case 'ends_with':
+      params.push(`%${val}`);
+      return `${col} LIKE ? COLLATE NOCASE`;
+
     case 'gt':
       params.push(val);
       return `${col} > ?`;
@@ -134,6 +266,30 @@ function compileCondition(node: SmartRule | SmartRuleGroup, params: unknown[]): 
       return `(${col} >= ? AND ${col} <= ?)`;
     }
 
+    case 'is_empty':
+      return `(${col} IS NULL OR TRIM(CAST(${col} AS TEXT)) = '')`;
+
+    case 'not_empty':
+      return `(${col} IS NOT NULL AND TRIM(CAST(${col} AS TEXT)) != '')`;
+
+    case 'in_list':
+    case 'not_in_list': {
+      const items = String(rule.value ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (items.length === 0) return '1=1';
+      const placeholders = items.map(() => '?').join(',');
+      if (fieldType === 'number') {
+        for (const it of items) params.push(Number(it) || 0);
+        return rule.operator === 'in_list' ? `${col} IN (${placeholders})` : `${col} NOT IN (${placeholders})`;
+      }
+      for (const it of items) params.push(it.toLowerCase());
+      return rule.operator === 'in_list'
+        ? `LOWER(${col}) IN (${placeholders})`
+        : `LOWER(${col}) NOT IN (${placeholders})`;
+    }
+
     default:
       return '1=1';
   }
@@ -143,18 +299,78 @@ function getOrderByClause(selectionMethod: string): string {
   switch (selectionMethod) {
     case 'random':
       return 'RANDOM()';
+    case 'random_weighted':
+      return '((COALESCE(local_star_rating, 2.5) + COALESCE(is_loved, 0) * 2.0 + COALESCE(discovery_score, 50.0) / 100.0) * (ABS(RANDOM()) % 1000 + 1)) DESC';
+    case 'least_played':
+      return 'COALESCE(play_count, 0) ASC, RANDOM()';
+    case 'least_recently_played':
+      return "COALESCE(last_played, '1970-01-01') ASC, RANDOM()";
+    case 'most_recently_played':
+      return "COALESCE(last_played, '1970-01-01') DESC";
+    case 'deep_cuts':
+      return 'COALESCE(combined_global_plays, 0) ASC, COALESCE(artist_relative_popularity_score, 0) DESC, RANDOM()';
+    case 'discovery_desc':
+      return 'COALESCE(discovery_score, 0) DESC, artist_relative_popularity_score DESC';
     case 'popularity_desc':
-      return 'artist_relative_popularity_score DESC, global_listen_count DESC';
+      return 'artist_relative_popularity_score DESC, combined_global_plays DESC';
     case 'rating_desc':
       return 'local_star_rating DESC, is_loved DESC, artist_relative_popularity_score DESC';
     case 'most_played':
       return 'play_count DESC, local_star_rating DESC';
     case 'recently_added':
       return 'date_added DESC, id DESC';
+    case 'oldest_added':
+      return 'date_added ASC, id ASC';
+    case 'year_desc':
+      return 'COALESCE(year, 0) DESC, artist COLLATE NOCASE ASC';
+    case 'year_asc':
+      return 'COALESCE(year, 9999) ASC, artist COLLATE NOCASE ASC';
     case 'artist_asc':
     default:
       return 'artist COLLATE NOCASE ASC, album COLLATE NOCASE ASC, disc_num ASC, track_num ASC';
   }
+}
+
+function applyDiversityConstraints(rows: TrackRow[], rulesGroup: SmartRuleGroup): TrackRow[] {
+  const maxPerArtist =
+    rulesGroup.maxPerArtist && rulesGroup.maxPerArtist > 0 ? Math.floor(rulesGroup.maxPerArtist) : 0;
+  const maxPerAlbum =
+    rulesGroup.maxPerAlbum && rulesGroup.maxPerAlbum > 0 ? Math.floor(rulesGroup.maxPerAlbum) : 0;
+  const avoidBackToBack = Boolean(rulesGroup.avoidBackToBackArtist);
+
+  let filtered = rows;
+  if (maxPerArtist > 0 || maxPerAlbum > 0) {
+    const artistCounts = new Map<string, number>();
+    const albumCounts = new Map<string, number>();
+    const kept: TrackRow[] = [];
+    for (const t of rows) {
+      const aKey = (t.artist || 'Unknown').trim().toLowerCase();
+      const albKey = `${aKey}::${(t.album || 'Unknown').trim().toLowerCase()}`;
+      if (maxPerArtist > 0 && (artistCounts.get(aKey) || 0) >= maxPerArtist) continue;
+      if (maxPerAlbum > 0 && (albumCounts.get(albKey) || 0) >= maxPerAlbum) continue;
+      artistCounts.set(aKey, (artistCounts.get(aKey) || 0) + 1);
+      albumCounts.set(albKey, (albumCounts.get(albKey) || 0) + 1);
+      kept.push(t);
+    }
+    filtered = kept;
+  }
+
+  if (!avoidBackToBack || filtered.length <= 2) {
+    return filtered;
+  }
+
+  // Greedy non-adjacent artist interleaver
+  const remaining = [...filtered];
+  const result: TrackRow[] = [];
+  let lastArtist = '';
+  while (remaining.length > 0) {
+    let pickIdx = remaining.findIndex((t) => (t.artist || '').trim().toLowerCase() !== lastArtist);
+    if (pickIdx === -1) pickIdx = 0;
+    const [picked] = remaining.splice(pickIdx, 1);
+    result.push(picked);
+    lastArtist = (picked.artist || '').trim().toLowerCase();
+  }
+  return result;
 }
 
 export function evaluateSmartPlaylist(
@@ -176,12 +392,25 @@ export function evaluateSmartPlaylist(
     params.push(String(smartPlaylistId));
   }
 
+  const hasDiversity =
+    (rulesGroup.maxPerArtist && rulesGroup.maxPerArtist > 0) ||
+    (rulesGroup.maxPerAlbum && rulesGroup.maxPerAlbum > 0) ||
+    Boolean(rulesGroup.avoidBackToBackArtist);
+
   let sql = `SELECT * FROM tracks WHERE (${whereClause}) AND ${exclusionClause} ORDER BY ${orderBy}`;
   if (limitType === 'tracks' && limitValue && limitValue > 0) {
-    sql += ` LIMIT ${Math.floor(limitValue)}`;
+    const fetchLimit = hasDiversity ? Math.max(Math.floor(limitValue) * 10, 600) : Math.floor(limitValue);
+    sql += ` LIMIT ${fetchLimit}`;
   }
 
   let rows = db.prepare(sql).all(...params) as TrackRow[];
+
+  if (hasDiversity) {
+    rows = applyDiversityConstraints(rows, rulesGroup);
+    if (limitType === 'tracks' && limitValue && limitValue > 0) {
+      rows = rows.slice(0, Math.floor(limitValue));
+    }
+  }
 
   // Apply cumulative size or duration constraints if selected (Section 5: File Size or Duration limits)
   if (limitValue && limitValue > 0 && limitType !== 'tracks') {
@@ -225,6 +454,51 @@ export function evaluateSmartPlaylist(
   return { tracks: rows, compiledSql: sql };
 }
 
+function getIntervalMs(interval?: RegenerateInterval): number | null {
+  switch (interval) {
+    case 'minutely':
+      return 60 * 1000;
+    case 'hourly':
+      return 60 * 60 * 1000;
+    case 'daily':
+      return 24 * 60 * 60 * 1000;
+    case 'weekly':
+      return 7 * 24 * 60 * 60 * 1000;
+    case 'monthly':
+      return 30 * 24 * 60 * 60 * 1000;
+    case 'yearly':
+      return 365 * 24 * 60 * 60 * 1000;
+    default:
+      return null;
+  }
+}
+
+export function regenerateSmartPlaylist(playlistId: number): TrackRow[] {
+  const db = getDb();
+  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
+    | PlaylistRow
+    | undefined;
+  if (!playlist || !playlist.is_smart || !playlist.smart_rules_json) return [];
+  try {
+    const rules = JSON.parse(playlist.smart_rules_json) as SmartRuleGroup;
+    const limitVal = playlist.limit_value ?? playlist.track_limit ?? null;
+    const tracks = evaluateSmartPlaylist(
+      rules,
+      playlist.limit_type || 'tracks',
+      limitVal,
+      playlist.selection_method || 'popularity_desc',
+      playlist.id
+    ).tracks;
+    db.prepare(
+      "UPDATE playlists SET cached_track_ids_json = ?, last_regenerated_at = datetime('now') WHERE id = ?"
+    ).run(JSON.stringify(tracks.map((t) => t.id)), playlist.id);
+    return tracks;
+  } catch (err) {
+    logger.error('SMART_PLAYLIST', `Failed to regenerate smart playlist ${playlistId}`, err);
+    return [];
+  }
+}
+
 export function getPlaylistTracks(playlistId: number): TrackRow[] {
   const db = getDb();
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
@@ -235,6 +509,33 @@ export function getPlaylistTracks(playlistId: number): TrackRow[] {
   if (playlist.is_smart && playlist.smart_rules_json) {
     try {
       const rules = JSON.parse(playlist.smart_rules_json) as SmartRuleGroup;
+      const interval = rules.regenerateInterval || 'live';
+
+      if (interval !== 'live') {
+        const intervalMs = getIntervalMs(interval);
+        const lastMs = playlist.last_regenerated_at
+          ? Date.parse(playlist.last_regenerated_at.replace(' ', 'T') + 'Z')
+          : 0;
+        const isExpired =
+          !playlist.cached_track_ids_json ||
+          !lastMs ||
+          (intervalMs !== null && Date.now() - lastMs >= intervalMs);
+
+        if (!isExpired && playlist.cached_track_ids_json) {
+          const cachedIds = JSON.parse(playlist.cached_track_ids_json) as number[];
+          if (Array.isArray(cachedIds) && cachedIds.length > 0) {
+            const placeholders = cachedIds.map(() => '?').join(',');
+            const rows = db
+              .prepare(`SELECT * FROM tracks WHERE id IN (${placeholders})`)
+              .all(...cachedIds) as TrackRow[];
+            const byId = new Map(rows.map((r) => [r.id, r]));
+            const ordered = cachedIds.map((id) => byId.get(id)).filter(Boolean) as TrackRow[];
+            if (ordered.length > 0) return ordered;
+          }
+        }
+        return regenerateSmartPlaylist(playlist.id);
+      }
+
       const limitVal = playlist.limit_value ?? playlist.track_limit ?? null;
       return evaluateSmartPlaylist(
         rules,

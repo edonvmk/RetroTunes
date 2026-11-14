@@ -74,9 +74,9 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   }>({
     name: 'Homelab Media NAS',
     protocol: 'smb',
-    host: '192.168.1.100',
-    base_path: '/Media',
-    username: '',
+    host: '192.168.1.9',
+    base_path: '/PVE-Media',
+    username: 'shares',
     password: '',
     auto_connect: true,
     folder_map: {
@@ -524,13 +524,13 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                     </div>
                     <div>
                       <label style={{ display: 'block', fontSize: 11, fontWeight: 600 }}>
-                        SMB Password (macOS Keychain):
+                        Password:
                       </label>
                       <input
                         type="password"
                         className="aqua-input"
                         style={{ width: '100%' }}
-                        placeholder="Stored securely in macOS Keychain"
+                        placeholder="Password"
                         value={shareDraft.password}
                         onChange={(e) => setShareDraft((p) => ({ ...p, password: e.target.value }))}
                       />
@@ -539,22 +539,44 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 )}
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <strong style={{ fontSize: 11.5 }}>Per-Media-Type Subfolder Mapping:</strong>
+                  <strong style={{ fontSize: 11.5 }}>Media Folders:</strong>
                   <button
                     className="aqua-btn"
                     style={{ fontSize: 11 }}
                     onClick={async () => {
-                      const detected = await invokeRpc<Record<string, string>>(
-                        'shares:autoDetect',
-                        shareDraft.base_path.startsWith('/') && shareDraft.base_path.includes('Volumes')
-                          ? shareDraft.base_path
-                          : form.nfsSharePath || shareDraft.base_path
-                      );
+                      const disc = await invokeRpc<{
+                        shares: string[];
+                        existingMount: string | null;
+                        folderMap: Record<string, string>;
+                      }>('shares:discover', {
+                        protocol: shareDraft.protocol,
+                        host: shareDraft.host,
+                        username: shareDraft.username,
+                        password: shareDraft.password,
+                      });
+                      const nextBase =
+                        disc.shares.length > 0
+                          ? disc.shares[0].startsWith('/')
+                            ? disc.shares[0]
+                            : `/${disc.shares[0]}`
+                          : shareDraft.base_path;
+                      const detected =
+                        Object.keys(disc.folderMap || {}).length > 0
+                          ? disc.folderMap
+                          : await invokeRpc<Record<string, string>>(
+                              'shares:autoDetect',
+                              disc.existingMount || form.nfsSharePath || nextBase
+                            );
                       setShareDraft((p) => ({
                         ...p,
+                        base_path: nextBase,
                         folder_map: { ...p.folder_map, ...detected },
                       }));
-                      setStatusBanner('Auto-detected media subdirectories from share root.');
+                      setStatusBanner(
+                        disc.shares.length > 0
+                          ? `Detected share ${nextBase} on ${shareDraft.host}.`
+                          : 'Detected media folders.'
+                      );
                     }}
                   >
                     Auto-Detect Folders
@@ -625,8 +647,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 <strong style={{ display: 'block', marginBottom: 8 }}>Configured Network Shares</strong>
                 {shares.length === 0 ? (
                   <div style={{ fontSize: 11.5, color: '#64748b' }}>
-                    No managed NFS/SMB shares saved yet. Add one above to mount automatically into{' '}
-                    <code>~/Library/Application Support/RetroTunes/mounts/</code>.
+                    No network shares configured.
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

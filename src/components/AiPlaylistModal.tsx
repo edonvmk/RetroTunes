@@ -13,7 +13,7 @@ import {
   PlaylistAgent,
 } from '../ai/PlaylistAgent';
 import { formatDuration, invokeRpc, subscribeEvent } from '../bridge';
-import { TrackRow } from '../types';
+import { SmartRule, SmartRuleGroup, TrackRow } from '../types';
 
 interface AiPlaylistModalProps {
   onClose: () => void;
@@ -63,8 +63,23 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
     description: string;
     tracks: TrackRow[];
   } | null>(null);
+  const [finalSmartPlaylist, setFinalSmartPlaylist] = useState<{
+    name: string;
+    description: string;
+    smartRules: SmartRuleGroup;
+    limitType: 'tracks' | 'minutes' | 'gb';
+    limitValue: number | null;
+    selectionMethod: string;
+    previewTracks: TrackRow[];
+  } | null>(null);
+  const [playlistMode, setPlaylistMode] = useState<'standard' | 'smart'>('standard');
   const [checkedIds, setCheckedIds] = useState<Record<number, boolean>>({});
   const [saving, setSaving] = useState<boolean>(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isThinking, followup]);
 
   const selectedModel: AiModelSpec =
     AI_MODEL_CATALOG.find((m) => m.id === selectedModelId) || getDefaultAiModel();
@@ -117,15 +132,18 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
   };
 
   const runAgentPrompt = async (promptText: string) => {
-    if (!agentRef.current || !promptText.trim()) return;
+    const trimmed = promptText.trim();
+    if (!agentRef.current || !trimmed) return;
+    setMessages((prev) => [...prev, { role: 'user', content: trimmed }]);
     setIsThinking(true);
     setFollowup(null);
     try {
-      const result: AgentTurnResult = await agentRef.current.sendMessage(promptText.trim());
+      const result: AgentTurnResult = await agentRef.current.sendMessage(trimmed, [], playlistMode);
       setMessages([...agentRef.current.getHistory()]);
       if (result.type === 'followup') {
         setFollowup({ question: result.question, options: result.options });
       } else if (result.type === 'finalized') {
+        setFinalSmartPlaylist(null);
         setFinalPlaylist({
           name: result.name,
           description: result.description,
@@ -134,6 +152,17 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
         const nextChecked: Record<number, boolean> = {};
         for (const t of result.tracks) nextChecked[t.id] = true;
         setCheckedIds(nextChecked);
+      } else if (result.type === 'finalized_smart') {
+        setFinalPlaylist(null);
+        setFinalSmartPlaylist({
+          name: result.name,
+          description: result.description,
+          smartRules: result.smartRules,
+          limitType: result.limitType,
+          limitValue: result.limitValue,
+          selectionMethod: result.selectionMethod,
+          previewTracks: result.previewTracks,
+        });
       }
     } catch (err) {
       setMessages((prev) => [
@@ -176,6 +205,28 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
   };
 
   const handleSavePlaylist = async () => {
+    if (finalSmartPlaylist) {
+      setSaving(true);
+      try {
+        const newId = await invokeRpc<number>('playlists:save', {
+          name: finalSmartPlaylist.name.trim() || 'AI Smart Playlist',
+          isSmart: true,
+          mediaType: 'music',
+          smartRules: finalSmartPlaylist.smartRules,
+          limitType: finalSmartPlaylist.limitType,
+          limitValue: finalSmartPlaylist.limitValue,
+          selectionMethod: finalSmartPlaylist.selectionMethod,
+          keepCached: false,
+          aiPrompt: initialPrompt.trim(),
+          aiMode: 'smart',
+        });
+        await handleClose();
+        onSaved(newId);
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     if (!finalPlaylist) return;
     const chosenIds = finalPlaylist.tracks
       .filter((t) => checkedIds[t.id] !== false)
@@ -187,6 +238,8 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
         name: finalPlaylist.name.trim() || 'AI Generated Playlist',
         isSmart: false,
         mediaType: 'music',
+        aiPrompt: initialPrompt.trim(),
+        aiMode: 'standard',
       });
       for (const tid of chosenIds) {
         await invokeRpc('playlists:addTrack', newId, tid);
@@ -209,7 +262,7 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
       >
         <div className="aqua-window-titlebar">
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-            <Sparkles size={14} color="#1d4ed8" /> AI Playlist Generator (Pre-Alpha)
+            <Sparkles size={14} color="#1d4ed8" /> AI Playlist Generator
           </span>
           <button className="aqua-btn" onClick={() => void handleClose()} style={{ padding: '1px 6px' }}>
             <X size={13} />
@@ -221,7 +274,7 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
             <>
               <div className="epod-capacity-card">
                 <label style={{ display: 'block', fontWeight: 700, marginBottom: 6 }}>
-                  1. Select AI Model:
+                  Assistant Model:
                 </label>
                 <select
                   className="aqua-input"
@@ -233,12 +286,12 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
                     const st = cacheStatuses[m.id];
                     const statusText = m.enabled
                       ? st?.cached
-                        ? 'Cached on Disk'
-                        : `~${m.approxSizeMB} MB • Downloads on Continue`
+                        ? 'Ready'
+                        : `${m.approxSizeMB} MB`
                       : m.badge;
                     return (
                       <option key={m.id} value={m.id} disabled={!m.enabled}>
-                        {m.label} — [{statusText}]
+                        {m.label} ({statusText})
                       </option>
                     );
                   })}
@@ -265,15 +318,36 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
                       color: selectedCache?.cached ? '#15803d' : '#1d4ed8',
                     }}
                   >
-                    {selectedCache?.cached ? 'Cached on Disk' : 'Downloads on Continue'}
+                    {selectedCache?.cached ? 'Ready' : 'Download on First Use'}
                   </span>
                 </div>
               </div>
 
               <div className="epod-capacity-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <label style={{ fontWeight: 700 }}>Playlist Type:</label>
+                  <div style={{ display: 'inline-flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className={`aqua-btn ${playlistMode === 'standard' ? 'primary' : ''}`}
+                      style={{ padding: '2px 10px', fontSize: 11 }}
+                      onClick={() => setPlaylistMode('standard')}
+                    >
+                      Standard Playlist
+                    </button>
+                    <button
+                      type="button"
+                      className={`aqua-btn ${playlistMode === 'smart' ? 'primary' : ''}`}
+                      style={{ padding: '2px 10px', fontSize: 11 }}
+                      onClick={() => setPlaylistMode('smart')}
+                    >
+                      Smart Playlist (Auto-Updating)
+                    </button>
+                  </div>
+                </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                   <label style={{ fontWeight: 700 }}>
-                    2. Describe Your Playlist (Mood, Genre, Era, Energy, Track Count):
+                    Describe Your Playlist:
                   </label>
                   <button
                     type="button"
@@ -281,7 +355,7 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
                     style={{ padding: '2px 8px', fontSize: 11 }}
                     onClick={() => setInitialPrompt((prev) => pickRandomIdea(prev))}
                   >
-                    🎲 Random Idea
+                    🎲 Surprise Me
                   </button>
                 </div>
                 <textarea
@@ -292,9 +366,6 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
                   onChange={(e) => setInitialPrompt(e.target.value)}
                   placeholder="e.g., 90s shoegaze and dream pop for rainy afternoons, ~20 tracks..."
                 />
-                <p style={{ fontSize: 11, color: '#64748b', marginTop: 6, marginBottom: 0 }}>
-                  Zero weights are downloaded until you click <strong>Continue</strong>. The agent queries only your local SQLite library, Last.fm, and MusicBrainz via structured tools.
-                </p>
               </div>
             </>
           )}
@@ -302,11 +373,11 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
           {step === 'loading' && (
             <div className="epod-capacity-card" style={{ padding: 20 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                {loadPhase === 'download' ? <HardDriveDownload size={16} color="#1d4ed8" /> : <Cpu size={16} color="#15803d" />}
+                {loadPercent < 50 ? <HardDriveDownload size={16} color="#1d4ed8" /> : <Cpu size={16} color="#15803d" />}
                 <strong>
                   {loadPercent < 50
-                    ? 'Phase 1 / 2: Downloading GGUF Weights (0% – 50%)'
-                    : 'Phase 2 / 2: Loading Model & Context into Memory (50% – 100%)'}
+                    ? 'Downloading Assistant...'
+                    : 'Starting Assistant...'}
                 </strong>
                 <span style={{ marginLeft: 'auto', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
                   {loadPercent}%
@@ -383,6 +454,7 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
                     Searching your library, Last.fm, &amp; MusicBrainz...
                   </div>
                 )}
+                <div ref={chatEndRef} />
               </div>
 
               {followup && !isThinking && (
@@ -398,6 +470,110 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
                         {opt}
                       </button>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {finalSmartPlaylist && (
+                <div className="epod-capacity-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <div>
+                      <input
+                        className="aqua-input"
+                        style={{ fontWeight: 700, fontSize: 13, width: 280 }}
+                        value={finalSmartPlaylist.name}
+                        onChange={(e) =>
+                          setFinalSmartPlaylist({ ...finalSmartPlaylist, name: e.target.value })
+                        }
+                      />
+                      <div style={{ fontSize: 11, color: '#475569', marginTop: 4 }}>
+                        {finalSmartPlaylist.description}
+                      </div>
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed' }}>
+                      <Sparkles size={13} style={{ verticalAlign: 'middle' }} />{' '}
+                      {finalSmartPlaylist.previewTracks.length} matching tracks
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                    <span
+                      style={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        padding: '2px 7px',
+                        borderRadius: 4,
+                        background: '#ede9fe',
+                        color: '#5b21b6',
+                      }}
+                    >
+                      Match {finalSmartPlaylist.smartRules.match}
+                    </span>
+                    {finalSmartPlaylist.smartRules.conditions.map((c, i) => {
+                      if ('conditions' in c) {
+                        return (
+                          <span
+                            key={c.id || i}
+                            style={{
+                              fontSize: 10.5,
+                              padding: '2px 7px',
+                              borderRadius: 4,
+                              background: '#f1f5f9',
+                              border: '1px solid #cbd5e1',
+                            }}
+                          >
+                            (
+                            {c.conditions
+                              .map((sub) => {
+                                const r = sub as SmartRule;
+                                return `${r.field} ${r.operator} "${r.value}"`;
+                              })
+                              .join(` ${c.match} `)}
+                            )
+                          </span>
+                        );
+                      }
+                      const cond = c as SmartRule;
+                      return (
+                        <span
+                          key={cond.id || i}
+                          style={{
+                            fontSize: 10.5,
+                            padding: '2px 7px',
+                            borderRadius: 4,
+                            background: '#f1f5f9',
+                            border: '1px solid #cbd5e1',
+                          }}
+                        >
+                          {cond.field} {cond.operator} &ldquo;{cond.value}&rdquo;
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ maxHeight: 180, overflowY: 'auto', border: '1px solid #cbd5e1', borderRadius: 4 }}>
+                    <table className="rtunes-table">
+                      <thead>
+                        <tr>
+                          <th>Track</th>
+                          <th>Artist</th>
+                          <th>Genre</th>
+                          <th style={{ width: 55 }}>Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {finalSmartPlaylist.previewTracks.map((t) => (
+                          <tr key={t.id}>
+                            <td style={{ fontWeight: 600 }}>{t.title}</td>
+                            <td>{t.artist}</td>
+                            <td>{t.genre}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                              {formatDuration(t.duration)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               )}
@@ -551,13 +727,13 @@ export const AiPlaylistModal: React.FC<AiPlaylistModalProps> = ({ onClose, onSav
               <button className="aqua-btn" onClick={() => void handleClose()}>
                 Close
               </button>
-              {finalPlaylist && (
+              {(finalPlaylist || finalSmartPlaylist) && (
                 <button
                   className="aqua-btn primary"
                   disabled={saving}
                   onClick={() => void handleSavePlaylist()}
                 >
-                  {saving ? 'Saving...' : 'Save Playlist'}
+                  {saving ? 'Saving...' : finalSmartPlaylist ? 'Save Smart Playlist' : 'Save Playlist'}
                 </button>
               )}
             </>

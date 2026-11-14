@@ -6,6 +6,7 @@ import { getDb, searchTracksFts, TrackRow } from '../db';
 import { getSettings } from '../settings';
 import { logger } from '../logger';
 import { platformDriver } from '../platform';
+import { evaluateSmartPlaylist, SmartRule, SmartRuleGroup } from '../smartPlaylists';
 
 export interface AiPrepareProgress {
   modelId: string;
@@ -33,6 +34,17 @@ export type AgentTurnResult =
       name: string;
       description: string;
       tracks: TrackRow[];
+      assistantMessage?: string;
+    }
+  | {
+      type: 'finalized_smart';
+      name: string;
+      description: string;
+      smartRules: SmartRuleGroup;
+      limitType: 'tracks' | 'minutes' | 'gb';
+      limitValue: number | null;
+      selectionMethod: string;
+      previewTracks: TrackRow[];
       assistantMessage?: string;
     }
   | {
@@ -114,6 +126,7 @@ let activeSession: any = null;
 let activeAbortController: AbortController | null = null;
 let activeDownloader: any = null;
 let activeModelId: string | null = null;
+let sessionCollectedTracks = new Map<number, TrackRow>();
 
 export function getAiModelsDir(): string {
   let userData = '';
@@ -154,6 +167,7 @@ function broadcastPrepareProgress(progress: AiPrepareProgress) {
 
 export async function disposeAiModel(): Promise<{ ok: boolean }> {
   try {
+    sessionCollectedTracks.clear();
     if (activeSession) {
       activeSession = null;
     }
@@ -296,15 +310,16 @@ export async function prepareAiModel(params: {
     }
     activeModel = model;
 
+    const effectiveContextSize = Math.min(contextWindow || 8192, 8192);
     broadcastPrepareProgress({
       modelId,
       percent: 98,
       phase: 'load',
-      message: `Creating inference context (${contextWindow.toLocaleString()} tokens)...`,
+      message: `Creating inference context (${effectiveContextSize.toLocaleString()} tokens)...`,
     });
 
     activeContext = await model.createContext({
-      contextSize: contextWindow,
+      contextSize: effectiveContextSize,
     });
 
     broadcastPrepareProgress({
@@ -359,6 +374,32 @@ function compactTrackRows(rows: TrackRow[]) {
   }));
 }
 
+const STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'best', 'build', 'by', 'chill', 'create',
+  'deep', 'energy', 'fast', 'for', 'from', 'good', 'great', 'high', 'in', 'into',
+  'like', 'make', 'me', 'mix', 'more', 'music', 'my', 'new', 'of', 'on', 'or',
+  'playlist', 'playlists', 'relaxing', 'slow', 'some', 'song', 'songs', 'that',
+  'the', 'this', 'to', 'top', 'track', 'tracks', 'upbeat', 'vibe', 'vibes',
+  'with', 'workout', 'anthologies', 'now', 'yes', 'no', 'please',
+]);
+
+function extractDecadeRange(text: string): [number, number] | null {
+  const m4 = text.match(/\b(19[5-9]0|20[0-2]0)s\b/i);
+  if (m4) {
+    const start = Number(m4[1]);
+    return [start, start + 9];
+  }
+  const m2 = text.match(/\b([5-9]0)s\b/i);
+  if (m2) {
+    const start = 1900 + Number(m2[1]);
+    return [start, start + 9];
+  }
+  if (/\b00s\b/i.test(text)) {
+    return [2000, 2009];
+  }
+  return null;
+}
+
 function queryLocalCatalogTool(args: {
   query?: string;
   artist?: string;
@@ -381,11 +422,38 @@ function queryLocalCatalogTool(args: {
       .filter((t) => (args.min_rating ? (t.local_star_rating || 0) >= args.min_rating : true))
       .filter((t) => (args.loved_only ? Boolean(t.is_loved) : true))
       .slice(0, limit);
-    return compactTrackRows(filtered);
+    if (filtered.length > 0) {
+      for (const r of filtered) sessionCollectedTracks.set(r.id, r);
+      return compactTrackRows(filtered);
+    }
   }
 
   const conditions: string[] = ['1=1'];
   const params: unknown[] = [];
+
+  if (args.query && args.query.trim()) {
+    const decade = extractDecadeRange(args.query);
+    if (decade) {
+      conditions.push('year BETWEEN ? AND ?');
+      params.push(decade[0], decade[1]);
+    }
+    const keywords = args.query
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 2 && !STOP_WORDS.has(w) && !/^(19|20)?[0-9]0s$/.test(w))
+      .slice(0, 5);
+    if (keywords.length > 0) {
+      const kwClauses = keywords.map(
+        () => '(title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE OR album LIKE ? COLLATE NOCASE OR genre LIKE ? COLLATE NOCASE)'
+      );
+      conditions.push(`(${kwClauses.join(' OR ')})`);
+      for (const kw of keywords) {
+        const pat = `%${kw}%`;
+        params.push(pat, pat, pat, pat);
+      }
+    }
+  }
 
   if (args.artist) {
     conditions.push('artist LIKE ? COLLATE NOCASE');
@@ -409,7 +477,7 @@ function queryLocalCatalogTool(args: {
   }
 
   params.push(limit);
-  const rows = db
+  let rows = db
     .prepare(
       `SELECT * FROM tracks
        WHERE ${conditions.join(' AND ')}
@@ -418,7 +486,41 @@ function queryLocalCatalogTool(args: {
     )
     .all(...params) as TrackRow[];
 
+  if (rows.length === 0) {
+    rows = db
+      .prepare(
+        `SELECT * FROM tracks
+         ORDER BY is_loved DESC, local_star_rating DESC, artist_relative_popularity_score DESC
+         LIMIT ?`
+      )
+      .all(limit) as TrackRow[];
+  }
+
+  for (const r of rows) sessionCollectedTracks.set(r.id, r);
   return compactTrackRows(rows);
+}
+
+export function rerunAiStandardPlaylist(prompt: string, excludeTrackIds: number[] = [], limit = 25): TrackRow[] {
+  const db = getDb();
+  sessionCollectedTracks.clear();
+  queryLocalCatalogTool({
+    query: prompt,
+    exclude_track_ids: excludeTrackIds,
+    limit,
+  });
+  let tracks = Array.from(sessionCollectedTracks.values()).slice(0, limit);
+  if (tracks.length === 0 && excludeTrackIds.length > 0) {
+    // If all matching tracks were in the previous mix, allow re-selecting with fresh random order
+    sessionCollectedTracks.clear();
+    queryLocalCatalogTool({ query: prompt, limit });
+    tracks = Array.from(sessionCollectedTracks.values()).slice(0, limit);
+  }
+  if (tracks.length === 0) {
+    tracks = db
+      .prepare('SELECT * FROM tracks ORDER BY RANDOM() LIMIT ?')
+      .all(limit) as TrackRow[];
+  }
+  return tracks;
 }
 
 async function discoverViaLastfmTool(args: {
@@ -589,14 +691,195 @@ async function lookupMusicbrainzTool(args: {
   return { tracks: compactTrackRows(owned.slice(0, 25)) };
 }
 
+function derivePlaylistTitle(prompt: string, history?: { role: 'user' | 'assistant'; content: string }[]): string {
+  const firstUser = history?.find((m) => m.role === 'user')?.content || prompt;
+  const cleaned = firstUser
+    .replace(/^(make|create|build|generate)\s+(me\s+)?(a|an)?\s*/i, '')
+    .replace(/\s+playlist.*$/i, '')
+    .trim();
+  if (!cleaned) return 'AI Mix';
+  const words = cleaned.split(/\s+/).slice(0, 5).map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+  return words.join(' ');
+}
+
+function buildSmartRulesFromPrompt(
+  prompt: string,
+  history?: { role: 'user' | 'assistant'; content: string }[]
+): {
+  smartRules: SmartRuleGroup;
+  limitType: 'tracks' | 'minutes' | 'gb';
+  limitValue: number | null;
+  selectionMethod: string;
+} {
+  const combined = [
+    ...(history || []).filter((m) => m.role === 'user').map((m) => m.content),
+    prompt,
+  ].join(' ');
+
+  const conditions: (SmartRule | SmartRuleGroup)[] = [];
+  const decade = extractDecadeRange(combined);
+  if (decade) {
+    conditions.push({
+      id: `ai-year-${Date.now()}`,
+      type: 'rule',
+      field: 'year',
+      operator: 'between',
+      value: decade[0],
+      valueTo: decade[1],
+    });
+  }
+
+  if (/\b(loved|favorite|favourites|favorites|heart)\b/i.test(combined)) {
+    conditions.push({
+      id: `ai-loved-${Date.now()}`,
+      type: 'rule',
+      field: 'is_loved',
+      operator: 'is',
+      value: '1',
+    });
+  }
+
+  if (/\b(lossless|flac|alac|wav|hifi|hi-res)\b/i.test(combined)) {
+    conditions.push({
+      id: `ai-fmt-${Date.now()}`,
+      type: 'rule',
+      field: 'format',
+      operator: 'contains',
+      value: 'FLAC',
+    });
+  }
+
+  const ratingMatch = combined.match(/\b([3-5])\s*\+?\s*stars?\b/i);
+  if (ratingMatch) {
+    conditions.push({
+      id: `ai-rating-${Date.now()}`,
+      type: 'rule',
+      field: 'local_star_rating',
+      operator: 'gte',
+      value: ratingMatch[1],
+    });
+  }
+
+  const keywords = combined
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w) && !/^(19|20)?[0-9]0s$/.test(w))
+    .filter((w) => !['smart', 'loved', 'favorite', 'favorites', 'lossless', 'flac', 'stars', 'star'].includes(w));
+
+  const uniqueKeywords = Array.from(new Set(keywords)).slice(0, 3);
+  if (uniqueKeywords.length > 0) {
+    if (uniqueKeywords.length === 1) {
+      conditions.push({
+        id: `ai-kw-0`,
+        type: 'rule',
+        field: 'genre',
+        operator: 'contains',
+        value: uniqueKeywords[0],
+      });
+    } else {
+      conditions.push({
+        id: `ai-kw-group`,
+        type: 'group',
+        match: 'ANY',
+        conditions: uniqueKeywords.map((kw, i) => ({
+          id: `ai-kw-${i}`,
+          type: 'rule' as const,
+          field: 'genre',
+          operator: 'contains' as const,
+          value: kw,
+        })),
+      });
+    }
+  }
+
+  if (/\b(with\s+lyrics|has\s+lyrics|karaoke)\b/i.test(combined)) {
+    conditions.push({
+      id: `ai-lyrics-${Date.now()}`,
+      type: 'rule',
+      field: 'has_lyrics',
+      operator: 'is',
+      value: '1',
+    });
+  }
+
+  if (/\b(unplayed|never\s+played|fresh|new\s+to\s+me)\b/i.test(combined)) {
+    conditions.push({
+      id: `ai-unplayed-${Date.now()}`,
+      type: 'rule',
+      field: 'is_unplayed',
+      operator: 'is',
+      value: '1',
+    });
+  }
+
+  if (conditions.length === 0) {
+    conditions.push({
+      id: 'ai-default-pop',
+      type: 'rule',
+      field: 'artist_relative_popularity_score',
+      operator: 'gte',
+      value: '1.0',
+    });
+  }
+
+  const countMatch = combined.match(/\b(\d{2,3})\s*(tracks?|songs?)\b/i);
+  const limitValue = countMatch ? Math.min(200, Math.max(10, Number(countMatch[1]))) : 50;
+
+  const maxArtistMatch = combined.match(/\b(?:max|limit)\s*(\d+)\s*(?:songs?|tracks?)?\s*per\s*artist\b/i);
+  const maxPerArtist = maxArtistMatch ? Math.max(1, Number(maxArtistMatch[1])) : 2;
+
+  let regenerateInterval: SmartRuleGroup['regenerateInterval'] = 'live';
+  if (/\bminutely|every\s+minute\b/i.test(combined)) regenerateInterval = 'minutely';
+  else if (/\bhourly|every\s+hour\b/i.test(combined)) regenerateInterval = 'hourly';
+  else if (/\bdaily|every\s+day\b/i.test(combined)) regenerateInterval = 'daily';
+  else if (/\bweekly|every\s+week\b/i.test(combined)) regenerateInterval = 'weekly';
+  else if (/\bmonthly|every\s+month\b/i.test(combined)) regenerateInterval = 'monthly';
+  else if (/\byearly|every\s+year|annually\b/i.test(combined)) regenerateInterval = 'yearly';
+
+  let selectionMethod = 'random_weighted';
+  if (/\bdeep\s+cuts?\b/i.test(combined)) selectionMethod = 'deep_cuts';
+  else if (/\bleast\s+played\b/i.test(combined)) selectionMethod = 'least_played';
+  else if (/\bmost\s+played\b/i.test(combined)) selectionMethod = 'most_played';
+  else if (/\bhighest\s+rat(?:ed|ing)\b/i.test(combined)) selectionMethod = 'rating_desc';
+  else if (/\brecently\s+added\b/i.test(combined)) selectionMethod = 'recently_added';
+  else if (/\brandom\b/i.test(combined)) selectionMethod = 'random';
+
+  return {
+    smartRules: {
+      id: 'ai-root',
+      type: 'group',
+      match: 'ALL',
+      conditions,
+      maxPerArtist,
+      avoidBackToBackArtist: true,
+      regenerateInterval,
+    },
+    limitType: 'tracks',
+    limitValue,
+    selectionMethod,
+  };
+}
+
 export async function runAiAgentTurn(input: {
   prompt: string;
   history?: { role: 'user' | 'assistant'; content: string }[];
   excludedTrackIds?: number[];
+  mode?: 'standard' | 'smart';
 }): Promise<AgentTurnResult> {
   if (!activeContext || !activeModel) {
     throw new Error('AI model is not loaded. Please prepare the model first.');
   }
+
+  const isFirstTurn = (input.history?.length ?? 0) <= 1;
+  if (isFirstTurn) {
+    sessionCollectedTracks.clear();
+  }
+
+  logger.info('SYSTEM', 'AI Playlist turn started', {
+    prompt: input.prompt,
+    historyLength: input.history?.length ?? 0,
+  });
 
   const llamaModule = await loadLlamaModule();
   const { LlamaChatSession, defineChatSessionFunction } = llamaModule;
@@ -615,6 +898,7 @@ export async function runAiAgentTurn(input: {
   }
 
   let pendingResult: AgentTurnResult | null = null;
+  let searchCallsThisTurn = 0;
   const globalExcluded = input.excludedTrackIds || [];
 
   const functions = {
@@ -632,8 +916,17 @@ export async function runAiAgentTurn(input: {
           limit: { type: 'number' },
         },
       },
-      handler: async (args: any) =>
-        queryLocalCatalogTool({ ...args, exclude_track_ids: globalExcluded }),
+      handler: async (args: any) => {
+        searchCallsThisTurn += 1;
+        logger.info('SYSTEM', 'AI tool: search_local_catalog', { args, callNum: searchCallsThisTurn });
+        if (searchCallsThisTurn > 3 && sessionCollectedTracks.size > 0) {
+          return {
+            note: 'Enough tracks found. Call finalize_playlist with these track_ids or ask_user_followup now.',
+            tracks: [],
+          };
+        }
+        return queryLocalCatalogTool({ ...args, exclude_track_ids: globalExcluded });
+      },
     }),
     discover_via_lastfm: defineChatSessionFunction({
       description:
@@ -648,7 +941,10 @@ export async function runAiAgentTurn(input: {
         },
         required: ['seed_artist'],
       },
-      handler: async (args: any) => discoverViaLastfmTool(args),
+      handler: async (args: any) => {
+        logger.info('SYSTEM', 'AI tool: discover_via_lastfm', { args });
+        return discoverViaLastfmTool(args);
+      },
     }),
     lookup_musicbrainz: defineChatSessionFunction({
       description: 'Lookup recordings, release-groups, or artists on MusicBrainz and resolve owned tracks.',
@@ -660,7 +956,10 @@ export async function runAiAgentTurn(input: {
         },
         required: ['query', 'entity_type'],
       },
-      handler: async (args: any) => lookupMusicbrainzTool(args),
+      handler: async (args: any) => {
+        logger.info('SYSTEM', 'AI tool: lookup_musicbrainz', { args });
+        return lookupMusicbrainzTool(args);
+      },
     }),
     ask_user_followup: defineChatSessionFunction({
       description: 'Ask the user 1 concise clarifying question with clickable quick-reply options.',
@@ -673,6 +972,7 @@ export async function runAiAgentTurn(input: {
         required: ['question', 'options'],
       },
       handler: async (args: { question: string; options: string[] }) => {
+        logger.info('SYSTEM', 'AI tool: ask_user_followup', { question: args.question });
         pendingResult = {
           type: 'followup',
           question: args.question,
@@ -704,6 +1004,7 @@ export async function runAiAgentTurn(input: {
           .all(...ids) as TrackRow[];
         const byId = new Map(rows.map((r) => [r.id, r]));
         const ordered = ids.map((id) => byId.get(id)).filter(Boolean) as TrackRow[];
+        logger.info('SYSTEM', 'AI tool: finalize_playlist', { name: args.name, count: ordered.length });
         pendingResult = {
           type: 'finalized',
           name: args.name || 'AI Generated Playlist',
@@ -713,19 +1014,158 @@ export async function runAiAgentTurn(input: {
         return { validatedCount: ordered.length };
       },
     }),
+    finalize_smart_playlist: defineChatSessionFunction({
+      description: 'Create an auto-updating Smart Playlist using structured rules evaluated against SQLite.',
+      params: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          description: { type: 'string' },
+          match_mode: { enum: ['ALL', 'ANY'] },
+          rules: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                field: { type: 'string' },
+                operator: { type: 'string' },
+                value: { type: 'string' },
+              },
+              required: ['field', 'operator', 'value'],
+            },
+          },
+          limit_count: { type: 'number' },
+        },
+        required: ['name', 'rules'],
+      },
+      handler: async (args: {
+        name: string;
+        description?: string;
+        match_mode?: 'ALL' | 'ANY';
+        rules: { field: string; operator: string; value: string }[];
+        limit_count?: number;
+      }) => {
+        const smartRules: SmartRuleGroup = {
+          id: 'ai-smart-root',
+          type: 'group',
+          match: args.match_mode === 'ANY' ? 'ANY' : 'ALL',
+          conditions: (args.rules || []).map((r, idx) => ({
+            id: `ai-r-${idx}`,
+            type: 'rule',
+            field: r.field as any,
+            operator: (r.operator || 'contains') as any,
+            value: String(r.value ?? ''),
+          })),
+        };
+        const limitVal = args.limit_count && args.limit_count > 0 ? Math.min(500, args.limit_count) : 50;
+        const { tracks: previewTracks } = evaluateSmartPlaylist(smartRules, 'tracks', limitVal, 'popularity_desc');
+        logger.info('SYSTEM', 'AI tool: finalize_smart_playlist', {
+          name: args.name,
+          rules: smartRules.conditions.length,
+          previewCount: previewTracks.length,
+        });
+        pendingResult = {
+          type: 'finalized_smart',
+          name: args.name || 'AI Smart Playlist',
+          description: args.description || 'Auto-updating Smart Playlist generated by rTunes AI.',
+          smartRules,
+          limitType: 'tracks',
+          limitValue: limitVal,
+          selectionMethod: 'popularity_desc',
+          previewTracks: previewTracks.slice(0, 50),
+        };
+        return { matchedCount: previewTracks.length };
+      },
+    }),
   };
 
-  const responseText = await activeSession.prompt(input.prompt, {
-    functions,
-    maxTokens: 1024,
-  });
+  const wantSmart = input.mode === 'smart' || /\bsmart\s+playlist\b/i.test(input.prompt);
+  const promptForModel = wantSmart
+    ? `${input.prompt}\n[Mode: Smart Playlist — prefer calling finalize_smart_playlist with rules.]`
+    : input.prompt;
+
+  let responseText = '';
+  try {
+    responseText = await activeSession.prompt(promptForModel, {
+      functions,
+      maxTokens: 640,
+    });
+  } catch (err) {
+    logger.error('SYSTEM', 'AI Playlist prompt failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // Reset session if context sequence got into a bad state
+    activeSession = null;
+  }
+
+  const cleanText = (responseText || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .trim();
 
   if (pendingResult) {
     return pendingResult;
   }
 
+  // Fallback for 0.8B models that answer with plain text or whitespace instead of calling tools
+  if (isFirstTurn && cleanText.includes('?') && !/\b(build|make|finalize|now)\b/i.test(input.prompt)) {
+    return {
+      type: 'followup',
+      question: cleanText,
+      options: ['Build playlist now', 'Upbeat & energetic', 'Chill & mellow', 'Include deep cuts'],
+    };
+  }
+
+  if (wantSmart) {
+    const built = buildSmartRulesFromPrompt(input.prompt, input.history);
+    const { tracks: previewTracks } = evaluateSmartPlaylist(
+      built.smartRules,
+      built.limitType,
+      built.limitValue,
+      built.selectionMethod
+    );
+    const title = derivePlaylistTitle(input.prompt, input.history);
+    logger.info('SYSTEM', 'AI Smart Playlist auto-finalized from prompt', {
+      title,
+      ruleCount: built.smartRules.conditions.length,
+      previewCount: previewTracks.length,
+    });
+    return {
+      type: 'finalized_smart',
+      name: title,
+      description: cleanText || `Auto-updating Smart Playlist (${previewTracks.length} matching tracks).`,
+      smartRules: built.smartRules,
+      limitType: built.limitType,
+      limitValue: built.limitValue,
+      selectionMethod: built.selectionMethod,
+      previewTracks: previewTracks.slice(0, 50),
+    };
+  }
+
+  if (sessionCollectedTracks.size === 0) {
+    queryLocalCatalogTool({
+      query: input.prompt,
+      exclude_track_ids: globalExcluded,
+      limit: 25,
+    });
+  }
+
+  const collected = Array.from(sessionCollectedTracks.values()).slice(0, 25);
+  if (collected.length > 0) {
+    const title = derivePlaylistTitle(input.prompt, input.history);
+    logger.info('SYSTEM', 'AI Playlist auto-finalized from collected tracks', {
+      title,
+      count: collected.length,
+    });
+    return {
+      type: 'finalized',
+      name: title,
+      description: cleanText || `Generated from ${collected.length} owned tracks in your library.`,
+      tracks: collected,
+    };
+  }
+
   return {
     type: 'message',
-    message: responseText || 'Ready. Tell me more about the playlist you want to build.',
+    message: cleanText || 'Tell me a genre, artist, or mood and I will build a playlist from your library.',
   };
 }

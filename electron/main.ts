@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'path';
 import http from 'http';
 import fs from 'fs';
@@ -43,10 +43,13 @@ import {
   evaluateSmartPlaylist,
   getPlaylistTracks,
   getPlaylistVideos,
+  regenerateSmartPlaylist,
   ignoreTrackInSmartPlaylist,
   excludeTrackFromAllSmartPlaylists,
   getSmartPlaylistExclusions,
   restoreSmartPlaylistExclusion,
+  getDistinctSmartFieldValues,
+  SmartField,
   SmartRuleGroup,
 } from './smartPlaylists';
 import {
@@ -77,7 +80,14 @@ import {
   cancelPrepareAiModel,
   disposeAiModel,
   runAiAgentTurn,
+  rerunAiStandardPlaylist,
 } from './ai/llamaService';
+import {
+  generateMix as generateEGeniusMix,
+  refreshMix as refreshEGeniusMix,
+  explainTrack as explainEGeniusTrack,
+  MixDepthMode,
+} from './egenius';
 import {
   getStorefrontHome,
   searchStoreCatalog,
@@ -93,6 +103,7 @@ import {
   mountNetworkShare,
   unmountNetworkShare,
   autoDetectShareFolders,
+  discoverNetworkSharesOnHost,
   autoMountSharesOnStartup,
   unmountAllManagedSharesOnQuit,
   NetworkShareInput,
@@ -112,6 +123,12 @@ import {
 import { startMediaServer, getMediaServerPort } from './mediaServer';
 import { logger, LogLevel, LogSubsystem } from './logger';
 import { platformDriver } from './platform';
+
+try {
+  app.setPath('userData', platformDriver.getFallbackUserDataDir());
+} catch {
+  // ignore if running outside Electron app context
+}
 
 export const isDev =
   (!app.isPackaged && process.env.NODE_ENV !== 'production') ||
@@ -191,6 +208,17 @@ function registerAllHandlers() {
   );
 
   // --- Library Tracks & Videos (SQLite + FTS5, Zero Live-Network Scanning) ---
+  registerChannel('shell:showItemInFolder', (targetPath?: string) => {
+    if (!targetPath || typeof targetPath !== 'string') {
+      return { ok: false, error: 'No file path available for this item.' };
+    }
+    const resolved = path.resolve(targetPath);
+    if (fs.existsSync(resolved)) {
+      shell.showItemInFolder(resolved);
+      return { ok: true, path: resolved };
+    }
+    return { ok: false, error: `File not accessible on this host: ${targetPath}` };
+  });
   registerChannel('tracks:search', (query = '', limit = 200000) => searchTracksFts(query, limit));
   registerChannel('tracks:rate', async (trackId: number, rating: number, isLoved?: boolean) => {
     const db = getDb();
@@ -370,6 +398,8 @@ function registerAllHandlers() {
       limitValue?: number | null;
       selectionMethod?: string;
       keepCached?: boolean;
+      aiPrompt?: string | null;
+      aiMode?: 'standard' | 'smart' | null;
     }) => {
       const db = getDb();
       const rulesJson = payload.smartRules ? JSON.stringify(payload.smartRules) : null;
@@ -377,7 +407,7 @@ function registerAllHandlers() {
       if (payload.id) {
         db.prepare(`
           UPDATE playlists
-          SET name = ?, is_smart = ?, media_type = ?, smart_rules_json = ?, limit_type = ?, limit_value = ?, track_limit = ?, selection_method = ?, keep_cached = ?
+          SET name = ?, is_smart = ?, media_type = ?, smart_rules_json = ?, limit_type = ?, limit_value = ?, track_limit = ?, selection_method = ?, keep_cached = ?, cached_track_ids_json = NULL, last_regenerated_at = NULL
           WHERE id = ?
         `).run(
           payload.name,
@@ -400,8 +430,8 @@ function registerAllHandlers() {
       } else {
         const res = db
           .prepare(`
-            INSERT INTO playlists (name, is_smart, media_type, smart_rules_json, limit_type, limit_value, track_limit, selection_method, keep_cached)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO playlists (name, is_smart, media_type, smart_rules_json, limit_type, limit_value, track_limit, selection_method, keep_cached, ai_prompt, ai_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `)
           .run(
             payload.name,
@@ -412,7 +442,9 @@ function registerAllHandlers() {
             payload.limitValue ?? null,
             payload.limitType === 'tracks' ? payload.limitValue ?? null : null,
             payload.selectionMethod || 'popularity_desc',
-            payload.keepCached ? 1 : 0
+            payload.keepCached ? 1 : 0,
+            payload.aiPrompt ?? null,
+            payload.aiMode ?? null
           );
         const newId = Number(res.lastInsertRowid);
         if (payload.keepCached) {
@@ -423,6 +455,76 @@ function registerAllHandlers() {
         return newId;
       }
     }
+  );
+  registerChannel('playlists:regenerate', (playlistId: number) => regenerateSmartPlaylist(playlistId));
+  registerChannel('playlists:rerunAi', (playlistId: number) => {
+    const db = getDb();
+    const pl = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as PlaylistRow | undefined;
+    if (!pl) return [];
+    if (pl.is_smart) {
+      return regenerateSmartPlaylist(playlistId);
+    }
+    const existingRows = db
+      .prepare('SELECT track_id FROM playlist_tracks WHERE playlist_id = ?')
+      .all(playlistId) as { track_id: number }[];
+    const excludeIds = existingRows.map((r) => r.track_id);
+    const prompt = pl.ai_prompt || pl.name;
+    const nextTracks = rerunAiStandardPlaylist(prompt, excludeIds, Math.max(15, excludeIds.length || 25));
+    const tx = db.transaction(() => {
+      db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?').run(playlistId);
+      const ins = db.prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)');
+      nextTracks.forEach((t, idx) => ins.run(playlistId, t.id, idx + 1));
+    });
+    tx();
+    logger.info('SYSTEM', `Reran AI playlist "${pl.name}" (${nextTracks.length} tracks)`, { playlistId });
+    return nextTracks;
+  });
+  registerChannel(
+    'egenius:createPlaylist',
+    async (payload: { trackId: number; limit?: 25 | 50; mode?: MixDepthMode }) => {
+      const db = getDb();
+      const mix = await generateEGeniusMix({
+        seedTrackId: payload.trackId,
+        limit: payload.limit === 50 ? 50 : 25,
+        mode: payload.mode || 'balanced',
+      });
+      const plName = `eGenius: ${mix.seedTrack.title}`;
+      const res = db
+        .prepare(
+          `INSERT INTO playlists (name, is_smart, media_type, limit_type, limit_value, track_limit, selection_method, egenius_seed_track_id, egenius_mode)
+           VALUES (?, 0, 'music', 'tracks', ?, ?, 'egenius', ?, ?)`
+        )
+        .run(plName, mix.limit, mix.limit, mix.seedTrack.id, mix.mode);
+      const newId = Number(res.lastInsertRowid);
+      const ins = db.prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)');
+      const tx = db.transaction(() => {
+        mix.tracks.forEach((t, idx) => ins.run(newId, t.id, idx + 1));
+      });
+      tx();
+      return { playlistId: newId, mix };
+    }
+  );
+  registerChannel(
+    'egenius:refreshPlaylist',
+    async (payload: { playlistId: number; limit?: 25 | 50; mode?: MixDepthMode }) => {
+      const mix = await refreshEGeniusMix(payload.playlistId, {
+        limit: payload.limit,
+        mode: payload.mode,
+      });
+      return { playlistId: payload.playlistId, mix };
+    }
+  );
+  registerChannel('egenius:convertToStandard', (playlistId: number) => {
+    const db = getDb();
+    db.prepare(
+      'UPDATE playlists SET egenius_seed_track_id = NULL, egenius_mode = NULL WHERE id = ?'
+    ).run(playlistId);
+    return { ok: true };
+  });
+  registerChannel(
+    'egenius:explainTrack',
+    (payload: { seedTrackId: number; candidateTrackId: number; mode?: MixDepthMode }) =>
+      explainEGeniusTrack(payload.seedTrackId, payload.candidateTrackId, payload.mode || 'balanced')
   );
   registerChannel('playlists:delete', (playlistId: number) => {
     const db = getDb();
@@ -533,6 +635,10 @@ function registerAllHandlers() {
     return { ok: true, added: eps.length };
   });
 
+  registerChannel('playlists:getDistinctFieldValues', (field: SmartField, search?: string) =>
+    getDistinctSmartFieldValues(field, search)
+  );
+
   // --- Universal ePod Device Manager & Sync (MTP + UMS) ---
   registerChannel('devices:volumes', () => listMountedVolumes());
   registerChannel('devices:list', () => getRegisteredDevicesAsync());
@@ -595,6 +701,11 @@ function registerAllHandlers() {
   registerChannel('shares:mount', (id: number) => mountNetworkShare(id));
   registerChannel('shares:unmount', (id: number) => unmountNetworkShare(id));
   registerChannel('shares:autoDetect', (mountPoint: string) => autoDetectShareFolders(mountPoint));
+  registerChannel(
+    'shares:discover',
+    (params: { protocol: 'nfs' | 'smb'; host: string; username?: string; password?: string }) =>
+      discoverNetworkSharesOnHost(params)
+  );
 
   // --- Priority 4: Smart Media Upload Wizard & *arr Auto-Import ---
   registerChannel('upload:searchMetadata', (mediaType: UploadMediaType, query: string) =>

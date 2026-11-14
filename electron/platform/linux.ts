@@ -156,6 +156,10 @@ export const linuxDriver: PlatformDriver = {
     return null;
   },
 
+  async discoverHostShares(): Promise<string[]> {
+    return [];
+  },
+
   async mountNetworkShare(params: ShareMountParams): Promise<void> {
     if (params.protocol === 'smb') {
       const cleanShare = params.exportPath.replace(/^\/+/, '');

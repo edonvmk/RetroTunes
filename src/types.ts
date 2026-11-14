@@ -26,8 +26,14 @@ export interface TrackRow {
   theaudiodb_id?: string | null;
   lidarr_id?: string | null;
   global_listen_count: number;
+  lastfm_plays?: number;
+  audiodb_plays?: number;
+  combined_global_plays?: number;
+  popularity_updated_at?: number;
   artist_median_listen_count: number;
   artist_relative_popularity_score: number;
+  artist_rarity_multiplier?: number;
+  discovery_score?: number;
   local_star_rating: number;
   is_loved: number;
   play_count: number;
@@ -169,6 +175,12 @@ export interface PlaylistRow {
   keep_cached: number;
   last_synced_hash: string | null;
   owner_user: string | null;
+  cached_track_ids_json?: string | null;
+  last_regenerated_at?: string | null;
+  ai_prompt?: string | null;
+  ai_mode?: 'standard' | 'smart' | null;
+  egenius_seed_track_id?: number | null;
+  egenius_mode?: 'hits' | 'balanced' | 'deep' | null;
   created_at: string;
   trackCount?: number;
   audioCount?: number;
@@ -179,6 +191,7 @@ export type SmartField =
   | 'title'
   | 'artist'
   | 'album'
+  | 'album_artist'
   | 'genre'
   | 'year'
   | 'bitrate'
@@ -186,11 +199,26 @@ export type SmartField =
   | 'play_count'
   | 'local_star_rating'
   | 'is_loved'
+  | 'keep_cached'
   | 'global_listen_count'
+  | 'lastfm_plays'
+  | 'audiodb_plays'
+  | 'combined_global_plays'
   | 'artist_median_listen_count'
   | 'artist_relative_popularity_score'
+  | 'artist_rarity_multiplier'
+  | 'discovery_score'
   | 'duration'
-  | 'remote_nfs_path';
+  | 'track_num'
+  | 'disc_num'
+  | 'file_size'
+  | 'date_added'
+  | 'last_played'
+  | 'remote_nfs_path'
+  | 'has_lyrics'
+  | 'has_artwork'
+  | 'is_unplayed'
+  | 'is_hd_audio';
 
 export type SmartOperator =
   | 'is'
@@ -198,11 +226,28 @@ export type SmartOperator =
   | 'contains'
   | 'not_contains'
   | 'starts_with'
+  | 'ends_with'
   | 'gt'
   | 'gte'
   | 'lt'
   | 'lte'
-  | 'between';
+  | 'between'
+  | 'in_last'
+  | 'not_in_last'
+  | 'in_list'
+  | 'not_in_list'
+  | 'is_empty'
+  | 'not_empty';
+
+export type RegenerateInterval =
+  | 'live'
+  | 'minutely'
+  | 'hourly'
+  | 'daily'
+  | 'weekly'
+  | 'monthly'
+  | 'yearly'
+  | 'manual';
 
 export interface SmartRule {
   id: string;
@@ -218,6 +263,10 @@ export interface SmartRuleGroup {
   type?: 'group';
   match: 'ALL' | 'ANY';
   conditions: (SmartRule | SmartRuleGroup)[];
+  maxPerArtist?: number | null;
+  maxPerAlbum?: number | null;
+  avoidBackToBackArtist?: boolean;
+  regenerateInterval?: RegenerateInterval;
 }
 
 export interface DeviceProfile {

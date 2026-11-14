@@ -153,3 +153,23 @@ Any commit that adds:
   - `50%` to `100%` is strictly for loading the GGUF weights into RAM/VRAM and creating the inference context.
   - Provide a working **Cancel** button (`AbortController`) during download/load and always dispose of the model and context (`context.dispose()`, `model.dispose()`) when the modal closes or cancels.
 - **Single-Purpose Scope:** The AI agent's sole job is interviewing the user and assembling playlists from owned tracks using structured tool calls (`search_local_catalog`, `discover_via_lastfm`, `lookup_musicbrainz`, `ask_user_followup`, `finalize_playlist`)—never dump the entire 95k+ track library into the prompt context.
+
+---
+
+## 11. `eGenius` Similarity Playlist Engine (`electron/egenius/`)
+
+- **Modular Headless Architecture:** `eGenius` lives in `electron/egenius/` (`index.ts`, `types.ts`, `affinityCache.ts`, `variantFilter.ts`, `scorer.ts`, `sequencer.ts`) with zero `BrowserWindow` dependencies, usable both via Electron IPC (`egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`) and via CLI (`npm run cli -- playlist egenius --track-id <id> [--limit 25|50] [--mode hits|balanced|deep]`).
+- **30-Day SQLite Affinity Cache:** `artist_affinity_cache` and `track_affinity_cache` store Last.fm `artist.getSimilar`, `artist.getTopTags`, and `track.getSimilar` responses with a 30-day TTL so mixes generate in `<150ms` and fall back gracefully to local genre, release era, and `Rel. Score` when offline.
+- **Five-Signal Scoring & Variant Parity:** Composite score weights Crowd Co-Listening Graph (35%, Hop-1 + Hop-2 bridges), Micro-Genre Folksonomy Tags (25%), Release Era Proximity (15%, $\pm 6$ yr Gaussian), `Rel. Score` Depth Matching (15%, `hits` / `balanced` / `deep`), and Strict Variant Parity & Interlude Filtering (10%, penalizing/excluding `instrumental`, `acoustic`, `live`, `remix_demo`, and `< 90s` skits for `studio_vocal` seeds).
+- **Anti-Clumping Sequencing:** Enforces max 2 seed-artist tracks & max 1 track per other artist in 25-track mode (max 2 per artist & max 1 per album in 50-track mode), an 8-track sliding-window artist cooldown, and weighted temperature sampling from the top 120 scored candidates.
+
+---
+
+## 12. Multi-Source Global Plays & Bounded 3-Tier Popularity (`db.ts`, `indexer.ts`)
+
+- **Multi-Source Play Counts (`tracks`):** Personal `play_count` (`User Plays`) is strictly separated from global popularity. Global plays sum three independent columns into `combined_global_plays` (`Global Plays`): `global_listen_count` (`LB Plays`, ListenBrainz), `lastfm_plays` (`LastFM Plays`, Last.fm `track.getInfo`), and `audiodb_plays` (`AudioDB Plays`, TheAudioDB `searchtrack.php` / `track-mb.php`), with a 30-day `popularity_updated_at` TTL.
+- **Bayesian Studio Baseline:** `recalculateArtistPopularityScores()` computes each artist's median `combined_global_plays` using only `studio_vocal` tracks $\ge 90\text{s}$ (`variantFilter.ts`), smoothed with a 5-track Bayesian prior at `globalStudioMedian`.
+- **Bounded 3-Tier Scores:**
+  - `artist_relative_popularity_score` (`Rel. Score`, `0.0–100.0`): Logarithmic sigmoid mapping `combined_global_plays / smoothedMedian` (`50.0` at median, `70.0–100.0` for hits, `0.0–35.0` for deep cuts).
+  - `artist_rarity_multiplier` (`Rarity Mult.`, `0.10x–10.00x`): Inverted logarithmic artist popularity multiplier.
+  - `discovery_score` (`Final Score`, `0.0–1000.0`): `ROUND(artist_relative_popularity_score * artist_rarity_multiplier, 1)`.

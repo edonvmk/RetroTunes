@@ -185,8 +185,8 @@ export const darwinDriver: PlatformDriver = {
     }
   },
 
-  resolveExistingShareMount(exportPath: string): string | null {
-    if (exportPath.startsWith('/Volumes/') && fs.existsSync(exportPath)) {
+  resolveExistingShareMount(exportPath: string, host?: string): string | null {
+    if (exportPath.startsWith('/Volumes/') && fs.existsSync(exportPath) && isDirNonEmpty(exportPath)) {
       return exportPath;
     }
     const baseSegment = path.basename(exportPath.replace(/\/+$/, ''));
@@ -196,7 +196,63 @@ export const darwinDriver: PlatformDriver = {
         return candidate;
       }
     }
+    if (host) {
+      try {
+        const mountOut = execFileSync('/sbin/mount', [], { encoding: 'utf8' });
+        const escapedHost = host.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const lines = mountOut.split(/\r?\n/);
+        for (const line of lines) {
+          if (new RegExp(`[@/]${escapedHost}[/:]`, 'i').test(line)) {
+            const m = /\son\s+(\/Volumes\/[^\s(]+(?:\s+[^\s(]+)*)\s+\(/.exec(line);
+            if (m && m[1] && fs.existsSync(m[1]) && isDirNonEmpty(m[1])) {
+              return m[1];
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
     return null;
+  },
+
+  async discoverHostShares(params): Promise<string[]> {
+    const cleanHost = params.host.trim();
+    if (!cleanHost) return [];
+    if (params.protocol === 'nfs') {
+      try {
+        const { stdout } = await execFileAsync('/usr/sbin/showmount', ['-e', cleanHost], {
+          timeout: 8000,
+        });
+        return stdout
+          .split(/\r?\n/)
+          .slice(1)
+          .map((l) => l.trim().split(/\s+/)[0])
+          .filter(Boolean);
+      } catch {
+        return [];
+      }
+    }
+    try {
+      const authPart = params.username
+        ? params.password
+          ? `${encodeURIComponent(params.username)}:${encodeURIComponent(params.password)}@`
+          : `${encodeURIComponent(params.username)}@`
+        : 'guest@';
+      const { stdout } = await execFileAsync('smbutil', ['view', `//${authPart}${cleanHost}`], {
+        timeout: 8000,
+      });
+      const shares: string[] = [];
+      for (const line of stdout.split(/\r?\n/)) {
+        const match = /^(\S+)\s+Disk\b/i.exec(line.trim());
+        if (match && match[1] && !match[1].endsWith('$')) {
+          shares.push(match[1]);
+        }
+      }
+      return shares;
+    } catch {
+      return [];
+    }
   },
 
   async mountNetworkShare(params: ShareMountParams): Promise<void> {
@@ -210,14 +266,46 @@ export const darwinDriver: PlatformDriver = {
       return;
     }
 
-    const cleanShare = params.exportPath.replace(/^\/+/, '');
-    const authPart = params.username
-      ? params.password
-        ? `${encodeURIComponent(params.username)}:${encodeURIComponent(params.password)}@`
-        : `${encodeURIComponent(params.username)}@`
-      : 'guest@';
-    const smbUrl = `//${authPart}${params.host}/${cleanShare}`;
-    await execFileAsync('/sbin/mount_smbfs', ['-N', smbUrl, params.mountPoint], { timeout: 15000 });
+    const encodeSmbComp = (s: string) =>
+      encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+
+    const tryMountSmbShare = async (shareName: string) => {
+      const cleanShare = shareName.replace(/^\/+/, '');
+      const authPart = params.username
+        ? params.password
+          ? `${encodeSmbComp(params.username)}:${encodeSmbComp(params.password)}@`
+          : `${encodeSmbComp(params.username)}@`
+        : 'guest@';
+      const smbUrl = `//${authPart}${params.host}/${cleanShare}`;
+      await execFileAsync('/sbin/mount_smbfs', ['-N', smbUrl, params.mountPoint], { timeout: 15000 });
+    };
+
+    try {
+      await tryMountSmbShare(params.exportPath);
+    } catch (firstErr) {
+      const discovered = await this.discoverHostShares({
+        protocol: 'smb',
+        host: params.host,
+        username: params.username,
+        password: params.password,
+      });
+      const requested = params.exportPath.replace(/^\/+/, '').toLowerCase();
+      const fallbackShare =
+        discovered.find((s) => s.toLowerCase() === requested) ||
+        discovered.find((s) => s.toLowerCase().includes('media')) ||
+        (discovered.length === 1 ? discovered[0] : undefined);
+
+      if (fallbackShare && fallbackShare.toLowerCase() !== requested) {
+        await tryMountSmbShare(fallbackShare);
+        return;
+      }
+      if (discovered.length > 0) {
+        throw new Error(
+          `Share "${params.exportPath}" was not found on ${params.host}. Available shares on this server: ${discovered.join(', ')}`
+        );
+      }
+      throw firstErr;
+    }
   },
 
   async unmountNetworkShare(mountPoint: string): Promise<void> {

@@ -10,10 +10,11 @@ import {
   refreshMtpState,
   syncDevice,
 } from './deviceSync';
-import { runLibraryScan } from './indexer';
+import { runLibraryScan, syncListenBrainzPopularity } from './indexer';
 import { getCacheStats } from './cacheTranscoder';
 import { getArrLiveQueue } from './storeArr';
 import { standaloneLocalProvider } from './providers/standaloneLocal';
+import { generateMix, MixDepthMode } from './egenius';
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -242,6 +243,70 @@ async function cmdStoreQueue(asJson: boolean) {
   return 0;
 }
 
+async function cmdPlaylistEgenius(flags: Record<string, string | boolean>, asJson: boolean) {
+  initDatabase();
+  const trackId = Number(flags['track-id'] || flags.trackId || 0);
+  if (!trackId) {
+    throw new Error('Missing required --track-id <id>');
+  }
+  const rawLimit = Number(flags.limit || 25);
+  const limit: 25 | 50 = rawLimit === 50 ? 50 : 25;
+  const rawMode = String(flags.mode || 'balanced').toLowerCase();
+  const mode: MixDepthMode = rawMode === 'hits' || rawMode === 'deep' ? rawMode : 'balanced';
+
+  const mix = await generateMix({
+    seedTrackId: trackId,
+    limit,
+    mode,
+    offlineOnly: Boolean(flags.offline),
+  });
+
+  if (asJson) {
+    out(
+      {
+        ok: true,
+        seedTrack: {
+          id: mix.seedTrack.id,
+          title: mix.seedTrack.title,
+          artist: mix.seedTrack.artist,
+          album: mix.seedTrack.album,
+          year: mix.seedTrack.year,
+          variant: mix.seedVariant,
+        },
+        mode: mix.mode,
+        limit: mix.limit,
+        count: mix.tracks.length,
+        distinctArtists: mix.distinctArtists,
+        hop1Count: mix.hop1Count,
+        hop2Count: mix.hop2Count,
+        cacheHit: mix.cacheHit,
+        elapsedMs: mix.elapsedMs,
+        tracks: mix.tracks.map((t, i) => ({
+          pos: i + 1,
+          id: t.id,
+          title: t.title,
+          artist: t.artist,
+          album: t.album,
+          year: t.year,
+          duration: t.duration,
+          relScore: t.artist_relative_popularity_score,
+        })),
+      },
+      true
+    );
+  } else {
+    console.log(
+      `eGenius Mix from "${mix.seedTrack.title}" by ${mix.seedTrack.artist} (${mix.seedVariant}) — ${mix.tracks.length} tracks, ${mix.distinctArtists} distinct artists, ${mix.elapsedMs}ms [mode=${mix.mode}, cacheHit=${mix.cacheHit}]`
+    );
+    mix.tracks.forEach((t, i) => {
+      console.log(
+        `  ${String(i + 1).padStart(2, ' ')}. ${t.artist} — ${t.title} (${t.album || '—'}, ${t.year || '—'}, rel=${(t.artist_relative_popularity_score || 0).toFixed(2)}x)`
+      );
+    });
+  }
+  return 0;
+}
+
 async function main() {
   const { positional, flags } = parseArgs(process.argv.slice(2));
   const asJson = Boolean(flags.json);
@@ -268,13 +333,26 @@ async function main() {
       process.exitCode = await cmdDbScan(flags, asJson);
       return;
     }
+    if (group === 'db' && sub === 'update-popularity') {
+      initDatabase();
+      const force = Boolean(flags.force);
+      const limit = flags.limit ? Number(flags.limit) : 120;
+      const res = await syncListenBrainzPopularity({ force, limit });
+      out({ ok: true, ...res }, asJson);
+      process.exitCode = 0;
+      return;
+    }
     if (group === 'store' && sub === 'queue') {
       process.exitCode = await cmdStoreQueue(asJson);
       return;
     }
+    if (group === 'playlist' && sub === 'egenius') {
+      process.exitCode = await cmdPlaylistEgenius(flags, asJson);
+      return;
+    }
 
     console.error(
-      'Usage: npm run cli -- <doctor | device list | device sync [--dry-run] [--uuid <id>] | db stats | db scan [--path <dir>] | store queue> [--json]'
+      'Usage: npm run cli -- <doctor | device list | device sync [--dry-run] [--uuid <id>] | db stats | db scan [--path <dir>] | store queue | playlist egenius --track-id <id> [--limit 25|50] [--mode hits|balanced|deep]> [--json]'
     );
     process.exitCode = 1;
   } catch (err) {

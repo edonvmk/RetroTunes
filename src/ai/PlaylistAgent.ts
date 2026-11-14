@@ -1,5 +1,5 @@
 import { invokeRpc } from '../bridge';
-import { TrackRow } from '../types';
+import { SmartRuleGroup, TrackRow } from '../types';
 
 export interface PlaylistToolDefinition {
   name:
@@ -122,6 +122,17 @@ export type AgentTurnResult =
       assistantMessage?: string;
     }
   | {
+      type: 'finalized_smart';
+      name: string;
+      description: string;
+      smartRules: SmartRuleGroup;
+      limitType: 'tracks' | 'minutes' | 'gb';
+      limitValue: number | null;
+      selectionMethod: string;
+      previewTracks: TrackRow[];
+      assistantMessage?: string;
+    }
+  | {
       type: 'message';
       message: string;
     };
@@ -137,6 +148,7 @@ export interface PlaylistProvider {
     prompt: string;
     history: AgentChatMessage[];
     excludedTrackIds?: number[];
+    mode?: 'standard' | 'smart';
   }): Promise<AgentTurnResult>;
   dispose(): Promise<void>;
 }
@@ -152,6 +164,7 @@ export class LocalLlamaProvider implements PlaylistProvider {
     prompt: string;
     history: AgentChatMessage[];
     excludedTrackIds?: number[];
+    mode?: 'standard' | 'smart';
   }): Promise<AgentTurnResult> {
     return await invokeRpc<AgentTurnResult>('ai:agent-turn', input);
   }
@@ -188,12 +201,17 @@ export class PlaylistAgent {
     return this.history;
   }
 
-  async sendMessage(prompt: string, excludedTrackIds: number[] = []): Promise<AgentTurnResult> {
+  async sendMessage(
+    prompt: string,
+    excludedTrackIds: number[] = [],
+    mode: 'standard' | 'smart' = 'standard'
+  ): Promise<AgentTurnResult> {
     this.history = [...this.history, { role: 'user', content: prompt }];
     const result = await this.provider.runTurn({
       prompt,
       history: this.history,
       excludedTrackIds,
+      mode,
     });
 
     if (result.type === 'followup') {
@@ -202,6 +220,14 @@ export class PlaylistAgent {
       this.history = [
         ...this.history,
         { role: 'assistant', content: `Proposed playlist "${result.name}" (${result.tracks.length} tracks).` },
+      ];
+    } else if (result.type === 'finalized_smart') {
+      this.history = [
+        ...this.history,
+        {
+          role: 'assistant',
+          content: `Proposed Smart Playlist "${result.name}" (${result.previewTracks.length} matching tracks).`,
+        },
       ];
     } else if (result.type === 'message') {
       this.history = [...this.history, { role: 'assistant', content: result.message }];

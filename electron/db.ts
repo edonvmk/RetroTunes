@@ -4,6 +4,7 @@ import fs from 'fs';
 import { app } from 'electron';
 import { logger } from './logger';
 import { platformDriver } from './platform';
+import { classifyVariant, isInterludeOrSkit } from './egenius/variantFilter';
 
 export interface TrackRow {
   id: number;
@@ -33,8 +34,14 @@ export interface TrackRow {
   theaudiodb_id?: string | null;
   lidarr_id?: string | null;
   global_listen_count: number;
+  lastfm_plays?: number;
+  audiodb_plays?: number;
+  combined_global_plays?: number;
+  popularity_updated_at?: number;
   artist_median_listen_count: number;
   artist_relative_popularity_score: number;
+  artist_rarity_multiplier?: number;
+  discovery_score?: number;
   local_star_rating: number;
   is_loved: number;
   play_count: number;
@@ -153,6 +160,12 @@ export interface PlaylistRow {
   keep_cached: number;
   last_synced_hash: string | null;
   owner_user: string | null;
+  cached_track_ids_json?: string | null;
+  last_regenerated_at?: string | null;
+  ai_prompt?: string | null;
+  ai_mode?: 'standard' | 'smart' | null;
+  egenius_seed_track_id?: number | null;
+  egenius_mode?: 'hits' | 'balanced' | 'deep' | null;
   created_at: string;
 }
 
@@ -191,12 +204,7 @@ let dbFilePath = '';
 
 export function getDbPath(): string {
   if (dbFilePath) return dbFilePath;
-  let dataDir = '';
-  try {
-    dataDir = app?.getPath ? app.getPath('userData') : platformDriver.getFallbackUserDataDir();
-  } catch {
-    dataDir = platformDriver.getFallbackUserDataDir();
-  }
+  const dataDir = platformDriver.getFallbackUserDataDir();
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     dbFilePath = path.join(dataDir, 'rtunes.sqlite');
@@ -260,6 +268,7 @@ export function initDatabase(customPath?: string): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_tracks_popularity ON tracks(artist_relative_popularity_score DESC);
     CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(local_star_rating DESC);
     CREATE INDEX IF NOT EXISTS idx_tracks_loved ON tracks(is_loved);
+    CREATE INDEX IF NOT EXISTS idx_tracks_sort_artist_album ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, disc_num, track_num);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
       title,
@@ -436,6 +445,20 @@ export function initDatabase(customPath?: string): Database.Database {
       PRIMARY KEY (device_uuid, track_id)
     );
 
+    CREATE TABLE IF NOT EXISTS artist_affinity_cache (
+      artist_key TEXT PRIMARY KEY,
+      artist_name TEXT NOT NULL,
+      similar_artists_json TEXT NOT NULL,
+      top_tags_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS track_affinity_cache (
+      track_mbid_or_key TEXT PRIMARY KEY,
+      similar_tracks_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS books (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       remote_nfs_path TEXT UNIQUE NOT NULL,
@@ -509,6 +532,27 @@ export function initDatabase(customPath?: string): Database.Database {
         db.exec(`ALTER TABLE tracks ADD COLUMN ${col} TEXT`);
       }
     }
+    for (const [col, sqlType] of [
+      ['lastfm_plays', 'INTEGER DEFAULT 0'],
+      ['audiodb_plays', 'INTEGER DEFAULT 0'],
+      ['combined_global_plays', 'INTEGER DEFAULT 0'],
+      ['popularity_updated_at', 'INTEGER DEFAULT 0'],
+      ['artist_rarity_multiplier', 'REAL DEFAULT 1.0'],
+      ['discovery_score', 'REAL DEFAULT 0'],
+    ] as const) {
+      if (!cols.some((c) => c.name === col)) {
+        db.exec(`ALTER TABLE tracks ADD COLUMN ${col} ${sqlType}`);
+      }
+    }
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tracks_combined_global ON tracks(combined_global_plays DESC);
+      CREATE INDEX IF NOT EXISTS idx_tracks_discovery_score ON tracks(discovery_score DESC);
+    `);
+    db.exec(`
+      UPDATE tracks
+      SET combined_global_plays = COALESCE(global_listen_count, 0) + COALESCE(lastfm_plays, 0) + COALESCE(audiodb_plays, 0)
+      WHERE COALESCE(combined_global_plays, 0) != COALESCE(global_listen_count, 0) + COALESCE(lastfm_plays, 0) + COALESCE(audiodb_plays, 0)
+    `);
     const vCols = db.prepare("PRAGMA table_info('videos')").all() as { name: string }[];
     if (!vCols.some((c) => c.name === 'poster_path')) {
       db.exec('ALTER TABLE videos ADD COLUMN poster_path TEXT');
@@ -540,6 +584,24 @@ export function initDatabase(customPath?: string): Database.Database {
     if (!pCols.some((c) => c.name === 'media_type')) {
       db.exec("ALTER TABLE playlists ADD COLUMN media_type TEXT DEFAULT 'music'");
     }
+    if (!pCols.some((c) => c.name === 'cached_track_ids_json')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN cached_track_ids_json TEXT');
+    }
+    if (!pCols.some((c) => c.name === 'last_regenerated_at')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN last_regenerated_at TEXT');
+    }
+    if (!pCols.some((c) => c.name === 'ai_prompt')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN ai_prompt TEXT');
+    }
+    if (!pCols.some((c) => c.name === 'ai_mode')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN ai_mode TEXT');
+    }
+    if (!pCols.some((c) => c.name === 'egenius_seed_track_id')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN egenius_seed_track_id INTEGER');
+    }
+    if (!pCols.some((c) => c.name === 'egenius_mode')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN egenius_mode TEXT');
+    }
     const dCols = db.prepare("PRAGMA table_info('devices')").all() as { name: string }[];
     if (!dCols.some((c) => c.name === 'transport_mode')) {
       db.exec("ALTER TABLE devices ADD COLUMN transport_mode TEXT DEFAULT 'ums'");
@@ -554,6 +616,56 @@ export function initDatabase(customPath?: string): Database.Database {
     // ignore
   }
 
+  // Migrate legacy Smart Playlist rules from old 0.35x-5x Rel. Score scale to 0-100
+  try {
+    const legacyPls = db
+      .prepare(
+        "SELECT id, smart_rules_json FROM playlists WHERE is_smart = 1 AND smart_rules_json LIKE '%artist_relative_popularity_score%'"
+      )
+      .all() as { id: number; smart_rules_json: string }[];
+
+    const convertLegacyRatio = (ratio: number): number => {
+      if (ratio <= 0) return 0;
+      const sigmoid = 1 / (1 + Math.exp(-1.15 * Math.log2(ratio)));
+      return Math.round(Math.max(0, Math.min(100, sigmoid * 100)) * 10) / 10;
+    };
+
+    const migrateNode = (node: any): boolean => {
+      if (!node || typeof node !== 'object') return false;
+      if (Array.isArray(node.conditions)) {
+        let changed = false;
+        for (const c of node.conditions) {
+          if (migrateNode(c)) changed = true;
+        }
+        return changed;
+      }
+      if (node.field === 'artist_relative_popularity_score') {
+        const v = Number(node.value);
+        if (Number.isFinite(v) && v > 0 && v <= 10) {
+          node.value = convertLegacyRatio(v);
+          if (node.valueTo !== undefined) {
+            const v2 = Number(node.valueTo);
+            if (Number.isFinite(v2) && v2 > 0 && v2 <= 10) {
+              node.valueTo = convertLegacyRatio(v2);
+            }
+          }
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const updatePlStmt = db.prepare('UPDATE playlists SET smart_rules_json = ? WHERE id = ?');
+    for (const pl of legacyPls) {
+      const parsed = JSON.parse(pl.smart_rules_json);
+      if (migrateNode(parsed)) {
+        updatePlStmt.run(JSON.stringify(parsed), pl.id);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   // Ensure default Smart Playlist rule definitions exist (evaluates dynamically against real tracks)
   const playlistCount = (db.prepare('SELECT COUNT(*) as c FROM playlists').get() as { c: number }).c;
   if (playlistCount === 0) {
@@ -563,7 +675,7 @@ export function initDatabase(customPath?: string): Database.Database {
     `);
 
     insertPlaylist.run(
-      'Artist Catalog Standouts (>= 1.5x Median)',
+      'Artist Catalog Standouts (Rel. Score >= 66)',
       JSON.stringify({
         match: 'ALL',
         conditions: [
@@ -572,7 +684,7 @@ export function initDatabase(customPath?: string): Database.Database {
             type: 'rule',
             field: 'artist_relative_popularity_score',
             operator: 'gte',
-            value: 1.5,
+            value: 66,
           },
         ],
       }),
@@ -643,49 +755,145 @@ export function getDb(): Database.Database {
 }
 
 /**
- * Recalculates artist_median_listen_count and artist_relative_popularity_score
- * across all artists in the database (Section 5: Median Popularity Normalization).
- * artist_relative_popularity_score = global_listen_count / MAX(artist_median_listen_count, 1)
+ * Recalculates artist_median_listen_count, artist_relative_popularity_score (0.0-100.0),
+ * artist_rarity_multiplier (0.10x-10.00x), and discovery_score (0.0-1000.0)
+ * strictly from combined_global_plays (LB + Last.fm + AudioDB), excluding personal play_count.
  */
 export function recalculateArtistPopularityScores(): { artistsUpdated: number; tracksUpdated: number } {
   const start = Date.now();
   const db = getDb();
-  const artists = db
-    .prepare("SELECT DISTINCT artist FROM tracks WHERE artist IS NOT NULL AND artist != ''")
-    .all() as { artist: string }[];
 
-  const getTracksForArtist = db.prepare(
-    'SELECT id, global_listen_count, play_count FROM tracks WHERE artist = ? ORDER BY global_listen_count ASC'
-  );
+  // Keep combined_global_plays in sync first
+  db.exec(`
+    UPDATE tracks
+    SET combined_global_plays = COALESCE(global_listen_count, 0) + COALESCE(lastfm_plays, 0) + COALESCE(audiodb_plays, 0)
+  `);
+
+  const allTracks = db
+    .prepare(
+      `SELECT id, artist, title, album, genre, duration, combined_global_plays
+       FROM tracks
+       WHERE artist IS NOT NULL AND artist != ''`
+    )
+    .all() as {
+      id: number;
+      artist: string;
+      title: string;
+      album: string;
+      genre: string;
+      duration: number;
+      combined_global_plays: number;
+    }[];
+
+  const byArtist = new Map<string, typeof allTracks>();
+  const globalStudioCounts: number[] = [];
+
+  for (const t of allTracks) {
+    const list = byArtist.get(t.artist) || [];
+    list.push(t);
+    byArtist.set(t.artist, list);
+
+    const variant = classifyVariant(t);
+    if (variant === 'studio_vocal' && !isInterludeOrSkit(t) && (t.combined_global_plays || 0) > 0) {
+      globalStudioCounts.push(t.combined_global_plays);
+    }
+  }
+
+  let globalStudioMedian = 100;
+  if (globalStudioCounts.length > 0) {
+    globalStudioCounts.sort((a, b) => a - b);
+    const gm = Math.floor(globalStudioCounts.length / 2);
+    globalStudioMedian =
+      globalStudioCounts.length % 2 !== 0
+        ? globalStudioCounts[gm]
+        : (globalStudioCounts[gm - 1] + globalStudioCounts[gm]) / 2.0;
+    globalStudioMedian = Math.max(globalStudioMedian, 10);
+  }
+
+  // Compute each artist's studio baseline + peak/total global popularity for rarity ranking
+  const artistStats = new Map<
+    string,
+    { smoothedMedian: number; peakOrTotalLog: number; hasGlobal: boolean }
+  >();
+  let minLogPop = Infinity;
+  let maxLogPop = -Infinity;
+
+  for (const [artist, rows] of byArtist.entries()) {
+    const studioRows = rows.filter(
+      (r) => classifyVariant(r) === 'studio_vocal' && !isInterludeOrSkit(r)
+    );
+    const baselinePool = (studioRows.length > 0 ? studioRows : rows)
+      .map((r) => r.combined_global_plays || 0)
+      .sort((a, b) => a - b);
+
+    const nonZeroPool = baselinePool.filter((c) => c > 0);
+    const medianPool = nonZeroPool.length > 0 ? nonZeroPool : baselinePool;
+    const mid = Math.floor(medianPool.length / 2);
+    const rawMedian =
+      medianPool.length === 0
+        ? 0
+        : medianPool.length % 2 !== 0
+          ? medianPool[mid]
+          : (medianPool[mid - 1] + medianPool[mid]) / 2.0;
+
+    // Bayesian smoothing (prior weight = 5 tracks at globalStudioMedian)
+    const n = nonZeroPool.length;
+    const smoothedMedian = Math.max(
+      1.0,
+      (n * rawMedian + 5 * globalStudioMedian) / (n + 5)
+    );
+
+    const peakPlays = rows.reduce((mx, r) => Math.max(mx, r.combined_global_plays || 0), 0);
+    const hasGlobal = peakPlays > 0;
+    const peakOrTotalLog = hasGlobal ? Math.log10(Math.max(1, peakPlays)) : 0;
+
+    if (hasGlobal) {
+      if (peakOrTotalLog < minLogPop) minLogPop = peakOrTotalLog;
+      if (peakOrTotalLog > maxLogPop) maxLogPop = peakOrTotalLog;
+    }
+
+    artistStats.set(artist, { smoothedMedian, peakOrTotalLog, hasGlobal });
+  }
+
+  const logSpan = Number.isFinite(minLogPop) && maxLogPop > minLogPop ? maxLogPop - minLogPop : 1;
+
   const updateTrack = db.prepare(`
     UPDATE tracks
     SET artist_median_listen_count = ?,
-        artist_relative_popularity_score = ROUND(CAST(MAX(global_listen_count, play_count) AS REAL) / MAX(?, 5.0), 3)
+        artist_relative_popularity_score = ?,
+        artist_rarity_multiplier = ?,
+        discovery_score = ?
     WHERE id = ?
   `);
 
   let tracksUpdated = 0;
   const runTx = db.transaction(() => {
-    for (const { artist } of artists) {
-      const rows = getTracksForArtist.all(artist) as {
-        id: number;
-        global_listen_count: number;
-        play_count: number;
-      }[];
-      if (rows.length === 0) continue;
-
-      const counts = rows
-        .map((r) => Math.max(r.global_listen_count || 0, r.play_count || 0))
-        .sort((a, b) => a - b);
-      const mid = Math.floor(counts.length / 2);
-      const rawMedian =
-        counts.length % 2 !== 0
-          ? counts[mid]
-          : (counts[mid - 1] + counts[mid]) / 2.0;
-      const effectiveMedian = Math.max(rawMedian, 5.0);
+    for (const [artist, rows] of byArtist.entries()) {
+      const st = artistStats.get(artist)!;
+      let rarityMult = 1.0;
+      if (st.hasGlobal) {
+        const norm = Math.max(0, Math.min(1, (st.peakOrTotalLog - minLogPop) / logSpan));
+        // 10.00x (least popular) -> 0.10x (most popular) on logarithmic curve
+        rarityMult = Math.round(Math.max(0.1, Math.min(10.0, 10.0 * Math.pow(0.01, norm))) * 100) / 100;
+      }
 
       for (const r of rows) {
-        updateTrack.run(effectiveMedian, effectiveMedian, r.id);
+        const plays = r.combined_global_plays || 0;
+        let relScore = 0.0;
+        if (plays > 0) {
+          const ratio = plays / st.smoothedMedian;
+          const sigmoid = 1 / (1 + Math.exp(-1.15 * Math.log2(ratio)));
+          relScore = Math.round(Math.max(0, Math.min(100, sigmoid * 100)) * 10) / 10;
+        }
+        const discoveryScore = Math.round(Math.min(1000, relScore * rarityMult) * 10) / 10;
+
+        updateTrack.run(
+          Math.round(st.smoothedMedian * 10) / 10,
+          relScore,
+          rarityMult,
+          discoveryScore,
+          r.id
+        );
         tracksUpdated++;
       }
     }
@@ -694,11 +902,11 @@ export function recalculateArtistPopularityScores(): { artistsUpdated: number; t
   runTx();
   logger.info(
     'DB',
-    `Recalculated Artist-Normalized Median Popularity across ${artists.length} artists (${tracksUpdated} tracks).`,
-    { artistsUpdated: artists.length, tracksUpdated },
+    `Recalculated Bounded 3-Tier Popularity across ${byArtist.size} artists (${tracksUpdated} tracks).`,
+    { artistsUpdated: byArtist.size, tracksUpdated, globalStudioMedian },
     Date.now() - start
   );
-  return { artistsUpdated: artists.length, tracksUpdated };
+  return { artistsUpdated: byArtist.size, tracksUpdated };
 }
 
 export function searchTracksFts(query: string, limit = 200000): TrackRow[] {

@@ -984,7 +984,32 @@ function normalizeSongTitle(title: string): string {
  * and mbid_recording for indexed tracks, then recalculates Artist-Relative
  * Median Popularity scores (Section 5).
  */
-export async function syncListenBrainzPopularity(): Promise<{
+async function fetchJsonWithBackoff(url: string, init?: RequestInit, retries = 3): Promise<any | null> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (res.status === 429 && attempt < retries) {
+        const waitMs = Math.min(8000, 600 * Math.pow(2, attempt));
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        continue;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+export async function syncListenBrainzPopularity(options: {
+  force?: boolean;
+  limit?: number;
+} = {}): Promise<{
   tracksChecked: number;
   mbidsResolved: number;
   popularityUpdated: number;
@@ -1199,6 +1224,106 @@ export async function syncListenBrainzPopularity(): Promise<{
       recalculateArtistPopularityScores();
       broadcastBatchCommitted();
     }
+  }
+
+  // STEP 3: Multi-Source Global Plays (Last.fm track.getInfo + TheAudioDB searchtrack.php/track-mb.php)
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ttlCutoff = nowSec - 30 * 24 * 60 * 60;
+  const trackBatchLimit = Math.max(1, Math.min(500, options.limit ?? 120));
+  const lastfmKey = settings.lastfmApiKey?.trim() || '';
+  const audiodbKey = settings.theAudioDbApiKey?.trim() || '2';
+
+  const tracksToHydrate = db
+    .prepare(
+      options.force
+        ? `SELECT id, title, artist, mbid_recording, global_listen_count, lastfm_plays, audiodb_plays
+           FROM tracks
+           WHERE artist IS NOT NULL AND artist != '' AND title IS NOT NULL AND title != ''
+           ORDER BY artist_relative_popularity_score DESC, id ASC
+           LIMIT ?`
+        : `SELECT id, title, artist, mbid_recording, global_listen_count, lastfm_plays, audiodb_plays
+           FROM tracks
+           WHERE artist IS NOT NULL AND artist != '' AND title IS NOT NULL AND title != ''
+             AND COALESCE(popularity_updated_at, 0) < ?
+           ORDER BY COALESCE(popularity_updated_at, 0) ASC, id ASC
+           LIMIT ?`
+    )
+    .all(...(options.force ? [trackBatchLimit] : [ttlCutoff, trackBatchLimit])) as {
+      id: number;
+      title: string;
+      artist: string;
+      mbid_recording: string | null;
+      global_listen_count: number;
+      lastfm_plays: number;
+      audiodb_plays: number;
+    }[];
+
+  const updateMultiSourceStmt = db.prepare(`
+    UPDATE tracks
+    SET lastfm_plays = ?,
+        audiodb_plays = ?,
+        combined_global_plays = COALESCE(global_listen_count, 0) + ? + ?,
+        popularity_updated_at = ?
+    WHERE id = ?
+  `);
+
+  const CONCURRENCY = 4;
+  for (let i = 0; i < tracksToHydrate.length; i += CONCURRENCY) {
+    if (cancelRequested) break;
+    const chunk = tracksToHydrate.slice(i, i + CONCURRENCY);
+    await Promise.all(
+      chunk.map(async (tr) => {
+        let lfmPlays = tr.lastfm_plays || 0;
+        let adbPlays = tr.audiodb_plays || 0;
+
+        if (lastfmKey) {
+          const lfmUrl = tr.mbid_recording
+            ? `https://ws.audioscrobbler.com/2.0/?method=track.getInfo&mbid=${encodeURIComponent(
+                tr.mbid_recording
+              )}&api_key=${encodeURIComponent(lastfmKey)}&format=json`
+            : `https://ws.audioscrobbler.com/2.0/?method=track.getInfo&artist=${encodeURIComponent(
+                tr.artist
+              )}&track=${encodeURIComponent(tr.title)}&autocorrect=1&api_key=${encodeURIComponent(
+                lastfmKey
+              )}&format=json`;
+          const lfmData = await fetchJsonWithBackoff(lfmUrl);
+          const pc = Number(lfmData?.track?.playcount);
+          if (Number.isFinite(pc) && pc >= 0) {
+            lfmPlays = Math.floor(pc);
+          }
+        }
+
+        const adbUrl = tr.mbid_recording
+          ? `https://www.theaudiodb.com/api/v1/json/${encodeURIComponent(
+              audiodbKey
+            )}/track-mb.php?i=${encodeURIComponent(tr.mbid_recording)}`
+          : `https://www.theaudiodb.com/api/v1/json/${encodeURIComponent(
+              audiodbKey
+            )}/searchtrack.php?s=${encodeURIComponent(tr.artist)}&t=${encodeURIComponent(tr.title)}`;
+        const adbData = await fetchJsonWithBackoff(adbUrl);
+        const adbTrack = Array.isArray(adbData?.track) ? adbData.track[0] : null;
+        const adbCount = Number(adbTrack?.intTotalPlays);
+        if (Number.isFinite(adbCount) && adbCount >= 0) {
+          adbPlays = Math.floor(adbCount);
+        }
+
+        updateMultiSourceStmt.run(lfmPlays, adbPlays, lfmPlays, adbPlays, nowSec, tr.id);
+        if (lfmPlays > (tr.lastfm_plays || 0) || adbPlays > (tr.audiodb_plays || 0)) {
+          popularityUpdated++;
+        }
+      })
+    );
+
+    broadcastProgress({
+      phase: 'popularity',
+      processed: Math.min(tracksToHydrate.length, i + CONCURRENCY),
+      total: tracksToHydrate.length,
+      currentFile: `Hydrating Last.fm & TheAudioDB plays (${Math.min(
+        tracksToHydrate.length,
+        i + CONCURRENCY
+      )}/${tracksToHydrate.length})`,
+    });
+    await new Promise((r) => setTimeout(r, 150));
   }
 
   const norm = recalculateArtistPopularityScores();

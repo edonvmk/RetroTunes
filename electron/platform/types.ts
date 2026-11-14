@@ -31,7 +31,13 @@ export interface PlatformDriver {
   resizeImageFallback(sourcePath: string, targetPath: string, maxDimension: number): Promise<boolean>;
 
   // Network Shares (NFS / SMB)
-  resolveExistingShareMount(exportPath: string): string | null;
+  resolveExistingShareMount(exportPath: string, host?: string): string | null;
+  discoverHostShares(params: {
+    protocol: 'nfs' | 'smb';
+    host: string;
+    username?: string;
+    password?: string;
+  }): Promise<string[]>;
   mountNetworkShare(params: ShareMountParams): Promise<void>;
   unmountNetworkShare(mountPoint: string): Promise<void>;
 

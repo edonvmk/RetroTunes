@@ -47,7 +47,7 @@ RetroTunes (`rTunes`) is built on the shoulders of open-source libraries, multim
 | **ListenBrainz** | Global listen counts, artist-relative median popularity normalization, and two-way Loved track & scrobble sync | AGPL-3.0 / MetaBrainz Foundation |
 | **LRCLIB (`lrclib.net`)** | Crowd-sourced synchronized karaoke lyrics (`.lrc`) for desktop playback and portable device sync | Open API / Tran Xuan Thanh |
 | **Deezer Public API** | Multi-source Top Charts, album catalog discovery, and artist recommendations | Deezer Public API |
-| **Last.fm API** | Multi-source Top Charts and track/artist popularity enrichment | Last.fm API |
+| **Last.fm API** | Multi-source Top Charts, track/artist popularity enrichment, and `eGenius` 2-hop similarity & folksonomy tag affinity cache | Last.fm API |
 | **TheAudioDB** | Artist/album artwork enrichment and multi-source chart metadata | TheAudioDB Community |
 | **TVMaze API (`tvmaze.com`)** | Television series discovery, episode metadata, and automatic show poster artwork hydration | CC BY-SA |
 | **TMDB / TVDB / IMDb Catalog** | Movie and TV series metadata and poster artwork lookup | Respective API Terms |

@@ -163,6 +163,10 @@ export const win32Driver: PlatformDriver = {
     return null;
   },
 
+  async discoverHostShares(): Promise<string[]> {
+    return [];
+  },
+
   async mountNetworkShare(params: ShareMountParams): Promise<void> {
     const cleanShare = params.exportPath.replace(/^[/\\]+/, '').replace(/\//g, '\\');
     const uncPath = `\\\\${params.host}\\${cleanShare}`;

@@ -72,6 +72,50 @@ import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { UploadMediaWizardModal } from './components/UploadMediaWizardModal';
 import { AiPlaylistModal } from './components/AiPlaylistModal';
 
+const EGeniusAtomIcon: React.FC<{ selected?: boolean; size?: number }> = ({
+  selected = false,
+  size = 14,
+}) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    style={{ flexShrink: 0 }}
+  >
+    <circle cx="12" cy="12" r="2.4" fill={selected ? '#ffffff' : '#2563eb'} />
+    <ellipse
+      cx="12"
+      cy="12"
+      rx="9.5"
+      ry="3.8"
+      transform="rotate(30 12 12)"
+      stroke={selected ? '#dbeafe' : '#3b82f6'}
+      strokeWidth="1.6"
+    />
+    <ellipse
+      cx="12"
+      cy="12"
+      rx="9.5"
+      ry="3.8"
+      transform="rotate(-30 12 12)"
+      stroke={selected ? '#dbeafe' : '#0284c7'}
+      strokeWidth="1.6"
+    />
+    <ellipse
+      cx="12"
+      cy="12"
+      rx="9.5"
+      ry="3.8"
+      transform="rotate(90 12 12)"
+      stroke={selected ? '#ffffff' : '#1d4ed8'}
+      strokeWidth="1.4"
+      strokeOpacity="0.85"
+    />
+  </svg>
+);
+
 type NavSelection =
   | { kind: 'music' }
   | { kind: 'movies' }
@@ -99,7 +143,12 @@ export interface TableColumnConfig {
     | 'rating'
     | 'loved'
     | 'lb_plays'
+    | 'lastfm_plays'
+    | 'audiodb_plays'
+    | 'combined_global_plays'
     | 'rel_score'
+    | 'rarity_mult'
+    | 'final_score'
     | 'play_count'
     | 'format';
   label: string;
@@ -119,9 +168,14 @@ const DEFAULT_TABLE_COLUMNS: TableColumnConfig[] = [
   { id: 'year', label: 'Year', visible: false, width: 58, sortKey: 'year' },
   { id: 'rating', label: 'Rating', visible: true, width: 85, sortKey: 'local_star_rating' },
   { id: 'loved', label: '♥', visible: true, width: 46, sortKey: 'is_loved' },
-  { id: 'lb_plays', label: 'LB Plays', visible: true, width: 82, sortKey: 'global_listen_count' },
-  { id: 'rel_score', label: 'Rel. Score', visible: true, width: 88, sortKey: 'artist_relative_popularity_score' },
-  { id: 'play_count', label: 'Plays', visible: false, width: 58, sortKey: 'play_count' },
+  { id: 'lb_plays', label: 'LB Plays', visible: false, width: 82, sortKey: 'global_listen_count' },
+  { id: 'lastfm_plays', label: 'LastFM Plays', visible: false, width: 92, sortKey: 'lastfm_plays' },
+  { id: 'audiodb_plays', label: 'AudioDB Plays', visible: false, width: 96, sortKey: 'audiodb_plays' },
+  { id: 'combined_global_plays', label: 'Global Plays', visible: true, width: 96, sortKey: 'combined_global_plays' },
+  { id: 'rel_score', label: 'Rel. Score', visible: true, width: 82, sortKey: 'artist_relative_popularity_score' },
+  { id: 'rarity_mult', label: 'Rarity Mult.', visible: true, width: 86, sortKey: 'artist_rarity_multiplier' },
+  { id: 'final_score', label: 'Final Score', visible: true, width: 86, sortKey: 'discovery_score' },
+  { id: 'play_count', label: 'User Plays', visible: false, width: 80, sortKey: 'play_count' },
   { id: 'format', label: 'Format', visible: true, width: 82, sortKey: 'bitrate' },
 ];
 
@@ -229,14 +283,20 @@ export const App: React.FC = () => {
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
-    kind: 'playlist_track' | 'smart_track' | 'device_item';
+    kind: 'track' | 'playlist_track' | 'smart_track' | 'video' | 'device_item' | 'playlist';
     track?: TrackRow;
+    video?: VideoRow;
+    playlist?: PlaylistRow;
     playlistId?: number;
     deviceUuid?: string;
     devicePath?: string;
     storageId?: string;
     title?: string;
   } | null>(null);
+  const [initialLoading, setInitialLoading] = useState<boolean>(true);
+  const [detailItem, setDetailItem] = useState<
+    { kind: 'track'; track: TrackRow } | { kind: 'video'; video: VideoRow } | null
+  >(null);
   const [toastBanner, setToastBanner] = useState<string | null>(null);
   const [showAddDeviceWizard, setShowAddDeviceWizard] = useState(false);
   const [showUploadWizard, setShowUploadWizard] = useState(false);
@@ -254,40 +314,49 @@ export const App: React.FC = () => {
 
   // Initial load & IPC event subscriptions
   const refreshAllData = async (q = searchQuery) => {
-    const [port, cfg, auth, trks, vids, pls, devs, cStats, bks, abs, phs] = await Promise.all([
-      invokeRpc<number>('media:port'),
-      invokeRpc<AppSettings>('settings:get'),
-      invokeRpc<AuthState>('auth:getState'),
-      invokeRpc<TrackRow[]>('tracks:search', q, 200000),
-      invokeRpc<VideoRow[]>('videos:search', q),
-      invokeRpc<PlaylistRow[]>('playlists:list'),
-      invokeRpc<DeviceInfo[]>('devices:list'),
-      invokeRpc<CacheStats>('cache:stats'),
-      invokeRpc<BookRow[]>('books:list').catch(() => [] as BookRow[]),
-      invokeRpc<AudiobookRow[]>('audiobooks:list').catch(() => [] as AudiobookRow[]),
-      invokeRpc<PhotoRow[]>('photos:list').catch(() => [] as PhotoRow[]),
-    ]);
-    setMediaPort(port);
-    setSettings(cfg);
-    if (cfg.tableColumnsJson) {
-      try {
-        const parsedCols = JSON.parse(cfg.tableColumnsJson) as TableColumnConfig[];
-        if (Array.isArray(parsedCols) && parsedCols.length > 0) {
-          setTableColumns(parsedCols);
+    try {
+      const [port, cfg, auth, pls, devs, cStats] = await Promise.all([
+        invokeRpc<number>('media:port'),
+        invokeRpc<AppSettings>('settings:get'),
+        invokeRpc<AuthState>('auth:getState'),
+        invokeRpc<PlaylistRow[]>('playlists:list'),
+        invokeRpc<DeviceInfo[]>('devices:list'),
+        invokeRpc<CacheStats>('cache:stats'),
+      ]);
+      setMediaPort(port);
+      setSettings(cfg);
+      if (cfg.tableColumnsJson) {
+        try {
+          const parsedCols = JSON.parse(cfg.tableColumnsJson) as TableColumnConfig[];
+          if (Array.isArray(parsedCols) && parsedCols.length > 0) {
+            const existingIds = new Set(parsedCols.map((c) => c.id));
+            const missing = DEFAULT_TABLE_COLUMNS.filter((dc) => !existingIds.has(dc.id));
+            setTableColumns([...parsedCols, ...missing]);
+          }
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
       }
+      setAuthState(auth);
+      setPlaylists(pls);
+      setDevices(devs);
+      setCacheStats(cStats);
+
+      const [trks, vids, bks, abs, phs] = await Promise.all([
+        invokeRpc<TrackRow[]>('tracks:search', q, 200000),
+        invokeRpc<VideoRow[]>('videos:search', q),
+        invokeRpc<BookRow[]>('books:list').catch(() => [] as BookRow[]),
+        invokeRpc<AudiobookRow[]>('audiobooks:list').catch(() => [] as AudiobookRow[]),
+        invokeRpc<PhotoRow[]>('photos:list').catch(() => [] as PhotoRow[]),
+      ]);
+      setTracks(trks);
+      setVideos(vids);
+      setBooks(bks);
+      setAudiobooks(abs);
+      setPhotos(phs);
+    } finally {
+      setInitialLoading(false);
     }
-    setAuthState(auth);
-    setTracks(trks);
-    setVideos(vids);
-    setPlaylists(pls);
-    setDevices(devs);
-    setCacheStats(cStats);
-    setBooks(bks);
-    setAudiobooks(abs);
-    setPhotos(phs);
   };
 
   useEffect(() => {
@@ -1746,6 +1815,17 @@ export const App: React.FC = () => {
                       setShowSmartModal(true);
                     }
                   }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setNav({ kind: 'playlist', id: pl.id });
+                    setContextMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      kind: 'playlist',
+                      playlist: pl,
+                    });
+                  }}
                   onDragOver={(e) => {
                     if (!pl.is_smart) {
                       e.preventDefault();
@@ -1764,7 +1844,9 @@ export const App: React.FC = () => {
                   }
                 >
                   <div className="source-item-left">
-                    {pl.is_smart ? (
+                    {pl.egenius_seed_track_id ? (
+                      <EGeniusAtomIcon selected={isSelected} size={14} />
+                    ) : pl.is_smart ? (
                       <Sparkles size={14} color={isSelected ? '#fff' : '#7c3aed'} />
                     ) : pl.media_type === 'video' ? (
                       <Film size={14} color={isSelected ? '#fff' : '#0d9488'} />
@@ -1775,7 +1857,32 @@ export const App: React.FC = () => {
                     )}
                     <span className="source-item-label">{pl.name}</span>
                   </div>
-                  <span className="source-badge">{totalCount}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    {Boolean(pl.is_smart) && (
+                      <button
+                        type="button"
+                        title="Edit Smart Playlist Rules"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setNav({ kind: 'playlist', id: pl.id });
+                          setEditingPlaylist(pl);
+                          setShowSmartModal(true);
+                        }}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          padding: '1px 3px',
+                          cursor: 'pointer',
+                          color: isSelected ? '#fff' : '#64748b',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                        }}
+                      >
+                        <Settings size={11} />
+                      </button>
+                    )}
+                    <span className="source-badge">{totalCount}</span>
+                  </div>
                 </div>
               );
             })}
@@ -1850,14 +1957,118 @@ export const App: React.FC = () => {
                               fontWeight: 700,
                               padding: '1px 6px',
                               borderRadius: 4,
-                              background: '#e2e8f0',
-                              color: '#334155',
+                              background: pl.egenius_seed_track_id ? '#dbeafe' : '#e2e8f0',
+                              color: pl.egenius_seed_track_id ? '#1d4ed8' : '#334155',
                               textTransform: 'uppercase',
                             }}
                           >
-                            {pl.is_smart ? 'Smart' : pl.media_type || 'music'}
+                            {pl.egenius_seed_track_id ? 'eGenius' : pl.is_smart ? 'Smart' : pl.media_type || 'music'}
                           </span>
-                          {pl.is_smart === 1 && (
+                          {Boolean(pl.egenius_seed_track_id) && (
+                            <>
+                              <div style={{ display: 'inline-flex', gap: 3, alignItems: 'center' }}>
+                                <button
+                                  className={`aqua-btn ${(pl.limit_value ?? 25) === 25 ? 'primary' : ''}`}
+                                  style={{ padding: '1px 7px', fontSize: 11 }}
+                                  onClick={async () => {
+                                    const res = await invokeRpc<{
+                                      playlistId: number;
+                                      mix: { tracks: TrackRow[]; distinctArtists: number };
+                                    }>('egenius:refreshPlaylist', {
+                                      playlistId: pl.id,
+                                      limit: 25,
+                                      mode: pl.egenius_mode || 'balanced',
+                                    });
+                                    setPlaylistTracks(res.mix.tracks);
+                                    await refreshAllData();
+                                    showToast(`eGenius updated to 25 tracks (${res.mix.distinctArtists} artists).`);
+                                  }}
+                                >
+                                  25
+                                </button>
+                                <button
+                                  className={`aqua-btn ${pl.limit_value === 50 ? 'primary' : ''}`}
+                                  style={{ padding: '1px 7px', fontSize: 11 }}
+                                  onClick={async () => {
+                                    const res = await invokeRpc<{
+                                      playlistId: number;
+                                      mix: { tracks: TrackRow[]; distinctArtists: number };
+                                    }>('egenius:refreshPlaylist', {
+                                      playlistId: pl.id,
+                                      limit: 50,
+                                      mode: pl.egenius_mode || 'balanced',
+                                    });
+                                    setPlaylistTracks(res.mix.tracks);
+                                    await refreshAllData();
+                                    showToast(`eGenius updated to 50 tracks (${res.mix.distinctArtists} artists).`);
+                                  }}
+                                >
+                                  50
+                                </button>
+                              </div>
+                              <div style={{ display: 'inline-flex', gap: 3, alignItems: 'center' }}>
+                                {(
+                                  [
+                                    { id: 'hits', label: 'Hits' },
+                                    { id: 'balanced', label: 'Balanced' },
+                                    { id: 'deep', label: 'Deep Cuts' },
+                                  ] as const
+                                ).map((m) => (
+                                  <button
+                                    key={m.id}
+                                    className={`aqua-btn ${(pl.egenius_mode || 'balanced') === m.id ? 'primary' : ''}`}
+                                    style={{ padding: '1px 7px', fontSize: 11 }}
+                                    onClick={async () => {
+                                      const res = await invokeRpc<{
+                                        playlistId: number;
+                                        mix: { tracks: TrackRow[]; distinctArtists: number };
+                                      }>('egenius:refreshPlaylist', {
+                                        playlistId: pl.id,
+                                        limit: pl.limit_value === 50 ? 50 : 25,
+                                        mode: m.id,
+                                      });
+                                      setPlaylistTracks(res.mix.tracks);
+                                      await refreshAllData();
+                                      showToast(`eGenius "${m.label}" mix (${res.mix.distinctArtists} artists).`);
+                                    }}
+                                  >
+                                    {m.label}
+                                  </button>
+                                ))}
+                              </div>
+                              <button
+                                className="aqua-btn"
+                                style={{ padding: '1px 8px', color: '#1d4ed8' }}
+                                onClick={async () => {
+                                  const res = await invokeRpc<{
+                                    playlistId: number;
+                                    mix: { tracks: TrackRow[]; distinctArtists: number };
+                                  }>('egenius:refreshPlaylist', {
+                                    playlistId: pl.id,
+                                    limit: pl.limit_value === 50 ? 50 : 25,
+                                    mode: pl.egenius_mode || 'balanced',
+                                  });
+                                  setPlaylistTracks(res.mix.tracks);
+                                  await refreshAllData();
+                                  showToast(`Refreshed eGenius mix (${res.mix.distinctArtists} artists).`);
+                                }}
+                              >
+                                <RefreshCw size={11} /> Refresh Mix
+                              </button>
+                              <button
+                                className="aqua-btn"
+                                style={{ padding: '1px 8px' }}
+                                onClick={async () => {
+                                  await invokeRpc('egenius:convertToStandard', pl.id);
+                                  await refreshAllData();
+                                  showToast(`Saved "${pl.name}" as a Standard Playlist.`);
+                                }}
+                              >
+                                Save as Standard Playlist
+                              </button>
+                            </>
+                          )}
+                          {Boolean(pl.is_smart) && (
                             <>
                               <button
                                 className="aqua-btn"
@@ -1868,6 +2079,19 @@ export const App: React.FC = () => {
                                 }}
                               >
                                 <Sparkles size={11} /> Edit Smart Rules
+                              </button>
+                              <button
+                                className="aqua-btn"
+                                style={{ padding: '1px 8px' }}
+                                title="Re-evaluate and regenerate tracks for this Smart Playlist"
+                                onClick={async () => {
+                                  const nextTracks = await invokeRpc<TrackRow[]>('playlists:regenerate', pl.id);
+                                  setPlaylistTracks(nextTracks);
+                                  await refreshAllData();
+                                  showToast(`Regenerated "${pl.name}" (${nextTracks.length} tracks).`);
+                                }}
+                              >
+                                <RefreshCw size={11} /> Regenerate
                               </button>
                               <button
                                 className="aqua-btn"
@@ -1883,6 +2107,21 @@ export const App: React.FC = () => {
                                 Ignored ({smartExclusions.length})
                               </button>
                             </>
+                          )}
+                          {Boolean(pl.ai_prompt) && (
+                            <button
+                              className="aqua-btn"
+                              style={{ padding: '1px 8px', color: '#1d4ed8' }}
+                              title={`Rerun AI with prompt: "${pl.ai_prompt}"`}
+                              onClick={async () => {
+                                const nextTracks = await invokeRpc<TrackRow[]>('playlists:rerunAi', pl.id);
+                                setPlaylistTracks(nextTracks);
+                                await refreshAllData();
+                                showToast(`AI generated a fresh mix for "${pl.name}" (${nextTracks.length} tracks).`);
+                              }}
+                            >
+                              <Sparkles size={11} /> Rerun AI
+                            </button>
                           )}
                           <button
                             className="aqua-btn"
@@ -2353,16 +2592,19 @@ export const App: React.FC = () => {
                                   }
                                 }}
                                 onContextMenu={(e) => {
-                                  if (!activePlaylist) return;
                                   e.preventDefault();
                                   e.stopPropagation();
                                   setSelectedTrackIds([track.id]);
                                   setContextMenu({
                                     x: e.clientX,
                                     y: e.clientY,
-                                    kind: activePlaylist.is_smart ? 'smart_track' : 'playlist_track',
+                                    kind: activePlaylist
+                                      ? activePlaylist.is_smart
+                                        ? 'smart_track'
+                                        : 'playlist_track'
+                                      : 'track',
                                     track,
-                                    playlistId: activePlaylist.id,
+                                    playlistId: activePlaylist?.id,
                                   });
                                 }}
                                 onDragStart={(e) => {
@@ -2521,9 +2763,45 @@ export const App: React.FC = () => {
                                     case 'lb_plays':
                                       return (
                                         <td key={col.id} style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-                                          {track.global_listen_count.toLocaleString()}
+                                          {(track.global_listen_count || 0).toLocaleString()}
                                         </td>
                                       );
+                                    case 'lastfm_plays':
+                                      return (
+                                        <td key={col.id} style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                                          {(track.lastfm_plays || 0).toLocaleString()}
+                                        </td>
+                                      );
+                                    case 'audiodb_plays':
+                                      return (
+                                        <td key={col.id} style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                                          {(track.audiodb_plays || 0).toLocaleString()}
+                                        </td>
+                                      );
+                                    case 'combined_global_plays': {
+                                      const gTotal =
+                                        track.combined_global_plays ??
+                                        (track.global_listen_count || 0) +
+                                          (track.lastfm_plays || 0) +
+                                          (track.audiodb_plays || 0);
+                                      return (
+                                        <td key={col.id}>
+                                          <span
+                                            style={{
+                                              fontFamily: 'var(--font-mono)',
+                                              fontSize: 10.5,
+                                              fontWeight: 600,
+                                              padding: '1px 6px',
+                                              borderRadius: 9,
+                                              background: isCurrent ? 'rgba(255,255,255,0.22)' : '#e0f2fe',
+                                              color: isCurrent ? '#fff' : '#0369a1',
+                                            }}
+                                          >
+                                            {gTotal.toLocaleString()}
+                                          </span>
+                                        </td>
+                                      );
+                                    }
                                     case 'rel_score':
                                       return (
                                         <td key={col.id}>
@@ -2535,19 +2813,31 @@ export const App: React.FC = () => {
                                               padding: '1px 5px',
                                               borderRadius: 4,
                                               background:
-                                                track.artist_relative_popularity_score >= 1.5
+                                                track.artist_relative_popularity_score >= 65
                                                   ? isCurrent
                                                     ? 'rgba(255,255,255,0.25)'
                                                     : '#dcfce7'
                                                   : 'transparent',
                                               color:
-                                                track.artist_relative_popularity_score >= 1.5 && !isCurrent
+                                                track.artist_relative_popularity_score >= 65 && !isCurrent
                                                   ? '#166534'
                                                   : 'inherit',
                                             }}
                                           >
-                                            {track.artist_relative_popularity_score.toFixed(2)}×
+                                            {track.artist_relative_popularity_score.toFixed(1)}
                                           </span>
+                                        </td>
+                                      );
+                                    case 'rarity_mult':
+                                      return (
+                                        <td key={col.id} style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                                          {(track.artist_rarity_multiplier ?? 1.0).toFixed(2)}×
+                                        </td>
+                                      );
+                                    case 'final_score':
+                                      return (
+                                        <td key={col.id} style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 700 }}>
+                                          {(track.discovery_score ?? 0).toFixed(1)}
                                         </td>
                                       );
                                     case 'play_count':
@@ -4413,7 +4703,7 @@ export const App: React.FC = () => {
           onClick={(e) => e.stopPropagation()}
           style={{
             position: 'fixed',
-            top: Math.min(contextMenu.y, window.innerHeight - 130),
+            top: Math.min(contextMenu.y, window.innerHeight - 310),
             left: Math.min(contextMenu.x, window.innerWidth - 260),
             zIndex: 9999,
             minWidth: 230,
@@ -4425,6 +4715,199 @@ export const App: React.FC = () => {
             fontSize: 12,
           }}
         >
+          {contextMenu.track && (
+            <>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                  fontWeight: 600,
+                }}
+                onClick={() => {
+                  const t = contextMenu.track!;
+                  setContextMenu(null);
+                  void playTrack(t);
+                }}
+              >
+                Play
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#1d4ed8',
+                  fontWeight: 600,
+                }}
+                onClick={async () => {
+                  const t = contextMenu.track!;
+                  setContextMenu(null);
+                  try {
+                    const res = await invokeRpc<{
+                      playlistId: number;
+                      mix: { tracks: TrackRow[]; distinctArtists: number; elapsedMs: number };
+                    }>('egenius:createPlaylist', { trackId: t.id, limit: 25, mode: 'balanced' });
+                    await refreshAllData();
+                    setNav({ kind: 'playlist', id: res.playlistId });
+                    setPlaylistTracks(res.mix.tracks);
+                    showToast(
+                      `eGenius built ${res.mix.tracks.length} tracks (${res.mix.distinctArtists} artists) in ${res.mix.elapsedMs}ms.`
+                    );
+                  } catch (err) {
+                    showToast(`eGenius error: ${err instanceof Error ? err.message : String(err)}`);
+                  }
+                }}
+              >
+                <EGeniusAtomIcon size={13} /> Make eGenius Playlist
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                }}
+                onClick={() => {
+                  const t = contextMenu.track!;
+                  setContextMenu(null);
+                  setDetailItem({ kind: 'track', track: t });
+                }}
+              >
+                See Details...
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                }}
+                onClick={async () => {
+                  const t = contextMenu.track!;
+                  setContextMenu(null);
+                  const res = await invokeRpc<{ ok: boolean; error?: string }>(
+                    'shell:showItemInFolder',
+                    t.local_cache_path || t.remote_nfs_path
+                  );
+                  if (!res?.ok) {
+                    showToast(res?.error || 'Could not locate file on host.');
+                  }
+                }}
+              >
+                Open File Location
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                }}
+                onClick={async () => {
+                  const t = contextMenu.track!;
+                  setContextMenu(null);
+                  await invokeRpc('cache:toggleTrack', t.id, !t.keep_cached);
+                  await refreshAllData();
+                  showToast(!t.keep_cached ? `Caching "${t.title}" locally.` : `Removed "${t.title}" from local cache.`);
+                }}
+              >
+                {contextMenu.track.keep_cached ? 'Remove from Local Cache' : 'Keep in Local Cache'}
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                }}
+                onClick={async () => {
+                  const t = contextMenu.track!;
+                  setContextMenu(null);
+                  await invokeRpc('tracks:hydrate', t.id);
+                  await refreshAllData();
+                  showToast(`Updated metadata for "${t.title}".`);
+                }}
+              >
+                Fetch Metadata &amp; Popularity
+              </button>
+              {playlists.some((p) => !p.is_smart && p.id !== contextMenu.playlistId) && (
+                <div style={{ borderTop: '1px solid #e2e8f0', margin: '4px 0', paddingTop: 4 }}>
+                  <div style={{ padding: '2px 14px', fontSize: 10.5, color: '#64748b', fontWeight: 700 }}>
+                    Add to Playlist
+                  </div>
+                  <div style={{ maxHeight: 110, overflowY: 'auto' }}>
+                    {playlists
+                      .filter((p) => !p.is_smart && p.id !== contextMenu.playlistId)
+                      .map((pl) => (
+                        <button
+                          key={pl.id}
+                          type="button"
+                          style={{
+                            display: 'block',
+                            width: '100%',
+                            textAlign: 'left',
+                            padding: '4px 14px 4px 22px',
+                            border: 'none',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                            color: '#1e293b',
+                            fontSize: 11.5,
+                          }}
+                          onClick={async () => {
+                            const t = contextMenu.track!;
+                            setContextMenu(null);
+                            await invokeRpc('playlists:addTrack', pl.id, t.id);
+                            const updatedPls = await invokeRpc<PlaylistRow[]>('playlists:list');
+                            setPlaylists(updatedPls);
+                            showToast(`Added "${t.title}" to "${pl.name}".`);
+                          }}
+                        >
+                          {pl.name}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {(contextMenu.kind === 'playlist_track' || contextMenu.kind === 'smart_track') && (
+                <div style={{ borderTop: '1px solid #e2e8f0', margin: '4px 0' }} />
+              )}
+            </>
+          )}
+
           {contextMenu.kind === 'playlist_track' && contextMenu.track && contextMenu.playlistId && (
             <button
               type="button"
@@ -4521,6 +5004,143 @@ export const App: React.FC = () => {
             </>
           )}
 
+          {contextMenu.kind === 'playlist' && contextMenu.playlist && (
+            <>
+              {Boolean(contextMenu.playlist.egenius_seed_track_id) && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#1d4ed8',
+                    fontWeight: 600,
+                  }}
+                  onClick={async () => {
+                    const pl = contextMenu.playlist!;
+                    setContextMenu(null);
+                    const res = await invokeRpc<{ playlistId: number; mix: { tracks: TrackRow[]; distinctArtists: number } }>(
+                      'egenius:refreshPlaylist',
+                      {
+                        playlistId: pl.id,
+                        limit: pl.limit_value === 50 ? 50 : 25,
+                        mode: pl.egenius_mode || 'balanced',
+                      }
+                    );
+                    setPlaylistTracks(res.mix.tracks);
+                    await refreshAllData();
+                    showToast(`Refreshed eGenius mix (${res.mix.distinctArtists} artists).`);
+                  }}
+                >
+                  Refresh eGenius Mix
+                </button>
+              )}
+              {Boolean(contextMenu.playlist.ai_prompt) && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#1d4ed8',
+                    fontWeight: 600,
+                  }}
+                  onClick={async () => {
+                    const pl = contextMenu.playlist!;
+                    setContextMenu(null);
+                    const nextTracks = await invokeRpc<TrackRow[]>('playlists:rerunAi', pl.id);
+                    setPlaylistTracks(nextTracks);
+                    await refreshAllData();
+                    showToast(`AI generated a fresh mix for "${pl.name}" (${nextTracks.length} tracks).`);
+                  }}
+                >
+                  Rerun AI (Generate New Mix)
+                </button>
+              )}
+              {Boolean(contextMenu.playlist.is_smart) && (
+                <>
+                  <button
+                    type="button"
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      textAlign: 'left',
+                      padding: '6px 14px',
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      color: '#0f172a',
+                      fontWeight: 600,
+                    }}
+                    onClick={async () => {
+                      const pl = contextMenu.playlist!;
+                      setContextMenu(null);
+                      const nextTracks = await invokeRpc<TrackRow[]>('playlists:regenerate', pl.id);
+                      setPlaylistTracks(nextTracks);
+                      await refreshAllData();
+                      showToast(`Regenerated "${pl.name}" (${nextTracks.length} tracks).`);
+                    }}
+                  >
+                    Regenerate Now
+                  </button>
+                  <button
+                    type="button"
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      textAlign: 'left',
+                      padding: '6px 14px',
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      color: '#0f172a',
+                    }}
+                    onClick={() => {
+                      const pl = contextMenu.playlist!;
+                      setContextMenu(null);
+                      setEditingPlaylist(pl);
+                      setShowSmartModal(true);
+                    }}
+                  >
+                    Edit Smart Rules...
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#b91c1c',
+                  fontWeight: 600,
+                }}
+                onClick={async () => {
+                  const pl = contextMenu.playlist!;
+                  setContextMenu(null);
+                  await invokeRpc('playlists:delete', pl.id);
+                  await refreshAllData();
+                  setNav({ kind: 'music' });
+                  showToast(`Deleted playlist "${pl.name}".`);
+                }}
+              >
+                Delete Playlist
+              </button>
+            </>
+          )}
+
           {contextMenu.kind === 'device_item' && contextMenu.deviceUuid && contextMenu.devicePath && (
             <button
               type="button"
@@ -4551,6 +5171,191 @@ export const App: React.FC = () => {
               Remove from Device
             </button>
           )}
+        </div>
+      )}
+
+      {/* =====================================================================
+          MEDIA DETAILS ("GET INFO") MODAL
+          ===================================================================== */}
+      {detailItem && detailItem.kind === 'track' && (
+        <div className="aqua-modal-backdrop" onClick={() => setDetailItem(null)}>
+          <div
+            className="aqua-window"
+            style={{ width: 520, maxWidth: '92vw' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="aqua-window-titlebar">
+              <span>Track Details — {detailItem.track.title}</span>
+              <button className="aqua-btn" onClick={() => setDetailItem(null)} style={{ padding: '1px 6px' }}>
+                <X size={13} />
+              </button>
+            </div>
+            <div style={{ padding: 16, display: 'grid', gridTemplateColumns: '130px 1fr', gap: '8px 12px', fontSize: 12 }}>
+              <strong>Title:</strong>
+              <span>{detailItem.track.title}</span>
+              <strong>Artist:</strong>
+              <span>{detailItem.track.artist}</span>
+              <strong>Album:</strong>
+              <span>{detailItem.track.album || '—'}</span>
+              <strong>Genre / Year:</strong>
+              <span>
+                {detailItem.track.genre || '—'} {detailItem.track.year ? `(${detailItem.track.year})` : ''}
+              </span>
+              <strong>Track / Disc:</strong>
+              <span>
+                Track {detailItem.track.track_num || '—'} • Disc {detailItem.track.disc_num || 1}
+              </span>
+              <strong>Duration / Size:</strong>
+              <span>
+                {formatDuration(detailItem.track.duration)} • {formatBytes(detailItem.track.file_size)}
+              </span>
+              <strong>Audio Format:</strong>
+              <span>
+                {detailItem.track.format || '—'} • {detailItem.track.bitrate ? `${detailItem.track.bitrate} kbps` : '—'}
+              </span>
+              <strong>Plays / Rating:</strong>
+              <span>
+                {detailItem.track.play_count} user plays • Global{' '}
+                {(
+                  detailItem.track.combined_global_plays ??
+                  detailItem.track.global_listen_count
+                ).toLocaleString()}{' '}
+                (LB {detailItem.track.global_listen_count} / LFM {detailItem.track.lastfm_plays || 0} / ADB{' '}
+                {detailItem.track.audiodb_plays || 0}) • Rel {detailItem.track.artist_relative_popularity_score.toFixed(1)} •{' '}
+                {(detailItem.track.artist_rarity_multiplier ?? 1.0).toFixed(2)}× • Final{' '}
+                {(detailItem.track.discovery_score ?? 0).toFixed(1)} • {detailItem.track.local_star_rating}★{' '}
+                {detailItem.track.is_loved ? '♥' : ''}
+              </span>
+              <strong>Cache Status:</strong>
+              <span>
+                {detailItem.track.local_cache_path
+                  ? `Cached (${detailItem.track.local_cache_path})`
+                  : detailItem.track.keep_cached
+                    ? 'Queued for Local Cache'
+                    : 'Streamed from Library Root'}
+              </span>
+              <strong>File Path:</strong>
+              <span style={{ wordBreak: 'break-all', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+                {detailItem.track.remote_nfs_path}
+              </span>
+            </div>
+            <div
+              style={{
+                padding: '10px 16px',
+                borderTop: '1px solid #9da6b4',
+                background: '#dfe4ec',
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 8,
+              }}
+            >
+              <button
+                className="aqua-btn"
+                onClick={async () => {
+                  const res = await invokeRpc<{ ok: boolean; error?: string }>(
+                    'shell:showItemInFolder',
+                    detailItem.track.local_cache_path || detailItem.track.remote_nfs_path
+                  );
+                  if (!res?.ok) {
+                    showToast(res?.error || 'Could not locate file on host.');
+                  }
+                }}
+              >
+                Open File Location
+              </button>
+              <button className="aqua-btn primary" onClick={() => setDetailItem(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          INITIAL LIBRARY LOADING OVERLAY (STATIC DUAL-ARROW CIRCLE)
+          ===================================================================== */}
+      {initialLoading && (
+        <div
+          aria-busy="true"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9998,
+            background: 'rgba(15, 23, 42, 0.30)',
+            backdropFilter: 'blur(1px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'all',
+          }}
+        >
+          <div
+            style={{
+              width: 112,
+              height: 112,
+              borderRadius: '50%',
+              background:
+                'radial-gradient(circle at 50% 25%, rgba(255, 255, 255, 0.24) 0%, rgba(72, 78, 88, 0.56) 48%, rgba(28, 32, 38, 0.72) 100%)',
+              border: '1.5px solid rgba(255, 255, 255, 0.38)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow:
+                '0 14px 36px rgba(0, 0, 0, 0.42), inset 0 1.5px 1px rgba(255, 255, 255, 0.45), inset 0 -2px 6px rgba(0, 0, 0, 0.35)',
+              position: 'relative',
+              overflow: 'hidden',
+            }}
+          >
+            {/* Classic Aqua top-half glass sheen */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 3,
+                left: 10,
+                right: 10,
+                height: '44%',
+                borderRadius: '50% 50% 42% 42%',
+                background:
+                  'linear-gradient(180deg, rgba(255, 255, 255, 0.36) 0%, rgba(255, 255, 255, 0.04) 100%)',
+                pointerEvents: 'none',
+              }}
+            />
+            <svg
+              width="66"
+              height="66"
+              viewBox="0 0 64 64"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              style={{
+                filter: 'drop-shadow(0 2px 3px rgba(0, 0, 0, 0.55))',
+                opacity: 0.88,
+              }}
+            >
+              <defs>
+                <linearGradient id="rtunesAquaArrowGrad" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" stopColor="#ffffff" stopOpacity="0.96" />
+                  <stop offset="48%" stopColor="#e2e8f0" stopOpacity="0.88" />
+                  <stop offset="100%" stopColor="#94a3b8" stopOpacity="0.82" />
+                </linearGradient>
+              </defs>
+              {/* Top-left to top-right curved arrow */}
+              <path
+                d="M14.5 27.5C16.6 18.6 24.6 12 34.1 12C41.5 12 48 16 51.5 22L56.5 19.2L53.8 31.8L41.6 27.7L46.4 24.9C43.9 20.6 39.3 17.8 34.1 17.8C27.2 17.8 21.4 22.7 19.9 29.3L14.5 27.5Z"
+                fill="url(#rtunesAquaArrowGrad)"
+                stroke="rgba(255,255,255,0.55)"
+                strokeWidth="0.9"
+                strokeLinejoin="round"
+              />
+              {/* Bottom-right to bottom-left curved arrow */}
+              <path
+                d="M49.5 36.5C47.4 45.4 39.4 52 29.9 52C22.5 52 16 48 12.5 42L7.5 44.8L10.2 32.2L22.4 36.3L17.6 39.1C20.1 43.4 24.7 46.2 29.9 46.2C36.8 46.2 42.6 41.3 44.1 34.7L49.5 36.5Z"
+                fill="url(#rtunesAquaArrowGrad)"
+                stroke="rgba(255,255,255,0.55)"
+                strokeWidth="0.9"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
         </div>
       )}
     </div>

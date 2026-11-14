@@ -81,12 +81,39 @@ function updateShareSubpaths(db: ReturnType<typeof getDb>, id: number, fm: Share
 // ============================================================================
 
 export function getMountsRootDir(): string {
-  const userData = app?.isReady()
-    ? app.getPath('userData')
-    : platformDriver.getFallbackUserDataDir();
+  const userData = platformDriver.getFallbackUserDataDir();
   const dir = path.join(userData, 'mounts');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+export async function discoverNetworkSharesOnHost(params: {
+  protocol: 'nfs' | 'smb';
+  host: string;
+  username?: string;
+  password?: string;
+}): Promise<{ shares: string[]; existingMount: string | null; folderMap: ShareFolderMap }> {
+  const existingMount = platformDriver.resolveExistingShareMount('', params.host);
+  const shares = await platformDriver.discoverHostShares(params);
+  if (existingMount && shares.length === 0) {
+    shares.push(`/${path.basename(existingMount)}`);
+  }
+  const folderMap = existingMount ? autoDetectShareFolders(existingMount) : {};
+  return { shares, existingMount, folderMap };
+}
+
+function sanitizeMountErrorMessage(rawMsg: string, host: string, exportPath: string): string {
+  if (rawMsg.startsWith('Share "')) return rawMsg;
+  if (/No such file or directory/i.test(rawMsg)) {
+    return `Could not find share "${exportPath}" on ${host}. Check the Base Share name (for example, /PVE-Media).`;
+  }
+  if (/Authentication error|Permission denied|Access denied/i.test(rawMsg)) {
+    return `Authentication failed for ${host}. Please check your username and password.`;
+  }
+  return rawMsg
+    .replace(/Command failed:[^\n]*\n?/gi, '')
+    .replace(/\/\/[^@\s]+@/g, '//')
+    .trim() || `Could not connect to ${host}.`;
 }
 
 export function listNetworkShares(): (NetworkShareRow & { folder_map: ShareFolderMap; is_mounted: number })[] {
@@ -223,12 +250,15 @@ export async function mountNetworkShare(
   let folderMap = rowToFolderMap(row);
 
   // 1. Check if the share is already mounted via the OS driver (e.g. /Volumes/... or UNC)
-  const existingMount = platformDriver.resolveExistingShareMount(row.export_path);
+  const existingMount = platformDriver.resolveExistingShareMount(row.export_path, row.host);
   if (existingMount) {
-    db.prepare("UPDATE network_shares SET mount_point = ?, status = 'mounted', last_error = NULL WHERE id = ?").run(
-      existingMount,
-      id
-    );
+    const inferredExport =
+      row.export_path === '/Media' && path.basename(existingMount) !== 'Media'
+        ? `/${path.basename(existingMount)}`
+        : row.export_path;
+    db.prepare(
+      "UPDATE network_shares SET export_path = ?, mount_point = ?, status = 'mounted', last_error = NULL WHERE id = ?"
+    ).run(inferredExport, existingMount, id);
     const detected = autoDetectShareFolders(existingMount);
     if (Object.values(detected).some(Boolean)) {
       folderMap = { ...folderMap, ...detected };
@@ -238,7 +268,7 @@ export async function mountNetworkShare(
     return {
       ok: true,
       mountPoint: existingMount,
-      message: `Bound to mounted volume at ${existingMount}`,
+      message: `Connected to ${existingMount}`,
       folderMap,
     };
   }
@@ -291,13 +321,14 @@ export async function mountNetworkShare(
       folderMap,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    db.prepare("UPDATE network_shares SET status = 'error', last_error = ? WHERE id = ?").run(msg, id);
-    logger.warn('SYSTEM', `Failed to mount ${row.protocol} share "${row.name}"`, { error: msg });
+    const rawMsg = err instanceof Error ? err.message : String(err);
+    const cleanMsg = sanitizeMountErrorMessage(rawMsg, row.host, row.export_path);
+    db.prepare("UPDATE network_shares SET status = 'error', last_error = ? WHERE id = ?").run(cleanMsg, id);
+    logger.warn('SYSTEM', `Failed to mount ${row.protocol} share "${row.name}"`, { error: cleanMsg });
     return {
       ok: false,
       mountPoint,
-      message: `Mount failed: ${msg}`,
+      message: cleanMsg,
       folderMap,
     };
   }

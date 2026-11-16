@@ -212,6 +212,10 @@ export const App: React.FC = () => {
   const [selectedArtist, setSelectedArtist] = useState<string>('All');
   const [selectedAlbum, setSelectedAlbum] = useState<string>('All');
   const [coverFlowIndex, setCoverFlowIndex] = useState<number>(0);
+  const [coverFlowRenderPos, setCoverFlowRenderPos] = useState<number>(0);
+  const coverFlowRenderPosRef = useRef<number>(0);
+  const coverFlowRafRef = useRef<number | null>(null);
+  const coverFlowWheelAccumRef = useRef<number>(0);
 
   // Sorting
   const [sortCol, setSortCol] = useState<keyof TrackRow>('artist');
@@ -301,7 +305,6 @@ export const App: React.FC = () => {
   const [showAddDeviceWizard, setShowAddDeviceWizard] = useState(false);
   const [showUploadWizard, setShowUploadWizard] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [liveLogs, setLiveLogs] = useState<LogEntry[]>([]);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const hasRecordedPlayRef = useRef<number | null>(null);
 
@@ -375,9 +378,8 @@ export const App: React.FC = () => {
   useEffect(() => {
     void refreshAllData('');
 
-    const unsubLog = subscribeEvent<LogEntry>('log:entry', (entry) => {
-      setLiveLogs((prev) => [...prev.slice(-400), entry]);
-    });
+    let lastBatchRefreshAt = 0;
+    let batchRefreshInFlight = false;
     const unsubIdx = subscribeEvent<IndexProgress>('indexer:progress', (prog) => {
       setIndexProgress(prog);
       if (!prog.running && prog.phase === 'done') {
@@ -385,8 +387,16 @@ export const App: React.FC = () => {
       }
     });
     const unsubBatch = subscribeEvent<IndexProgress>('indexer:batchCommitted', () => {
-      void invokeRpc<TrackRow[]>('tracks:search', searchQuery, 200000).then(setTracks);
-      void invokeRpc<VideoRow[]>('videos:search', searchQuery).then(setVideos);
+      const now = Date.now();
+      if (batchRefreshInFlight || now - lastBatchRefreshAt < 8000) return;
+      lastBatchRefreshAt = now;
+      batchRefreshInFlight = true;
+      void Promise.all([
+        invokeRpc<TrackRow[]>('tracks:search', searchQuery, 200000).then(setTracks),
+        invokeRpc<VideoRow[]>('videos:search', searchQuery).then(setVideos),
+      ]).finally(() => {
+        batchRefreshInFlight = false;
+      });
     });
     const unsubCache = subscribeEvent<CacheStats>('cache:status', (st) => {
       setCacheStats(st);
@@ -431,7 +441,6 @@ export const App: React.FC = () => {
       unsubOpenAbout();
       unsubOpenPrefs();
       unsubBinaryProgress();
-      unsubLog();
       unsubIdx();
       unsubBatch();
       unsubCache();
@@ -781,6 +790,57 @@ export const App: React.FC = () => {
     }
   }, [coverFlowIndex, distinctAlbums.length]);
 
+  // Smoothly sweep Cover Flow 3D position toward target coverFlowIndex
+  useEffect(() => {
+    if (coverFlowRafRef.current !== null) {
+      cancelAnimationFrame(coverFlowRafRef.current);
+      coverFlowRafRef.current = null;
+    }
+
+    const current = coverFlowRenderPosRef.current;
+    const target = coverFlowIndex;
+    const rawDelta = target - current;
+
+    if (Math.abs(rawDelta) < 0.002) {
+      coverFlowRenderPosRef.current = target;
+      setCoverFlowRenderPos(target);
+      return;
+    }
+
+    // For large jumps (e.g., selecting a track far away or dragging the slider),
+    // fast-forward the start of the sweep so it visibly glides through ~18 covers into the target.
+    const startPos =
+      Math.abs(rawDelta) > 20 ? target - Math.sign(rawDelta) * 18 : current;
+    const travel = target - startPos;
+    const durationMs = Math.min(540, Math.max(210, 175 + Math.abs(travel) * 20));
+    const startTime = performance.now();
+
+    const step = (now: number) => {
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / durationMs);
+      // Cubic ease-out for Apple-like decelerating sweep
+      const eased = 1 - Math.pow(1 - t, 3);
+      const nextPos = startPos + travel * eased;
+      coverFlowRenderPosRef.current = nextPos;
+      setCoverFlowRenderPos(nextPos);
+      if (t < 1) {
+        coverFlowRafRef.current = requestAnimationFrame(step);
+      } else {
+        coverFlowRenderPosRef.current = target;
+        setCoverFlowRenderPos(target);
+        coverFlowRafRef.current = null;
+      }
+    };
+
+    coverFlowRafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (coverFlowRafRef.current !== null) {
+        cancelAnimationFrame(coverFlowRafRef.current);
+        coverFlowRafRef.current = null;
+      }
+    };
+  }, [coverFlowIndex]);
+
   // Grouped TV Shows hierarchy (Show -> Seasons -> Episodes)
   const groupedTvShows = useMemo(() => {
     const map = new Map<
@@ -841,7 +901,7 @@ export const App: React.FC = () => {
     });
 
     return list;
-  }, [baseTrackList, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc, distinctAlbums, coverFlowIndex]);
+  }, [baseTrackList, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc]);
 
   const getArtworkUrl = (coverArtPath?: string | null) => {
     if (!coverArtPath || !mediaPort) return null;
@@ -851,6 +911,19 @@ export const App: React.FC = () => {
   // Playback handlers
   const playTrack = async (track: TrackRow) => {
     setCurrentTrack(track);
+    if (distinctAlbums.length > 0) {
+      const targetArtist = (track.artist || '').toLowerCase();
+      const targetAlbum = (track.album || '').toLowerCase();
+      let albumIdx = distinctAlbums.findIndex(
+        (a) => a.album.toLowerCase() === targetAlbum && a.artist.toLowerCase() === targetArtist
+      );
+      if (albumIdx < 0) {
+        albumIdx = distinctAlbums.findIndex((a) => a.tracks.some((t) => t.id === track.id));
+      }
+      if (albumIdx >= 0) {
+        setCoverFlowIndex(albumIdx);
+      }
+    }
     if (!audioRef.current || !mediaPort) return;
 
     const srcUrl = `http://127.0.0.1:${mediaPort}/track?id=${track.id}`;
@@ -2296,6 +2369,21 @@ export const App: React.FC = () => {
               {viewMode === 'coverflow' && (
                 <div
                   className="coverflow-stage"
+                  onWheel={(e) => {
+                    if (distinctAlbums.length === 0) return;
+                    const primaryDelta =
+                      Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+                    if (Math.abs(primaryDelta) < 1) return;
+                    coverFlowWheelAccumRef.current += primaryDelta;
+                    const stepThreshold = 36;
+                    if (Math.abs(coverFlowWheelAccumRef.current) >= stepThreshold) {
+                      const steps = Math.trunc(coverFlowWheelAccumRef.current / stepThreshold);
+                      coverFlowWheelAccumRef.current -= steps * stepThreshold;
+                      setCoverFlowIndex((i) =>
+                        Math.max(0, Math.min(distinctAlbums.length - 1, i + steps))
+                      );
+                    }
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'ArrowLeft') {
                       setCoverFlowIndex((i) => Math.max(0, i - 1));
@@ -2329,15 +2417,16 @@ export const App: React.FC = () => {
                     <>
                       <div className="coverflow-3d-viewport">
                         {distinctAlbums.map((alb, idx) => {
-                          const offset = idx - coverFlowIndex;
-                          if (Math.abs(offset) > 6) return null;
-                          const isCenter = offset === 0;
-                          const translateX = isCenter
-                            ? 0
-                            : offset * 56 + (offset > 0 ? 52 : -52);
-                          const translateZ = isCenter ? 55 : -90 - Math.abs(offset) * 18;
-                          const rotateY = isCenter ? 0 : offset > 0 ? -58 : 58;
-                          const zIndex = 30 - Math.abs(offset);
+                          const offset = idx - coverFlowRenderPos;
+                          const absOffset = Math.abs(offset);
+                          if (absOffset > 6.5) return null;
+                          const clamped = Math.max(-1, Math.min(1, offset));
+                          const translateX = offset * 56 + clamped * 52;
+                          const translateZ =
+                            55 - Math.min(1, absOffset) * 145 - Math.max(0, absOffset - 1) * 18;
+                          const rotateY = -clamped * 58;
+                          const zIndex = Math.round(30 - absOffset * 2);
+                          const opacity = absOffset > 5 ? Math.max(0, 1 - (absOffset - 5) * 0.7) : 1;
                           const artUrl = getArtworkUrl(alb.coverArtPath);
 
                           return (
@@ -2345,9 +2434,9 @@ export const App: React.FC = () => {
                               key={`${alb.artist}-${alb.album}`}
                               className="coverflow-card"
                               style={{
-                                transform: `translateX(${translateX}px) translateZ(${translateZ}px) rotateY(${rotateY}deg)`,
+                                transform: `translate3d(${translateX.toFixed(2)}px, 0, ${translateZ.toFixed(2)}px) rotateY(${rotateY.toFixed(2)}deg)`,
                                 zIndex,
-                                opacity: Math.abs(offset) > 5 ? 0 : 1,
+                                opacity,
                               }}
                               onClick={() => setCoverFlowIndex(idx)}
                               onDoubleClick={() => {
@@ -4588,9 +4677,7 @@ export const App: React.FC = () => {
 
       {showDiagnostics && (
         <DiagnosticsModal
-          liveEntries={liveLogs}
           onClose={() => setShowDiagnostics(false)}
-          onCleared={() => setLiveLogs([])}
         />
       )}
 
@@ -5238,6 +5325,30 @@ export const App: React.FC = () => {
               <span style={{ wordBreak: 'break-all', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
                 {detailItem.track.remote_nfs_path}
               </span>
+              {(() => {
+                try {
+                  const alts = JSON.parse(detailItem.track.alternate_paths || '[]');
+                  if (!Array.isArray(alts) || alts.length === 0) return null;
+                  return (
+                    <>
+                      <strong>Alternate Paths:</strong>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontFamily: 'var(--font-mono)', fontSize: 10.5, color: '#475569' }}>
+                        {alts.map((alt: any, idx: number) => {
+                          const p = typeof alt === 'string' ? alt : alt?.path;
+                          const fmt = typeof alt === 'object' && alt?.format ? ` (${alt.format}${alt.bitrate ? ` · ${alt.bitrate}k` : ''})` : '';
+                          return (
+                            <span key={idx} style={{ wordBreak: 'break-all' }}>
+                              {p}{fmt}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </>
+                  );
+                } catch {
+                  return null;
+                }
+              })()}
             </div>
             <div
               style={{

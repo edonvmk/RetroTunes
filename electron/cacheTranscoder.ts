@@ -5,6 +5,7 @@ import { BrowserWindow } from 'electron';
 import { getDb, CacheJobRow, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
+import { resolveReachableTrackPath } from './trackSources';
 
 let workerRunning = false;
 
@@ -197,7 +198,8 @@ export function queueTrackCache(trackId: number, keepCached = true): void {
     return;
   }
 
-  const ext = path.extname(track.remote_nfs_path) || '.mp3';
+  const sourcePath = resolveReachableTrackPath(track);
+  const ext = path.extname(sourcePath) || '.mp3';
   const safeBase = `${track.id}_${track.artist}_${track.title}`
     .replace(/[^a-zA-Z0-9._-]/g, '_')
     .slice(0, 80);
@@ -211,7 +213,7 @@ export function queueTrackCache(trackId: number, keepCached = true): void {
   db.prepare(`
     INSERT INTO cache_jobs (item_type, item_id, title, source_path, target_path, status, progress)
     VALUES ('audio', ?, ?, ?, ?, 'queued', 0)
-  `).run(track.id, `${track.artist} - ${track.title}`, track.remote_nfs_path, targetPath);
+  `).run(track.id, `${track.artist} - ${track.title}`, sourcePath, targetPath);
 
   logger.info('CACHE', `Queued audio track for local SSD cache: ${track.artist} - ${track.title}`);
   broadcastCacheStatus();

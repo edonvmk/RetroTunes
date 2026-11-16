@@ -28,6 +28,7 @@ import {
   startBackgroundMetadataTrickle,
   syncListenBrainzPopularity,
   cleanAndHydrateAllLibraryTitles,
+  deduplicateLibraryTracks,
   syncPlexAndAudiobookshelfProgress,
   updateVideoPlaybackProgress,
   updateAudiobookPlaybackProgress,
@@ -322,6 +323,7 @@ function registerAllHandlers() {
   registerChannel('indexer:cleanAllTitles', (triggerTagSweep = true) =>
     cleanAndHydrateAllLibraryTitles(triggerTagSweep)
   );
+  registerChannel('indexer:deduplicate', () => deduplicateLibraryTracks());
 
   // --- Local Pre-Cache & 360p Video Transcoder ---
   registerChannel('cache:stats', () => getCacheStats());
@@ -950,9 +952,10 @@ app.whenReady().then(async () => {
   setupApplicationMenu();
   createMainWindow();
   startMtpUsbPoller();
-  void autoMountSharesOnStartup();
+  const autoMountPromise = autoMountSharesOnStartup().catch(() => {});
   // Resume gentle background metadata & video artwork hydration
-  setTimeout(() => {
+  setTimeout(async () => {
+    await autoMountPromise;
     void hydrateVideoArtwork();
     void syncPlexAndAudiobookshelfProgress();
     if (getSettings().metadataHydrationMode === 'hybrid') {

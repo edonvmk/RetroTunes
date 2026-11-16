@@ -1,6 +1,7 @@
 export interface TrackRow {
   id: number;
   remote_nfs_path: string;
+  alternate_paths?: string | null;
   local_cache_path: string | null;
   keep_cached: number;
   title: string;

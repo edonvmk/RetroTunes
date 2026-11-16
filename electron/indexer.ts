@@ -8,6 +8,15 @@ import { BrowserWindow } from 'electron';
 import { getDb, recalculateArtistPopularityScores, TrackRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
+import {
+  buildTrackMatchKey,
+  extractCanonicalMediaSubpath,
+  parseAlternateSources,
+  resolveReachableTrackPath,
+  scoreAudioQuality,
+  serializeAlternateSources,
+  TrackAlternateSource,
+} from './trackSources';
 
 const execFileAsync = promisify(execFile);
 
@@ -568,16 +577,57 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
     const db = getDb();
     const fastInsertTrack = db.prepare(`
       INSERT INTO tracks (
-        remote_nfs_path, title, artist, album, year,
+        remote_nfs_path, alternate_paths, title, artist, album, year,
         track_num, disc_num, format, cover_art_path, lrc_path, metadata_loaded
       ) VALUES (
-        @remote_nfs_path, @title, @artist, @album, @year,
+        @remote_nfs_path, '[]', @title, @artist, @album, @year,
         @track_num, @disc_num, @format, @cover_art_path, @lrc_path, 0
       )
       ON CONFLICT(remote_nfs_path) DO UPDATE SET
         cover_art_path = COALESCE(tracks.cover_art_path, excluded.cover_art_path),
         lrc_path = COALESCE(tracks.lrc_path, excluded.lrc_path)
     `);
+    const updateTrackAltsStmt = db.prepare(
+      'UPDATE tracks SET alternate_paths = ? WHERE id = ?'
+    );
+    const promoteTrackSourceStmt = db.prepare(`
+      UPDATE tracks SET
+        remote_nfs_path = ?,
+        alternate_paths = ?,
+        format = ?,
+        metadata_loaded = 0,
+        cover_art_path = COALESCE(cover_art_path, ?),
+        lrc_path = COALESCE(lrc_path, ?)
+      WHERE id = ?
+    `);
+
+    interface ExistingTrackIndexEntry {
+      id: number;
+      remote_nfs_path: string;
+      alternate_paths: string | null;
+      format: string;
+      bitrate: number;
+      file_size: number;
+    }
+    const existingByPath = new Map<string, ExistingTrackIndexEntry>();
+    const existingBySubpath = new Map<string, ExistingTrackIndexEntry>();
+    const existingByMatchKey = new Map<string, ExistingTrackIndexEntry>();
+    for (const row of db
+      .prepare(
+        'SELECT id, remote_nfs_path, alternate_paths, artist, album, title, format, bitrate, file_size FROM tracks'
+      )
+      .all() as (ExistingTrackIndexEntry & { artist: string; album: string; title: string })[]) {
+      existingByPath.set(row.remote_nfs_path, row);
+      const sub = extractCanonicalMediaSubpath(row.remote_nfs_path);
+      if (sub && !existingBySubpath.has(sub)) existingBySubpath.set(sub, row);
+      const mk = buildTrackMatchKey(row.artist, row.album, row.title);
+      if (mk && !existingByMatchKey.has(mk)) existingByMatchKey.set(mk, row);
+      for (const alt of parseAlternateSources(row.alternate_paths)) {
+        if (alt.path && !existingByPath.has(alt.path)) {
+          existingByPath.set(alt.path, row);
+        }
+      }
+    }
 
     const fastInsertVideo = db.prepare(`
       INSERT INTO videos (
@@ -606,11 +656,57 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
         const parsed = parseTrackFromHierarchy(audioPath, albumObj.rootPath);
         const potentialLrc = audioPath.replace(/\.[^/.]+$/, '.lrc');
         const lrcPath = albumObj.lrcFiles.has(potentialLrc) ? potentialLrc : null;
+        const artistName = parsed.artist || albumObj.artistName;
 
-        fastInsertTrack.run({
+        if (!existingByPath.has(audioPath)) {
+          const subpath = extractCanonicalMediaSubpath(audioPath);
+          const matchKey = buildTrackMatchKey(artistName, parsed.album, parsed.title);
+          const matched =
+            (subpath ? existingBySubpath.get(subpath) : undefined) ||
+            (matchKey ? existingByMatchKey.get(matchKey) : undefined);
+
+          if (matched) {
+            const alts = parseAlternateSources(matched.alternate_paths);
+            const newScore = scoreAudioQuality(parsed.format, 0, 0);
+            const oldScore = scoreAudioQuality(matched.format, matched.bitrate, matched.file_size);
+            const oldReachable = fs.existsSync(matched.remote_nfs_path);
+
+            if (newScore > oldScore || (newScore === oldScore && !oldReachable)) {
+              alts.push({
+                path: matched.remote_nfs_path,
+                format: matched.format,
+                bitrate: matched.bitrate,
+                file_size: matched.file_size,
+              });
+              const serialized = serializeAlternateSources(alts, audioPath);
+              promoteTrackSourceStmt.run(
+                audioPath,
+                serialized,
+                parsed.format,
+                albumObj.folderCoverPath,
+                lrcPath,
+                matched.id
+              );
+              matched.remote_nfs_path = audioPath;
+              matched.format = parsed.format;
+              matched.bitrate = 0;
+              matched.file_size = 0;
+              matched.alternate_paths = serialized;
+            } else {
+              alts.push({ path: audioPath, format: parsed.format });
+              const serialized = serializeAlternateSources(alts, matched.remote_nfs_path);
+              updateTrackAltsStmt.run(serialized, matched.id);
+              matched.alternate_paths = serialized;
+            }
+            existingByPath.set(audioPath, matched);
+            continue;
+          }
+        }
+
+        const info = fastInsertTrack.run({
           remote_nfs_path: audioPath,
           title: parsed.title,
-          artist: parsed.artist || albumObj.artistName,
+          artist: artistName,
           album: parsed.album,
           year: parsed.year,
           track_num: parsed.trackNum,
@@ -619,6 +715,22 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
           cover_art_path: albumObj.folderCoverPath,
           lrc_path: lrcPath,
         });
+        if (!existingByPath.has(audioPath)) {
+          const insertedId = Number(info.lastInsertRowid);
+          const entry: ExistingTrackIndexEntry = {
+            id: insertedId,
+            remote_nfs_path: audioPath,
+            alternate_paths: '[]',
+            format: parsed.format,
+            bitrate: 0,
+            file_size: 0,
+          };
+          existingByPath.set(audioPath, entry);
+          const subpath = extractCanonicalMediaSubpath(audioPath);
+          if (subpath && !existingBySubpath.has(subpath)) existingBySubpath.set(subpath, entry);
+          const matchKey = buildTrackMatchKey(artistName, parsed.album, parsed.title);
+          if (matchKey && !existingByMatchKey.has(matchKey)) existingByMatchKey.set(matchKey, entry);
+        }
         audioAdded++;
       }
 
@@ -800,7 +912,7 @@ export async function hydrateTrackMetadata(
   if (!track) return null;
   if (track.metadata_loaded === 1 && track.duration > 0) return track;
 
-  const filePath = track.remote_nfs_path;
+  const filePath = resolveReachableTrackPath(track);
   try {
     const stat = await fsp.stat(filePath);
     const mm = await import('music-metadata');
@@ -923,6 +1035,7 @@ export async function startBackgroundMetadataTrickle(): Promise<void> {
 
   const db = getDb();
   let hydratedCount = 0;
+  let consecutiveMisses = 0;
 
   try {
     while (backgroundHydrationRunning && !cancelRequested) {
@@ -954,19 +1067,33 @@ export async function startBackgroundMetadataTrickle(): Promise<void> {
 
       for (const item of targetBatch) {
         if (!backgroundHydrationRunning || cancelRequested) break;
-        await hydrateTrackMetadata(item.id, true);
-        hydratedCount++;
+        const updated = await hydrateTrackMetadata(item.id, true);
+        if (updated?.metadata_loaded === 1) {
+          hydratedCount++;
+          consecutiveMisses = 0;
+          if (hydratedCount % 250 === 0) {
+            broadcastBatchCommitted();
+          }
+        } else {
+          consecutiveMisses++;
+          if (consecutiveMisses >= 15) {
+            logger.info(
+              'INDEXER',
+              'Paused background metadata trickle: 15 consecutive files unreachable (share may be unmounted or path changed).'
+            );
+            backgroundHydrationRunning = false;
+            break;
+          }
+        }
         // Polite 60ms pause between network files so SMB/NFS share never chokes
         await new Promise((r) => setTimeout(r, 60));
-      }
-
-      if (hydratedCount % 25 === 0) {
-        broadcastBatchCommitted();
       }
     }
   } finally {
     backgroundHydrationRunning = false;
-    broadcastBatchCommitted();
+    if (hydratedCount > 0) {
+      broadcastBatchCommitted();
+    }
   }
 }
 
@@ -1892,4 +2019,235 @@ export async function updateAudiobookPlaybackProgress(
   db.prepare(
     'UPDATE audiobooks SET current_time_sec = ?, is_finished = ? WHERE id = ?'
   ).run(Math.max(0, currentTimeSec), isFinished ? 1 : 0, audiobookId);
+}
+
+export interface DeduplicateResult {
+  totalBefore: number;
+  groupsMerged: number;
+  rowsRemoved: number;
+  totalAfter: number;
+}
+
+/**
+ * Merges duplicate tracks (same canonical subpath across two mounts, or same artist+album+title
+ * in different formats), keeping the highest-quality reachable path as primary `remote_nfs_path`
+ * and preserving all other paths in `alternate_paths`, while summing play counts and re-pointing FKs.
+ */
+export function deduplicateLibraryTracks(): DeduplicateResult {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, remote_nfs_path, alternate_paths, local_cache_path, keep_cached,
+              title, artist, album, format, bitrate, file_size, duration,
+              cover_art_path, lrc_path, mbid_recording, mbid_artist, mbid_release,
+              mbid_release_group, isrc, global_listen_count, lastfm_plays, audiodb_plays,
+              local_star_rating, is_loved, play_count, metadata_loaded
+       FROM tracks`
+    )
+    .all() as (TrackRow & { alternate_paths?: string | null })[];
+
+  const totalBefore = rows.length;
+  const rootExistsCache = new Map<string, boolean>();
+  const isPathPrefixReachable = (p: string): boolean => {
+    if (!p) return false;
+    const posix = p.replace(/\\/g, '/');
+    const volMatch = posix.match(/^(\/Volumes\/[^/]+)/i);
+    const rtMatch = posix.match(/^(.+\/RetroTunes(?:\s*\(rTunes\))?\/mounts\/[^/]+)/i);
+    const rootKey = volMatch?.[1] || rtMatch?.[1] || path.dirname(p);
+    let ok = rootExistsCache.get(rootKey);
+    if (ok === undefined) {
+      ok = fs.existsSync(rootKey);
+      rootExistsCache.set(rootKey, ok);
+    }
+    return ok;
+  };
+
+  // Disjoint-set union by index so transitive matches (subpath + matchKey) merge cleanly
+  const parent = new Int32Array(rows.length);
+  for (let i = 0; i < rows.length; i++) parent[i] = i;
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const union = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+
+  const firstBySubpath = new Map<string, number>();
+  const firstByMatchKey = new Map<string, number>();
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const sub = extractCanonicalMediaSubpath(r.remote_nfs_path);
+    if (sub) {
+      const prev = firstBySubpath.get(sub);
+      if (prev !== undefined) union(prev, i);
+      else firstBySubpath.set(sub, i);
+    }
+    const mk = buildTrackMatchKey(r.artist, r.album, r.title);
+    if (mk) {
+      const prev = firstByMatchKey.get(mk);
+      if (prev !== undefined) union(prev, i);
+      else firstByMatchKey.set(mk, i);
+    }
+  }
+
+  const groups = new Map<number, number[]>();
+  for (let i = 0; i < rows.length; i++) {
+    const root = find(i);
+    let arr = groups.get(root);
+    if (!arr) {
+      arr = [];
+      groups.set(root, arr);
+    }
+    arr.push(i);
+  }
+
+  let groupsMerged = 0;
+  let rowsRemoved = 0;
+
+  const updateWinnerStmt = db.prepare(`
+    UPDATE tracks SET
+      remote_nfs_path = ?,
+      alternate_paths = ?,
+      local_cache_path = COALESCE(local_cache_path, ?),
+      keep_cached = ?,
+      format = ?,
+      bitrate = ?,
+      file_size = ?,
+      duration = ?,
+      cover_art_path = COALESCE(cover_art_path, ?),
+      lrc_path = COALESCE(lrc_path, ?),
+      mbid_recording = COALESCE(mbid_recording, ?),
+      mbid_artist = COALESCE(mbid_artist, ?),
+      mbid_release = COALESCE(mbid_release, ?),
+      mbid_release_group = COALESCE(mbid_release_group, ?),
+      isrc = COALESCE(isrc, ?),
+      global_listen_count = ?,
+      lastfm_plays = ?,
+      audiodb_plays = ?,
+      combined_global_plays = ?,
+      local_star_rating = ?,
+      is_loved = ?,
+      play_count = ?
+    WHERE id = ?
+  `);
+
+  const repointPlaylistTracks = db.prepare(
+    'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) SELECT playlist_id, ?, position FROM playlist_tracks WHERE track_id = ?'
+  );
+  const deleteOldPlaylistTracks = db.prepare('DELETE FROM playlist_tracks WHERE track_id = ?');
+  const repointExclusions = db.prepare(
+    'INSERT OR IGNORE INTO smart_playlist_exclusions (smart_playlist_id, track_id) SELECT smart_playlist_id, ? FROM smart_playlist_exclusions WHERE track_id = ?'
+  );
+  const deleteOldExclusions = db.prepare('DELETE FROM smart_playlist_exclusions WHERE track_id = ?');
+  const repointDevicePlays = db.prepare(
+    'INSERT OR IGNORE INTO device_play_state (device_uuid, track_id, last_synced_device_count) SELECT device_uuid, ?, last_synced_device_count FROM device_play_state WHERE track_id = ?'
+  );
+  const deleteOldDevicePlays = db.prepare('DELETE FROM device_play_state WHERE track_id = ?');
+  const deleteTrackStmt = db.prepare('DELETE FROM tracks WHERE id = ?');
+
+  const runMerge = db.transaction(() => {
+    for (const memberIndices of groups.values()) {
+      if (memberIndices.length <= 1) continue;
+      groupsMerged++;
+
+      const members = memberIndices.map((idx) => rows[idx]);
+      members.sort((a, b) => {
+        const qa = scoreAudioQuality(a.format, a.bitrate, a.file_size);
+        const qb = scoreAudioQuality(b.format, b.bitrate, b.file_size);
+        if (qb !== qa) return qb - qa;
+        const ra = isPathPrefixReachable(a.remote_nfs_path) ? 1 : 0;
+        const rb = isPathPrefixReachable(b.remote_nfs_path) ? 1 : 0;
+        if (rb !== ra) return rb - ra;
+        const ma = a.metadata_loaded === 1 ? 1 : 0;
+        const mb = b.metadata_loaded === 1 ? 1 : 0;
+        if (mb !== ma) return mb - ma;
+        return a.id - b.id;
+      });
+
+      const winner = members[0];
+      const allAlts: TrackAlternateSource[] = [];
+      for (const m of members) {
+        allAlts.push({
+          path: m.remote_nfs_path,
+          format: m.format,
+          bitrate: m.bitrate,
+          file_size: m.file_size,
+          duration: m.duration,
+        });
+        for (const alt of parseAlternateSources(m.alternate_paths)) {
+          allAlts.push(alt);
+        }
+      }
+
+      const serializedAlts = serializeAlternateSources(allAlts, winner.remote_nfs_path);
+      const sumPlayCount = members.reduce((acc, m) => acc + (m.play_count || 0), 0);
+      const maxRating = Math.max(...members.map((m) => m.local_star_rating || 0));
+      const maxLoved = Math.max(...members.map((m) => m.is_loved || 0));
+      const maxKeepCached = Math.max(...members.map((m) => m.keep_cached || 0));
+      const maxLb = Math.max(...members.map((m) => m.global_listen_count || 0));
+      const maxLfm = Math.max(...members.map((m) => m.lastfm_plays || 0));
+      const maxAdb = Math.max(...members.map((m) => m.audiodb_plays || 0));
+      const firstCache = members.find((m) => m.local_cache_path)?.local_cache_path || null;
+      const firstCover = members.find((m) => m.cover_art_path)?.cover_art_path || null;
+      const firstLrc = members.find((m) => m.lrc_path)?.lrc_path || null;
+      const firstMbidRec = members.find((m) => m.mbid_recording)?.mbid_recording || null;
+      const firstMbidArt = members.find((m) => m.mbid_artist)?.mbid_artist || null;
+      const firstMbidRel = members.find((m) => m.mbid_release)?.mbid_release || null;
+      const firstMbidRg = members.find((m) => m.mbid_release_group)?.mbid_release_group || null;
+      const firstIsrc = members.find((m) => m.isrc)?.isrc || null;
+
+      updateWinnerStmt.run(
+        winner.remote_nfs_path,
+        serializedAlts,
+        firstCache,
+        maxKeepCached,
+        winner.format,
+        winner.bitrate,
+        winner.file_size,
+        winner.duration,
+        firstCover,
+        firstLrc,
+        firstMbidRec,
+        firstMbidArt,
+        firstMbidRel,
+        firstMbidRg,
+        firstIsrc,
+        maxLb,
+        maxLfm,
+        maxAdb,
+        maxLb + maxLfm + maxAdb,
+        maxRating,
+        maxLoved,
+        sumPlayCount,
+        winner.id
+      );
+
+      for (let i = 1; i < members.length; i++) {
+        const dupId = members[i].id;
+        repointPlaylistTracks.run(winner.id, dupId);
+        deleteOldPlaylistTracks.run(dupId);
+        repointExclusions.run(winner.id, dupId);
+        deleteOldExclusions.run(dupId);
+        repointDevicePlays.run(winner.id, dupId);
+        deleteOldDevicePlays.run(dupId);
+        deleteTrackStmt.run(dupId);
+        rowsRemoved++;
+      }
+    }
+  });
+
+  runMerge();
+  if (rowsRemoved > 0) {
+    recalculateArtistPopularityScores();
+  }
+  const totalAfter = (db.prepare('SELECT COUNT(*) as c FROM tracks').get() as { c: number }).c;
+  logger.info('INDEXER', `Library deduplication complete: merged ${groupsMerged} groups, removed ${rowsRemoved} duplicate rows (${totalBefore} -> ${totalAfter}).`);
+  return { totalBefore, groupsMerged, rowsRemoved, totalAfter };
 }

@@ -9,6 +9,7 @@ import { classifyVariant, isInterludeOrSkit } from './egenius/variantFilter';
 export interface TrackRow {
   id: number;
   remote_nfs_path: string;
+  alternate_paths?: string | null;
   local_cache_path: string | null;
   keep_cached: number;
   title: string;
@@ -234,6 +235,7 @@ export function initDatabase(customPath?: string): Database.Database {
     CREATE TABLE IF NOT EXISTS tracks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       remote_nfs_path TEXT UNIQUE NOT NULL,
+      alternate_paths TEXT DEFAULT '[]',
       local_cache_path TEXT,
       keep_cached INTEGER DEFAULT 0,
       title TEXT NOT NULL,
@@ -539,6 +541,7 @@ export function initDatabase(customPath?: string): Database.Database {
       ['popularity_updated_at', 'INTEGER DEFAULT 0'],
       ['artist_rarity_multiplier', 'REAL DEFAULT 1.0'],
       ['discovery_score', 'REAL DEFAULT 0'],
+      ['alternate_paths', "TEXT DEFAULT '[]'"],
     ] as const) {
       if (!cols.some((c) => c.name === col)) {
         db.exec(`ALTER TABLE tracks ADD COLUMN ${col} ${sqlType}`);

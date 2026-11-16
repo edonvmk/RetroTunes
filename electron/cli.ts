@@ -10,7 +10,7 @@ import {
   refreshMtpState,
   syncDevice,
 } from './deviceSync';
-import { runLibraryScan, syncListenBrainzPopularity } from './indexer';
+import { deduplicateLibraryTracks, runLibraryScan, syncListenBrainzPopularity } from './indexer';
 import { getCacheStats } from './cacheTranscoder';
 import { getArrLiveQueue } from './storeArr';
 import { standaloneLocalProvider } from './providers/standaloneLocal';
@@ -338,6 +338,13 @@ async function main() {
       const force = Boolean(flags.force);
       const limit = flags.limit ? Number(flags.limit) : 120;
       const res = await syncListenBrainzPopularity({ force, limit });
+      out({ ok: true, ...res }, asJson);
+      process.exitCode = 0;
+      return;
+    }
+    if (group === 'db' && sub === 'deduplicate') {
+      initDatabase();
+      const res = deduplicateLibraryTracks();
       out({ ok: true, ...res }, asJson);
       process.exitCode = 0;
       return;

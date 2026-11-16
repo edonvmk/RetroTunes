@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import { getDb, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
+import { resolveReachableTrackPath } from './trackSources';
 
 let serverPort = 0;
 let mediaServerInstance: http.Server | null = null;
@@ -88,11 +89,8 @@ export function startMediaServer(): Promise<number> {
             res.end('Track not found');
             return;
           }
-          // Prioritize local cache path (Section 3)
-          const filePath =
-            track.local_cache_path && fs.existsSync(track.local_cache_path)
-              ? track.local_cache_path
-              : track.remote_nfs_path;
+          // Prioritize local cache path, then primary remote path, then reachable alternate paths
+          const filePath = resolveReachableTrackPath(track);
 
           // Update cache_jobs last_accessed for LRU tracking
           if (track.local_cache_path) {

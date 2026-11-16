@@ -10,12 +10,10 @@ import {
   X,
 } from 'lucide-react';
 import { LogEntry, LogLevel, LogSubsystem } from '../types';
-import { formatBytes, invokeRpc } from '../bridge';
+import { formatBytes, invokeRpc, subscribeEvent } from '../bridge';
 
 interface DiagnosticsModalProps {
-  liveEntries: LogEntry[];
   onClose: () => void;
-  onCleared: () => void;
 }
 
 const SUBSYSTEMS: LogSubsystem[] = [
@@ -35,11 +33,9 @@ const SUBSYSTEMS: LogSubsystem[] = [
 ];
 
 export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
-  liveEntries,
   onClose,
-  onCleared,
 }) => {
-  const [entries, setEntries] = useState<LogEntry[]>(liveEntries);
+  const [entries, setEntries] = useState<LogEntry[]>([]);
   const [levelFilter, setLevelFilter] = useState<string>('');
   const [subsystemFilter, setSubsystemFilter] = useState<string>('');
   const [search, setSearch] = useState<string>('');
@@ -82,7 +78,24 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
 
   useEffect(() => {
     void fetchLogsAndDiagnostics();
-  }, [levelFilter, subsystemFilter, search, liveEntries.length]);
+  }, [levelFilter, subsystemFilter, search]);
+
+  useEffect(() => {
+    const unsub = subscribeEvent<LogEntry>('log:entry', (entry) => {
+      if (levelFilter && entry.level !== levelFilter) return;
+      if (subsystemFilter && entry.subsystem !== subsystemFilter) return;
+      if (
+        search &&
+        !`${entry.subsystem} ${entry.message} ${JSON.stringify(entry.details ?? {})}`
+          .toLowerCase()
+          .includes(search.toLowerCase())
+      ) {
+        return;
+      }
+      setEntries((prev) => [...prev.slice(-499), entry]);
+    });
+    return () => unsub();
+  }, [levelFilter, subsystemFilter, search]);
 
   const handleRunSelfCheck = async () => {
     setRunningSelfCheck(true);
@@ -191,7 +204,7 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({
                   className="aqua-btn"
                   onClick={async () => {
                     await invokeRpc('logs:clear');
-                    onCleared();
+                    setEntries([]);
                     await fetchLogsAndDiagnostics();
                   }}
                 >

@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { BrowserWindow } from 'electron';
+import { resolveReachableTrackPath } from './trackSources';
 import {
   getDb,
   DeviceRow,
@@ -2108,10 +2109,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         tracksSynced,
       });
 
-      const sourceAudioPath =
-        track.local_cache_path && fs.existsSync(track.local_cache_path)
-          ? track.local_cache_path
-          : track.remote_nfs_path;
+      const sourceAudioPath = resolveReachableTrackPath(track);
 
       if (!sourceAudioPath || !fs.existsSync(sourceAudioPath)) continue;
 

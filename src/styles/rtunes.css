@@ -525,7 +525,7 @@ html,
   border-radius: 3px;
   background: #1b1f26;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.18);
-  transition: transform 0.32s cubic-bezier(0.2, 0.85, 0.25, 1), opacity 0.25s ease;
+  will-change: transform, opacity;
   cursor: pointer;
   display: flex;
   align-items: center;

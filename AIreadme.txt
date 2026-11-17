@@ -1,6 +1,8 @@
 # RetroTunes (rTunes) — AI Development Governance & Architecture Guide
 
 > **Notice to all AI coding assistants:** Read this document completely before modifying any file in this repository. Both `AGENTS.md` and `AIreadme.txt` are authoritative and must remain identical.
+>
+> **Module Map Rule:** Before creating any new file, helper, or IPC channel, consult [`MODULE_MAP.md`](MODULE_MAP.md) to reuse existing modules and avoid duplicate code. Whenever you add, delete, or wire new connections between modules, **you MUST update [`MODULE_MAP.md`](MODULE_MAP.md)** in the same change.
 
 ---
 
@@ -183,3 +185,13 @@ Any commit that adds:
 - **Full-Library Artist & Genre Indexing (`artist_genre_weights`):** Scans **100%** of unique artists and multi-value `genre` strings (`;` `,` `/` `|`) in SQLite `tracks` (no fixed artist or genre cap) alongside cached Last.fm `artist.getTopTags`, strictly anchored to artist-level weights—never track titles.
 - **Two-Method Self-Tuning Matrix (`subgenre_affinity_matrix`):** Computes symmetric `0.000–1.000` genre cells (`ROUND(val, 3)`) using **Method 1** (local artist weighted Ochiai overlap $\times \frac{N_{\text{shared}}}{N_{\text{shared}} + 3.0}$ reinforcement) blended with optional **Method 2** (Last.fm `artist.getSimilar` graph weight $w \in [0, 1]$, default `20%`; forced `0%` when no `lastfmApiKey` is configured). Always preserves `is_user_locked = 1` cells and `1.000` self-pairs.
 - **Lean On-the-Fly Artist Matrix & Unified `eGenius` Scorer:** Does **not** persist an artist-to-artist table in SQLite. Instead, `getArtistsForGenre()`, `computeGenreArtistSlice()`, and `createSharedArtistScorer()` evaluate bilinear genre-bridge similarity and optional Last.fm graph similarity in memory (`< 20ms`), powering the Read-Only Artist Map overlay, **Prefs → Genre Map** (`GenreMapTab.tsx` full-screen virtualized `100vw × 100vh` pop-out), `eGenius` Signals #1 & #2, Smart Playlists, AI `query_by_scene_matrix`, and CLI (`npm run cli -- db rebuild-genre-matrix`, `npm run cli -- artist-map --genre "<genre>"`, `npm run cli -- egenius --track-id <id> --explain`).
+
+---
+
+## Code Minimalism & Anti-Bloat Rules
+1. **No Defensive Slop:** Trust internal types and contracts. Do not add redundant null checks, silent fallback defaults (`x || {}`), or `try/catch` blocks inside internal functions. Validate only at external I/O boundaries. Let internal bugs fail fast and loud.
+2. **Flat Over Abstract:** Prefer pure functions and flat data structures over classes. Never create an interface, base class, factory, or wrapper for a single implementation.
+3. **Inline Single-Use Logic:** Do not extract a helper function or intermediate variable if it is only used once and does not drastically improve readability.
+4. **Max 2 Levels of Nesting:** Use guard clauses and early returns. Never write `else` after a `return`, `raise`, `break`, or `continue`.
+5. **Refactor, Don't Wrap:** When modifying existing code, rewrite and simplify the core logic rather than bolting on extra `if/else` branches or boolean flags. Delete dead code immediately.
+6. **Use the Standard Library:** Always prefer built-in language features and standard library modules over custom loops and hand-rolled utilities.

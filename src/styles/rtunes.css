@@ -526,6 +526,7 @@ html,
   background: #1b1f26;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.18);
   will-change: transform, opacity;
+  -webkit-box-reflect: below 2px linear-gradient(transparent 55%, rgba(0, 0, 0, 0.42) 100%);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -540,19 +541,6 @@ html,
   object-fit: cover;
   border-radius: 2px;
   display: block;
-}
-
-.coverflow-card::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -44px;
-  height: 42px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18) 0%, rgba(0, 0, 0, 0) 90%);
-  transform: scaleY(-1);
-  pointer-events: none;
-  border-radius: 2px;
 }
 
 .coverflow-caption {

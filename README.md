@@ -13,7 +13,11 @@ RetroTunes brings back tactile Cover Flow browsing, smart playlists, and one-cli
 ### 1. Classic Desktop Experience & Local SQLite Caching
 * **Authentic Retro UI:** Brushed-metal and aqua interface featuring LCD playback/sync telemetry, `List`, `Grid`, and 3D `Cover Flow` views, and dynamic smart playlists (*Artist Catalog Standouts*, *Loved & 5-Star Favorites*, *Recently Added Lossless*).
 * **Fast Network Library Indexing:** Uses a local SQLite FTS5 cache (`better-sqlite3`) in front of NFS/SMB master shares so libraries with 95,000+ tracks and thousands of TV episodes browse and filter instantaneously without hammering network storage.
-* **Two-Way ListenBrainz & Rating Sync:** Syncs 5-star track ratings, `♥` Loved flags, play counts (`LB Plays`), and artist-relative popularity scores (`Rel. Score`).
+* **Two-Way ListenBrainz & Rating Sync:** Syncs 5-star track ratings, `♥` Loved flags, play counts (`LB Plays`), and artist-relative popularity scores (`Rel. Score`).[unverified for funcitonality for ratings and play sync to your profile] 
+* **eGenius Playlst generator:** Create playlists the old fashioned way, by letting a program do it for you! (eGenius is code & database driven playlist generator)
+* **Playlists:** Full control using all database collection for crafting your perfect playlist
+* **AI Playlist Generator:** Use a LOCAL AI agent to generate a playlist matching the sound you want. AI has full access to your DB For finding the perfect recommendations OR use it to create a smart playlist with rules!
+* **Smart Playlist Generator:** Set filters and rules to automatically filter out unwanted songs from your playlist
 
 ### 2. Universal ePod Provisioning & DAP Sync Engine
 * **Hardware Preset Profiles:** Writes a `.retrotunes_device.json` manifest to USB Mass Storage volumes (`/Volumes` or custom mount paths) and supports MTP device workflows.
@@ -36,8 +40,8 @@ RetroTunes brings back tactile Cover Flow browsing, smart playlists, and one-cli
 | Profile | Target Resolution & Video | Audio & Playlists | Cover Art & Extras |
 | :--- | :--- | :--- | :--- |
 | **Innioasis Y2 (`ePod`)** | `480×360` (4:3 Native @ 30fps MP4) | AAC 128k / Pass-through, `.m3u8` | `500×500` baseline JPEG, `.lrc` karaoke lyrics |
-| **Classic Click-Wheel (Rockbox)** | `320×240` (30fps MP4) | Lossless/MP3/AAC, relative `.m3u8` | `500×500` baseline JPEG, dotfile cleanup |
-| **Custom / Smartphone** | `720p` / `1080p` / Source | Audio pass-through, custom root paths | Configurable manifest & playlist roots |
+| **Classic Click-Wheel (Rockbox)[untested]** | `320×240` (30fps MP4) | Lossless/MP3/AAC, relative `.m3u8` | `500×500` baseline JPEG, dotfile cleanup |
+| **Custom / Smartphone[untested]** | `720p` / `1080p` / Source | Audio pass-through, custom root paths | Configurable manifest & playlist roots |
 
 ---
 
@@ -48,10 +52,10 @@ Configure endpoints and API keys under **Store → Setup Services** or **Prefs**
 | Media / Service Type | Integrated Backend | Status |
 | :--- | :--- | :--- |
 | **Music** | Lidarr, ListenBrainz, LRCLIB | Active |
-| **Movies** | Radarr | Active |
+| **Movies** | Radarr [untested] | Active |
 | **TV Shows** | Sonarr | Active |
-| **Books & Audiobooks** | Chaptarr, Audiobookshelf (ABS) | Active |
-| **Photos** | Immich | Active |
+| **Books & Audiobooks** | Chaptarr, Audiobookshelf (ABS) [All Untested]| Active |
+| **Photos** | Immich [Untested]| Active |
 | **Authentication** | Standalone Mode | Active |
 | **Authentication** | Authentik SSO | **Not Functional (WIP)** |
 
@@ -59,14 +63,14 @@ Configure endpoints and API keys under **Store → Setup Services** or **Prefs**
 
 ## Roadmap: `rTunes` Companion Docker Server
 
-Upcoming releases will introduce a dedicated self-hosted **RetroTunes Companion Docker container** designed to turn `rTunes` into a unified, multi-PC ecosystem:
+Upcoming releases will introduce a dedicated self-hosted **rTunes-server Docker container** designed to turn `rTunes` into a unified, multi-PC ecosystem:
 
 * **Centralized API Key & Service Vault:** Store all Lidarr, Radarr, Sonarr, Chaptarr, Audiobookshelf, Immich, and ListenBrainz credentials once inside the Docker backend—connect any `rTunes` desktop client to the container without configuring secrets per machine.
 * **Direct Share Access & Live Push Updates:** Mount your NAS media shares directly to the container so it automatically detects file additions or metadata changes, updates the master database, and pushes live delta updates to all connected clients.
 * **Server-Side Music Streaming & Offloaded Transcoding:** Stream music directly from the container to desktop clients and offload heavy FFmpeg / HandBrakeCLI DAP video and audio transcoding from client PCs to the server.
 * **Cross-PC Playlist & Library Sync:** Keep standard playlists, smart playlists, ratings, and playback state continuously synchronized across multiple computers—delivering a seamless, multi-device iTunes-style workflow.
 * **Functional Authentik / OIDC Integration:** Complete SSO login support paired with the companion server backend.
-
+* **rTunes-server** Not intended to be a full streaming replacement for Plexamp or subsonic. subsonic support is being considered.(and maybe plex as well if we can make it work)
 ---
 
 ## Screenshots

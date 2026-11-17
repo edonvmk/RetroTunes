@@ -501,6 +501,7 @@ export interface AppSettings {
   metadataHydrationMode: 'hybrid' | 'on_demand';
   tableColumnsJson: string;
   showOfflineDevices?: boolean;
+  lcdArtistClickBehavior?: 'jump' | 'filter';
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
 

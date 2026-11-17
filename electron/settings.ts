@@ -48,6 +48,7 @@ export interface AppSettings {
   metadataHydrationMode: 'hybrid' | 'on_demand';
   tableColumnsJson: string;
   showOfflineDevices?: boolean;
+  lcdArtistClickBehavior?: 'jump' | 'filter';
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
 
@@ -150,6 +151,7 @@ export function getDefaultSettings(): AppSettings {
     metadataHydrationMode: 'hybrid',
     tableColumnsJson: '',
     showOfflineDevices: false,
+    lcdArtistClickBehavior: 'jump',
     genreMapUseLastfm: false,
     genreMapLastfmWeight: 20,
 

@@ -1485,6 +1485,26 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div className="epod-capacity-card">
                 <strong style={{ display: 'block', marginBottom: 8 }}>
+                  LCD Display Click Behavior
+                </strong>
+                <label style={{ display: 'block', fontSize: 11.5, fontWeight: 600, marginBottom: 4 }}>
+                  When clicking the Artist name in the top LCD display:
+                </label>
+                <select
+                  className="aqua-input"
+                  style={{ width: '100%' }}
+                  value={form.lcdArtistClickBehavior || 'jump'}
+                  onChange={(e) =>
+                    updateField('lcdArtistClickBehavior', e.target.value as 'jump' | 'filter')
+                  }
+                >
+                  <option value="jump">Jump to Artist's First Song in Library (Default)</option>
+                  <option value="filter">Auto-Filter Library View to Artist</option>
+                </select>
+              </div>
+
+              <div className="epod-capacity-card">
+                <strong style={{ display: 'block', marginBottom: 8 }}>
                   Library, Playlists &amp; App Actions
                 </strong>
                 <p style={{ margin: '0 0 12px', fontSize: 11.5, color: '#475569' }}>

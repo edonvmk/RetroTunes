@@ -957,6 +957,69 @@ export const App: React.FC = () => {
     return `${base}/artwork?path=${encodeURIComponent(coverArtPath)}`;
   };
 
+  const openTrackContextMenu = (
+    e: React.MouseEvent,
+    track: TrackRow,
+    playlist?: PlaylistRow
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelectedTrackIds([track.id]);
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      kind: playlist ? (playlist.is_smart ? 'smart_track' : 'playlist_track') : 'track',
+      track,
+      playlistId: playlist?.id,
+    });
+  };
+
+  const jumpToLibraryTrack = (target: TrackRow) => {
+    setNav({ kind: 'music' });
+    setSearchQuery('');
+    setSelectedGenre('All');
+    setSelectedArtist('All');
+    setSelectedAlbum('All');
+    setSelectedTrackIds([target.id]);
+    const idxInAll = tracks.findIndex((t) => t.id === target.id);
+    if (idxInAll >= visibleTrackLimit) {
+      setVisibleTrackLimit(idxInAll + 100);
+    }
+    const albumIdx = distinctAlbums.findIndex(
+      (a) =>
+        a.album.toLowerCase() === (target.album || '').toLowerCase() &&
+        a.artist.toLowerCase() === (target.artist || '').toLowerCase()
+    );
+    if (albumIdx >= 0) {
+      setCoverFlowIndex(albumIdx);
+    }
+    setTimeout(() => {
+      const row = document.querySelector(`tr[data-track-id="${target.id}"]`);
+      row?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 60);
+  };
+
+  const handleLcdArtistClick = (artistName: string) => {
+    if (!artistName) return;
+    if (settings?.lcdArtistClickBehavior === 'filter') {
+      setNav({ kind: 'music' });
+      setSearchQuery('');
+      setSelectedGenre('All');
+      setSelectedAlbum('All');
+      setSelectedArtist(artistName);
+      if (viewMode === 'coverflow') {
+        setViewMode('list');
+      }
+      return;
+    }
+    const targetLower = artistName.trim().toLowerCase();
+    const firstMatch =
+      tracks.find((t) => (t.artist || '').trim().toLowerCase() === targetLower) || currentTrack;
+    if (firstMatch) {
+      jumpToLibraryTrack(firstMatch);
+    }
+  };
+
   // Playback handlers
   const playTrack = async (track: TrackRow) => {
     setCurrentTrack(track);
@@ -1190,7 +1253,15 @@ export const App: React.FC = () => {
         </div>
 
         {/* Center: Inset Green-Yellow Retro LCD Display */}
-        <div className="lcd-panel no-drag">
+        <div
+          className="lcd-panel no-drag"
+          onContextMenu={(e) => {
+            if (!currentTrack) return;
+            const activePlaylist =
+              nav.kind === 'playlist' ? playlists.find((p) => p.id === nav.id) : undefined;
+            openTrackContextMenu(e, currentTrack, activePlaylist);
+          }}
+        >
           <div
             style={{
               display: 'flex',
@@ -1384,7 +1455,15 @@ export const App: React.FC = () => {
           ) : currentTrack ? (
             <div className="lcd-content">
               <div className="lcd-title">
-                {currentTrack.title}
+                <span
+                  onClick={() => jumpToLibraryTrack(currentTrack)}
+                  title="Click to jump to this song in Library"
+                  style={{ cursor: 'pointer' }}
+                  onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  {currentTrack.title}
+                </span>
                 <span
                   style={{
                     marginLeft: 8,
@@ -1399,7 +1478,21 @@ export const App: React.FC = () => {
                 </span>
               </div>
               <div className="lcd-subtitle">
-                {currentTrack.artist} — {currentTrack.album}
+                <span
+                  onClick={() => handleLcdArtistClick(currentTrack.artist)}
+                  title={
+                    settings?.lcdArtistClickBehavior === 'filter'
+                      ? `Filter library to ${currentTrack.artist}`
+                      : `Jump to ${currentTrack.artist}'s first song in Library`
+                  }
+                  style={{ cursor: 'pointer' }}
+                  onMouseEnter={(e) => (e.currentTarget.style.textDecoration = 'underline')}
+                  onMouseLeave={(e) => (e.currentTarget.style.textDecoration = 'none')}
+                >
+                  {currentTrack.artist}
+                </span>
+                {' — '}
+                <span>{currentTrack.album}</span>
               </div>
               <div className="lcd-scrubber-row">
                 <span className="lcd-time">{formatDuration(currentTime)}</span>
@@ -2759,6 +2852,7 @@ export const App: React.FC = () => {
                             return (
                               <tr
                                 key={nav.kind === 'playlist' ? `${track.id}-${idx}` : track.id}
+                                data-track-id={track.id}
                                 className={isCurrent || isSelectedRow ? 'active-row' : ''}
                                 style={
                                   dragOverPlaylistIdx === idx &&
@@ -2783,22 +2877,7 @@ export const App: React.FC = () => {
                                     setSelectedTrackIds([track.id]);
                                   }
                                 }}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  setSelectedTrackIds([track.id]);
-                                  setContextMenu({
-                                    x: e.clientX,
-                                    y: e.clientY,
-                                    kind: activePlaylist
-                                      ? activePlaylist.is_smart
-                                        ? 'smart_track'
-                                        : 'playlist_track'
-                                      : 'track',
-                                    track,
-                                    playlistId: activePlaylist?.id,
-                                  });
-                                }}
+                                onContextMenu={(e) => openTrackContextMenu(e, track, activePlaylist)}
                                 onDragStart={(e) => {
                                   if (nav.kind === 'playlist' && !activePlaylist?.is_smart) {
                                     setDraggedPlaylistIdx(idx);

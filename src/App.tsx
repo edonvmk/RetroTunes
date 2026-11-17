@@ -204,6 +204,7 @@ export const App: React.FC = () => {
   const [playlistTracks, setPlaylistTracks] = useState<TrackRow[]>([]);
   const [draggedPlaylistIdx, setDraggedPlaylistIdx] = useState<number | null>(null);
   const [dragOverPlaylistIdx, setDragOverPlaylistIdx] = useState<number | null>(null);
+  const [editingPlaylistPos, setEditingPlaylistPos] = useState<{ idx: number; value: string } | null>(null);
 
   const reorderPlaylistTrack = async (fromIdx: number, toIdx: number) => {
     if (nav.kind !== 'playlist' || fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
@@ -2776,8 +2777,18 @@ export const App: React.FC = () => {
                                   }
                                   const payload = JSON.stringify({ kind: 'track', id: track.id, title: track.title });
                                   e.dataTransfer.effectAllowed = 'copyMove';
+                                  e.dataTransfer.setData('text/plain', String(track.id));
                                   e.dataTransfer.setData('application/x-rtunes-media', payload);
                                   e.dataTransfer.setData('application/json', payload);
+                                }}
+                                onDragEnter={(e) => {
+                                  if (
+                                    nav.kind === 'playlist' &&
+                                    !activePlaylist?.is_smart &&
+                                    draggedPlaylistIdx !== null
+                                  ) {
+                                    e.preventDefault();
+                                  }
                                 }}
                                 onDragOver={(e) => {
                                   if (
@@ -2813,19 +2824,77 @@ export const App: React.FC = () => {
                               >
                                 {visibleCols.map((col) => {
                                   switch (col.id) {
-                                    case 'track_num':
+                                    case 'track_num': {
+                                      const canEditPos =
+                                        nav.kind === 'playlist' && !activePlaylist?.is_smart;
+                                      const isEditingThis =
+                                        canEditPos && editingPlaylistPos?.idx === idx;
+                                      const commitPos = () => {
+                                        if (!editingPlaylistPos) return;
+                                        const parsed = Number(editingPlaylistPos.value);
+                                        setEditingPlaylistPos(null);
+                                        if (Number.isFinite(parsed)) {
+                                          const targetIdx = Math.max(
+                                            0,
+                                            Math.min(playlistTracks.length - 1, Math.round(parsed) - 1)
+                                          );
+                                          void reorderPlaylistTrack(idx, targetIdx);
+                                        }
+                                      };
                                       return (
                                         <td
                                           key={col.id}
-                                          style={{ textAlign: 'right', color: isCurrent ? '#fff' : '#64748b' }}
+                                          title={canEditPos ? 'Click to edit playlist position' : undefined}
+                                          style={{
+                                            textAlign: 'right',
+                                            color: isCurrent ? '#fff' : '#64748b',
+                                            cursor: canEditPos ? 'pointer' : undefined,
+                                          }}
+                                          onClick={(e) => {
+                                            if (!canEditPos) return;
+                                            e.stopPropagation();
+                                            setEditingPlaylistPos({ idx, value: String(idx + 1) });
+                                          }}
                                         >
-                                          {isCurrent && isPlaying
-                                            ? '🔊'
-                                            : nav.kind === 'playlist'
-                                            ? idx + 1
-                                            : track.track_num || idx + 1}
+                                          {isEditingThis ? (
+                                            <input
+                                              type="number"
+                                              min={1}
+                                              max={playlistTracks.length}
+                                              autoFocus
+                                              className="aqua-input"
+                                              style={{
+                                                width: 42,
+                                                padding: '0 3px',
+                                                fontSize: 11,
+                                                textAlign: 'right',
+                                              }}
+                                              value={editingPlaylistPos.value}
+                                              onClick={(e) => e.stopPropagation()}
+                                              onChange={(e) =>
+                                                setEditingPlaylistPos({ idx, value: e.target.value })
+                                              }
+                                              onBlur={commitPos}
+                                              onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                  e.preventDefault();
+                                                  commitPos();
+                                                } else if (e.key === 'Escape') {
+                                                  e.preventDefault();
+                                                  setEditingPlaylistPos(null);
+                                                }
+                                              }}
+                                            />
+                                          ) : isCurrent && isPlaying ? (
+                                            '🔊'
+                                          ) : nav.kind === 'playlist' ? (
+                                            idx + 1
+                                          ) : (
+                                            track.track_num || idx + 1
+                                          )}
                                         </td>
                                       );
+                                    }
                                     case 'cache':
                                       return (
                                         <td key={col.id} style={{ textAlign: 'center' }}>

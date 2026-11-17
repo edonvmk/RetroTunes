@@ -15,7 +15,7 @@ RetroTunes brings back tactile Cover Flow browsing, smart playlists, and one-cli
 * **Fast Network Library Indexing:** Uses a local SQLite FTS5 cache (`better-sqlite3`) in front of NFS/SMB master shares so libraries with 95,000+ tracks and thousands of TV episodes browse and filter instantaneously without hammering network storage.
 * **Two-Way ListenBrainz & Rating Sync:** Syncs 5-star track ratings, `♥` Loved flags, play counts (`LB Plays`), and artist-relative popularity scores (`Rel. Score`).[unverified for funcitonality for ratings and play sync to your profile] 
 * **eGenius Playlst generator:** Create playlists the old fashioned way, by letting a program do it for you! (eGenius is code & database driven playlist generator)
-* **Playlists:** Full control using all database collection for crafting your perfect playlist
+* **Playlists:** IDK Man, its a playlist, put movies on it, songs, TV Shows. Pictures might even work?
 * **AI Playlist Generator:** Use a LOCAL AI agent to generate a playlist matching the sound you want. AI has full access to your DB For finding the perfect recommendations OR use it to create a smart playlist with rules!
 * **Smart Playlist Generator:** Set filters and rules to automatically filter out unwanted songs from your playlist
 

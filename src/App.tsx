@@ -915,6 +915,15 @@ export const App: React.FC = () => {
       return list;
     }
 
+    if (nav.kind === 'playlist' && sortCol === 'track_num') {
+      list.sort((a, b) => {
+        const pa = playlistPositionMap.get(a.id) ?? 0;
+        const pb = playlistPositionMap.get(b.id) ?? 0;
+        return sortAsc ? pa - pb : pb - pa;
+      });
+      return list;
+    }
+
     list.sort((a, b) => {
       const va = a[sortCol];
       const vb = b[sortCol];
@@ -929,7 +938,7 @@ export const App: React.FC = () => {
     });
 
     return list;
-  }, [baseTrackList, nav.kind, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc]);
+  }, [baseTrackList, nav.kind, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc, playlistPositionMap]);
 
   const getArtworkUrl = (coverArtPath?: string | null) => {
     if (!coverArtPath || !mediaPort) return null;
@@ -2213,6 +2222,31 @@ export const App: React.FC = () => {
                                 Save as Standard Playlist
                               </button>
                             </>
+                          )}
+                          {!pl.is_smart && (
+                            <button
+                              className="aqua-btn"
+                              style={{ padding: '1px 8px' }}
+                              title="Reset saved playlist # order to match your current filter and sort"
+                              onClick={async () => {
+                                const visibleIds = new Set(filteredTracks.map((t) => t.id));
+                                const nextOrder = [
+                                  ...filteredTracks,
+                                  ...playlistTracks.filter((t) => !visibleIds.has(t.id)),
+                                ];
+                                setPlaylistTracks(nextOrder);
+                                setSortCol('track_num');
+                                setSortAsc(true);
+                                await invokeRpc(
+                                  'playlists:reorderTracks',
+                                  pl.id,
+                                  nextOrder.map((t) => t.id)
+                                );
+                                showToast(`Saved current order for "${pl.name}".`);
+                              }}
+                            >
+                              Reset Order from Sort
+                            </button>
                           )}
                           {Boolean(pl.is_smart) && (
                             <>

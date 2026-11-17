@@ -617,8 +617,18 @@ export const App: React.FC = () => {
           showToast(`"${pl.name}" is a Video-only playlist.`);
           return;
         }
-        await invokeRpc('playlists:addTrack', pl.id, payload.id);
-        showToast(`Added "${payload.title}" to playlist "${pl.name}"`);
+        const addRes = await invokeRpc<{ ok: boolean; duplicate?: boolean; count?: number }>(
+          'playlists:addTrack',
+          pl.id,
+          payload.id
+        );
+        if (addRes?.duplicate) {
+          showToast(
+            `Note: "${payload.title}" was already in "${pl.name}" — added again (${addRes.count ?? 2}×).`
+          );
+        } else {
+          showToast(`Added "${payload.title}" to playlist "${pl.name}"`);
+        }
       } else if (payload.kind === 'video') {
         if (mediaType === 'music') {
           // Auto-upgrade playlist to mixed or add video directly
@@ -2769,7 +2779,7 @@ export const App: React.FC = () => {
                             const visibleCols = tableColumns.filter((c) => c.visible);
                             return (
                               <tr
-                                key={track.id}
+                                key={nav.kind === 'playlist' ? `${track.id}-${idx}` : track.id}
                                 className={isCurrent || isSelectedRow ? 'active-row' : ''}
                                 style={
                                   dragOverPlaylistIdx === idx &&
@@ -5250,10 +5260,24 @@ export const App: React.FC = () => {
                           onClick={async () => {
                             const t = contextMenu.track!;
                             setContextMenu(null);
-                            await invokeRpc('playlists:addTrack', pl.id, t.id);
+                            const addRes = await invokeRpc<{
+                              ok: boolean;
+                              duplicate?: boolean;
+                              count?: number;
+                            }>('playlists:addTrack', pl.id, t.id);
                             const updatedPls = await invokeRpc<PlaylistRow[]>('playlists:list');
                             setPlaylists(updatedPls);
-                            showToast(`Added "${t.title}" to "${pl.name}".`);
+                            if (nav.kind === 'playlist' && nav.id === pl.id) {
+                              const nextTracks = await invokeRpc<TrackRow[]>('playlists:getTracks', pl.id);
+                              setPlaylistTracks(nextTracks);
+                            }
+                            if (addRes?.duplicate) {
+                              showToast(
+                                `Note: "${t.title}" was already in "${pl.name}" — added again (${addRes.count ?? 2}×).`
+                              );
+                            } else {
+                              showToast(`Added "${t.title}" to "${pl.name}".`);
+                            }
                           }}
                         >
                           {pl.name}

@@ -593,12 +593,14 @@ function registerAllHandlers() {
   });
   registerChannel('playlists:reorderTracks', (playlistId: number, trackIds: number[]) => {
     const db = getDb();
-    const upd = db.prepare(
-      'UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?'
+    const del = db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?');
+    const ins = db.prepare(
+      'INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)'
     );
     const tx = db.transaction(() => {
+      del.run(playlistId);
       trackIds.forEach((tid, idx) => {
-        upd.run(idx + 1, playlistId, tid);
+        ins.run(playlistId, tid, idx + 1);
       });
     });
     tx();
@@ -606,33 +608,43 @@ function registerAllHandlers() {
   });
   registerChannel('playlists:addTrack', (playlistId: number, trackId: number) => {
     const db = getDb();
+    const existingCount = (
+      db
+        .prepare('SELECT COUNT(*) as c FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?')
+        .get(playlistId, trackId) as { c: number }
+    ).c;
     const maxPos = (
       db
         .prepare('SELECT COALESCE(MAX(position), 0) as m FROM playlist_tracks WHERE playlist_id = ?')
         .get(playlistId) as { m: number }
     ).m;
     db.prepare(
-      'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)'
+      'INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)'
     ).run(playlistId, trackId, maxPos + 1);
-    return { ok: true };
+    return { ok: true, duplicate: existingCount > 0, count: existingCount + 1 };
   });
   registerChannel('playlists:removeTrack', (playlistId: number, trackId: number) => {
     const db = getDb();
     const compactTx = db.transaction(() => {
-      db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?').run(
-        playlistId,
-        trackId
-      );
+      db.prepare(
+        `DELETE FROM playlist_tracks
+         WHERE id = (
+           SELECT id FROM playlist_tracks
+           WHERE playlist_id = ? AND track_id = ?
+           ORDER BY position ASC, id ASC
+           LIMIT 1
+         )`
+      ).run(playlistId, trackId);
       const remaining = db
         .prepare(
-          'SELECT track_id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC, track_id ASC'
+          'SELECT id FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC, id ASC'
         )
-        .all(playlistId) as { track_id: number }[];
+        .all(playlistId) as { id: number }[];
       const updatePos = db.prepare(
-        'UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?'
+        'UPDATE playlist_tracks SET position = ? WHERE id = ?'
       );
       remaining.forEach((row, idx) => {
-        updatePos.run(idx, playlistId, row.track_id);
+        updatePos.run(idx + 1, row.id);
       });
     });
     compactTx();

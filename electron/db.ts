@@ -368,13 +368,14 @@ export function initDatabase(customPath?: string): Database.Database {
     );
 
     CREATE TABLE IF NOT EXISTS playlist_tracks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
       playlist_id INTEGER NOT NULL,
       track_id INTEGER NOT NULL,
       position INTEGER DEFAULT 0,
-      PRIMARY KEY (playlist_id, track_id),
       FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
       FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
     );
+    CREATE INDEX IF NOT EXISTS idx_playlist_tracks_pid ON playlist_tracks(playlist_id, position);
 
     CREATE TABLE IF NOT EXISTS playlist_videos (
       playlist_id INTEGER NOT NULL,
@@ -628,6 +629,24 @@ export function initDatabase(customPath?: string): Database.Database {
     }
     if (!pCols.some((c) => c.name === 'egenius_scene_threshold')) {
       db.exec('ALTER TABLE playlists ADD COLUMN egenius_scene_threshold REAL DEFAULT 0.55');
+    }
+    const ptCols = db.prepare("PRAGMA table_info('playlist_tracks')").all() as { name: string }[];
+    if (ptCols.length > 0 && !ptCols.some((c) => c.name === 'id')) {
+      db.exec(`
+        ALTER TABLE playlist_tracks RENAME TO playlist_tracks_old;
+        CREATE TABLE playlist_tracks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          playlist_id INTEGER NOT NULL,
+          track_id INTEGER NOT NULL,
+          position INTEGER DEFAULT 0,
+          FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+          FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+        );
+        INSERT INTO playlist_tracks (playlist_id, track_id, position)
+        SELECT playlist_id, track_id, position FROM playlist_tracks_old ORDER BY playlist_id ASC, position ASC;
+        DROP TABLE playlist_tracks_old;
+        CREATE INDEX IF NOT EXISTS idx_playlist_tracks_pid ON playlist_tracks(playlist_id, position);
+      `);
     }
     const dCols = db.prepare("PRAGMA table_info('devices')").all() as { name: string }[];
     if (!dCols.some((c) => c.name === 'transport_mode')) {

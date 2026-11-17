@@ -167,6 +167,7 @@ export interface PlaylistRow {
   ai_mode?: 'standard' | 'smart' | null;
   egenius_seed_track_id?: number | null;
   egenius_mode?: 'hits' | 'balanced' | 'deep' | null;
+  egenius_scene_threshold?: number | null;
   created_at: string;
 }
 
@@ -461,6 +462,26 @@ export function initDatabase(customPath?: string): Database.Database {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS artist_genre_weights (
+      artist_key TEXT NOT NULL,
+      genre_tag TEXT NOT NULL,
+      weight REAL NOT NULL,
+      PRIMARY KEY (artist_key, genre_tag)
+    );
+    CREATE INDEX IF NOT EXISTS idx_artist_genre_tag ON artist_genre_weights(genre_tag);
+    CREATE INDEX IF NOT EXISTS idx_artist_genre_key ON artist_genre_weights(artist_key);
+
+    CREATE TABLE IF NOT EXISTS subgenre_affinity_matrix (
+      genre_x TEXT NOT NULL,
+      genre_y TEXT NOT NULL,
+      similarity REAL NOT NULL,
+      is_user_locked INTEGER DEFAULT 0,
+      updated_at INTEGER DEFAULT 0,
+      PRIMARY KEY (genre_x, genre_y)
+    );
+    CREATE INDEX IF NOT EXISTS idx_subgenre_matrix_x ON subgenre_affinity_matrix(genre_x);
+    CREATE INDEX IF NOT EXISTS idx_subgenre_matrix_y ON subgenre_affinity_matrix(genre_y);
+
     CREATE TABLE IF NOT EXISTS books (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       remote_nfs_path TEXT UNIQUE NOT NULL,
@@ -604,6 +625,9 @@ export function initDatabase(customPath?: string): Database.Database {
     }
     if (!pCols.some((c) => c.name === 'egenius_mode')) {
       db.exec('ALTER TABLE playlists ADD COLUMN egenius_mode TEXT');
+    }
+    if (!pCols.some((c) => c.name === 'egenius_scene_threshold')) {
+      db.exec('ALTER TABLE playlists ADD COLUMN egenius_scene_threshold REAL DEFAULT 0.55');
     }
     const dCols = db.prepare("PRAGMA table_info('devices')").all() as { name: string }[];
     if (!dCols.some((c) => c.name === 'transport_mode')) {

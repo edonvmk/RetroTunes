@@ -48,6 +48,7 @@ export interface MixRequest {
   seedTrackId: number;
   limit?: 25 | 50;
   mode?: MixDepthMode;
+  sceneThreshold?: number;
   excludeTrackIds?: number[];
   offlineOnly?: boolean;
 }
@@ -73,6 +74,7 @@ export interface MixResult {
   seedTrack: TrackRow;
   seedVariant: VariantType;
   mode: MixDepthMode;
+  sceneThreshold: number;
   limit: 25 | 50;
   tracks: TrackRow[];
   scored: ScoredCandidate[];

@@ -10,10 +10,12 @@ import {
   X,
   RefreshCw,
   Usb,
+  Grid,
 } from 'lucide-react';
 import { AppSettings, AuthState, ConnectionTestResult, NetworkShareRow } from '../types';
 import { invokeRpc, isDevMode } from '../bridge';
 import { FossCreditsContent } from './AboutCreditsModal';
+import { GenreMapTab } from './GenreMapTab';
 
 const COMING_SOON_TOOLTIP =
   'Coming soon — rTunes is currently focused on direct network shares, local media, and USB/MTP ePod syncing.';
@@ -31,6 +33,7 @@ interface PreferencesModalProps {
   onOpenNewSmartPlaylist?: () => void;
   onRescanLibrary?: () => void;
   onDevicesChanged?: () => void;
+  initialTab?: 'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'genreMap' | 'actions' | 'about';
 }
 
 export const PreferencesModal: React.FC<PreferencesModalProps> = ({
@@ -46,8 +49,9 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   onOpenNewSmartPlaylist,
   onRescanLibrary,
   onDevicesChanged,
+  initialTab,
 }) => {
-  const [tab, setTab] = useState<'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'actions' | 'about'>('paths');
+  const [tab, setTab] = useState<'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'genreMap' | 'actions' | 'about'>(initialTab || 'paths');
   const [registeredDevices, setRegisteredDevices] = useState<any[]>([]);
   const [binaryStatus, setBinaryStatus] = useState<any>(null);
   const [checkingBinaries, setCheckingBinaries] = useState(false);
@@ -217,7 +221,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     <div className="aqua-modal-backdrop" onClick={onClose}>
       <div
         className="aqua-window"
-        style={{ width: 780, maxWidth: '94vw' }}
+        style={{ width: 860, maxWidth: '95vw' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="aqua-window-titlebar">
@@ -232,10 +236,11 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
           style={{
             display: 'flex',
             justifyContent: 'center',
-            gap: 12,
+            gap: 8,
+            flexWrap: 'wrap',
             background: 'linear-gradient(180deg, #d7dde6 0%, #c1c9d6 100%)',
             borderBottom: '1px solid #8a94a4',
-            padding: '8px 16px',
+            padding: '8px 14px',
           }}
         >
           {[
@@ -245,6 +250,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             { id: 'cache', label: 'Cache & Transcoder', icon: <HardDrive size={18} /> },
             { id: 'auth', label: isDev ? 'Authentik SSO [DEV]' : 'Authentik SSO', icon: <ShieldCheck size={18} /> },
             { id: 'apis', label: 'Store & API Keys', icon: <KeyRound size={18} /> },
+            { id: 'genreMap', label: 'Genre Map', icon: <Grid size={18} /> },
             { id: 'actions', label: 'Actions & Help', icon: <Activity size={18} /> },
             { id: 'about', label: 'About & Credits', icon: <Info size={18} /> },
           ].map((item) => (
@@ -1468,6 +1474,8 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
               </div>
             </div>
           )}
+
+          {tab === 'genreMap' && <GenreMapTab />}
 
           {tab === 'actions' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

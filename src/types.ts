@@ -182,6 +182,7 @@ export interface PlaylistRow {
   ai_mode?: 'standard' | 'smart' | null;
   egenius_seed_track_id?: number | null;
   egenius_mode?: 'hits' | 'balanced' | 'deep' | null;
+  egenius_scene_threshold?: number | null;
   created_at: string;
   trackCount?: number;
   audioCount?: number;
@@ -219,7 +220,8 @@ export type SmartField =
   | 'has_lyrics'
   | 'has_artwork'
   | 'is_unplayed'
-  | 'is_hd_audio';
+  | 'is_hd_audio'
+  | 'artist_scene_affinity';
 
 export type SmartOperator =
   | 'is'
@@ -257,6 +259,7 @@ export interface SmartRule {
   operator: SmartOperator;
   value: string | number;
   valueTo?: string | number;
+  sceneGenre?: string;
 }
 
 export interface SmartRuleGroup {

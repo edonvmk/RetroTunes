@@ -17,7 +17,7 @@ interface SmartPlaylistModalProps {
   onSaved: (playlistId: number) => void;
 }
 
-type FieldKind = 'text' | 'number' | 'boolean' | 'rating' | 'date';
+type FieldKind = 'text' | 'number' | 'boolean' | 'rating' | 'date' | 'scene';
 
 interface FieldSpec {
   value: SmartField;
@@ -33,6 +33,7 @@ const FIELD_SPECS: FieldSpec[] = [
   { value: 'album', label: 'Album', kind: 'text', hasSuggestions: true },
   { value: 'album_artist', label: 'Album Artist', kind: 'text', hasSuggestions: true },
   { value: 'genre', label: 'Genre', kind: 'text', hasSuggestions: true },
+  { value: 'artist_scene_affinity', label: 'Artist Scene [Subgenre]', kind: 'scene', hasSuggestions: true },
   { value: 'format', label: 'Kind', kind: 'text', hasSuggestions: true },
   { value: 'year', label: 'Year', kind: 'number', hasSuggestions: true },
   { value: 'local_star_rating', label: 'Rating', kind: 'rating' },
@@ -111,6 +112,10 @@ function getOperatorsForKind(kind: FieldKind): { value: SmartOperator; label: st
       return BOOLEAN_OPERATORS;
     case 'date':
       return DATE_OPERATORS;
+    case 'scene':
+      return NUMBER_OPERATORS.filter((o) =>
+        ['gte', 'lte', 'gt', 'lt', 'between'].includes(o.value)
+      );
     case 'rating':
     case 'number':
     default:
@@ -352,6 +357,46 @@ export const SmartPlaylistModal: React.FC<SmartPlaylistModalProps> = ({
       );
     }
 
+    if (spec.kind === 'scene') {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+          <div style={{ flex: 1, minWidth: 110 }}>
+            <AutocompleteValueInput
+              field="artist_scene_affinity"
+              value={rule.sceneGenre ?? 'emo'}
+              placeholder="Subgenre (e.g. emo)"
+              onChange={(val) => updateRule({ sceneGenre: val })}
+            />
+          </div>
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.005}
+            className="aqua-input"
+            style={{ width: 78 }}
+            value={rule.value}
+            onChange={(e) => updateRule({ value: e.target.value })}
+          />
+          {rule.operator === 'between' && (
+            <>
+              <span>to</span>
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.005}
+                className="aqua-input"
+                style={{ width: 78 }}
+                value={rule.valueTo ?? 1}
+                onChange={(e) => updateRule({ valueTo: e.target.value })}
+              />
+            </>
+          )}
+        </div>
+      );
+    }
+
     if (spec.kind === 'date') {
       const isRelativeDays = rule.operator === 'in_last' || rule.operator === 'not_in_last';
       if (isRelativeDays) {
@@ -565,6 +610,8 @@ export const SmartPlaylistModal: React.FC<SmartPlaylistModalProps> = ({
                         ? 4
                         : nextSpec.kind === 'date'
                         ? 30
+                        : nextSpec.kind === 'scene'
+                        ? 0.55
                         : nextSpec.kind === 'number'
                         ? nextField === 'year'
                           ? 2000
@@ -574,6 +621,10 @@ export const SmartPlaylistModal: React.FC<SmartPlaylistModalProps> = ({
                       field: nextField,
                       operator: defaultOp,
                       value: nextSpec.kind !== spec.kind ? defaultVal : rule.value,
+                      sceneGenre:
+                        nextSpec.kind === 'scene'
+                          ? rule.sceneGenre || 'emo'
+                          : rule.sceneGenre,
                     });
                   }}
                 >

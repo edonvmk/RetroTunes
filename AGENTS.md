@@ -21,6 +21,7 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
     - `AddDeviceWizardModal.tsx` — Provisioning wizard for new UMS/MTP devices.
     - `SmartPlaylistModal.tsx` — Rule builder for dynamic Smart Playlists.
     - `StorefrontView.tsx` — **rTunes Store**, Multi-Source Top Charts, and live `*arr` Downloads Queue.
+    - `GenreMapTab.tsx` — ECU-style 2D Subgenre Adjacency Matrix heatmap editor, cell trim/lock controls, and Live Artist Scene Tester (hosted inside **Prefs -> Genre Map**).
     - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import.
     - `DiagnosticsModal.tsx` — Live `> Logs` viewer and JSON diagnostic export.
 - `electron/` (compiles to `dist-electron/`) — **Electron Main Process (TypeScript)**
@@ -54,13 +55,13 @@ Do **not** duplicate existing handlers. Always reuse or extend the existing chan
 - **Extended Media & Sync:** `books:list`, `audiobooks:list`, `photos:list`, `musicVideos:list`, `media:syncPlexAndAbs`
 - **Indexer:** `indexer:scan`, `indexer:cancel`, `indexer:progress`, `indexer:syncPopularity`, `indexer:recalculateMedians`, `indexer:cleanAllTitles`, `indexer:scanExtended`
 - **Cache:** `cache:stats`, `cache:clear`, `cache:toggleTrack`, `cache:toggleAlbum`, `cache:toggleVideo`, `cache:toggleShow`, `cache:precacheAllPlaylists`, `transcoder:getBinaryStatus`, `transcoder:checkUpdateBinaries`
-- **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`, `playlists:getExclusions`, `playlists:ignoreTrack`, `playlists:excludeTrackGlobally`, `playlists:restoreExclusion`
+- **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`, `playlists:getExclusions`, `playlists:ignoreTrack`, `playlists:excludeTrackGlobally`, `playlists:restoreExclusion`, `egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`, `genreMatrix:get`, `genreMatrix:rebuild`, `genreMatrix:setCell`, `genreMatrix:resetCell`, `genreMatrix:testArtists`
 - **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`, `devices:getCatalog`, `devices:removeItem`
 - **Shares & Upload:** `shares:list`, `shares:save`, `shares:delete`, `shares:mount`, `shares:unmount`, `shares:autoDetect`, `upload:searchMetadata`, `upload:previewPlan`, `upload:execute`
 - **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `auth:getState`, `auth:login`, `auth:logout`
 
 ### SQLite Schema (`electron/db.ts`)
-Core tables: `tracks`, `tracks_fts` (FTS5), `videos`, `videos_fts` (FTS5), `playlists`, `playlist_tracks`, `playlist_videos`, `smart_playlist_exclusions`, `devices`, `cache_jobs`, `settings`, `network_shares`, `device_play_state`, `books`, `audiobooks`, `photos`.
+Core tables: `tracks`, `tracks_fts` (FTS5), `videos`, `videos_fts` (FTS5), `playlists`, `playlist_tracks`, `playlist_videos`, `smart_playlist_exclusions`, `devices`, `cache_jobs`, `settings`, `network_shares`, `device_play_state`, `books`, `audiobooks`, `photos`, `artist_affinity_cache`, `track_affinity_cache`, `artist_genre_weights`, `subgenre_affinity_matrix`.
 
 ---
 
@@ -152,13 +153,13 @@ Any commit that adds:
   - `0%` to `50%` is strictly for downloading the GGUF file to `app.getPath('userData')/models/` (if already cached on disk, skip immediately to `50%`).
   - `50%` to `100%` is strictly for loading the GGUF weights into RAM/VRAM and creating the inference context.
   - Provide a working **Cancel** button (`AbortController`) during download/load and always dispose of the model and context (`context.dispose()`, `model.dispose()`) when the modal closes or cancels.
-- **Single-Purpose Scope:** The AI agent's sole job is interviewing the user and assembling playlists from owned tracks using structured tool calls (`search_local_catalog`, `discover_via_lastfm`, `lookup_musicbrainz`, `ask_user_followup`, `finalize_playlist`)—never dump the entire 95k+ track library into the prompt context.
+- **Single-Purpose Scope:** The AI agent's sole job is interviewing the user and assembling playlists from owned tracks using structured tool calls (`search_local_catalog`, `query_by_scene_matrix`, `discover_via_lastfm`, `lookup_musicbrainz`, `ask_user_followup`, `finalize_playlist`)—never dump the entire 95k+ track library into the prompt context.
 
 ---
 
 ## 11. `eGenius` Similarity Playlist Engine (`electron/egenius/`)
 
-- **Modular Headless Architecture:** `eGenius` lives in `electron/egenius/` (`index.ts`, `types.ts`, `affinityCache.ts`, `variantFilter.ts`, `scorer.ts`, `sequencer.ts`) with zero `BrowserWindow` dependencies, usable both via Electron IPC (`egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`) and via CLI (`npm run cli -- playlist egenius --track-id <id> [--limit 25|50] [--mode hits|balanced|deep]`).
+- **Modular Headless Architecture:** `eGenius` lives in `electron/egenius/` (`index.ts`, `types.ts`, `affinityCache.ts`, `genreMatrix.ts`, `variantFilter.ts`, `scorer.ts`, `sequencer.ts`) with zero `BrowserWindow` dependencies, usable both via Electron IPC (`egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`) and via CLI (`npm run cli -- playlist egenius --track-id <id> [--limit 25|50] [--mode hits|balanced|deep]`).
 - **30-Day SQLite Affinity Cache:** `artist_affinity_cache` and `track_affinity_cache` store Last.fm `artist.getSimilar`, `artist.getTopTags`, and `track.getSimilar` responses with a 30-day TTL so mixes generate in `<150ms` and fall back gracefully to local genre, release era, and `Rel. Score` when offline.
 - **Five-Signal Scoring & Variant Parity:** Composite score weights Crowd Co-Listening Graph (35%, Hop-1 + Hop-2 bridges), Micro-Genre Folksonomy Tags (25%), Release Era Proximity (15%, $\pm 6$ yr Gaussian), `Rel. Score` Depth Matching (15%, `hits` / `balanced` / `deep`), and Strict Variant Parity & Interlude Filtering (10%, penalizing/excluding `instrumental`, `acoustic`, `live`, `remix_demo`, and `< 90s` skits for `studio_vocal` seeds).
 - **Anti-Clumping Sequencing:** Enforces max 2 seed-artist tracks & max 1 track per other artist in 25-track mode (max 2 per artist & max 1 per album in 50-track mode), an 8-track sliding-window artist cooldown, and weighted temperature sampling from the top 120 scored candidates.
@@ -173,3 +174,11 @@ Any commit that adds:
   - `artist_relative_popularity_score` (`Rel. Score`, `0.0–100.0`): Logarithmic sigmoid mapping `combined_global_plays / smoothedMedian` (`50.0` at median, `70.0–100.0` for hits, `0.0–35.0` for deep cuts).
   - `artist_rarity_multiplier` (`Rarity Mult.`, `0.10x–10.00x`): Inverted logarithmic artist popularity multiplier.
   - `discovery_score` (`Final Score`, `0.0–1000.0`): `ROUND(artist_relative_popularity_score * artist_rarity_multiplier, 1)`.
+
+---
+
+## 13. 2D Subgenre Adjacency Matrix ("Genre Map") & Artist Scene Scoring (`electron/egenius/genreMatrix.ts`)
+
+- **Strict Artist-Level Anchoring:** Artist scene weights in `artist_genre_weights` (`artist_key`, `genre_tag`, `weight` `0.000–1.000`, top 8 tags per artist) are derived strictly from artist-level Last.fm `artist.getTopTags`, MusicBrainz tags, artist-majority local ID3 `genre` tokens, and artist-level scene priors—**never** from track titles or single-song quirks.
+- **Sparse Symmetric $N \times N$ Crossover Matrix (`subgenre_affinity_matrix`):** Maps normalized subgenre pairs `(genre_x, genre_y)` onto `0.000–1.000` (`ROUND(val, 3)`), blending 65% same-artist co-occurrence cosine similarity and 35% co-listening graph bridges (preserving cells where `is_user_locked = 1` and self-pairs `1.000`).
+- **Artist Scene Resolution & Integrations:** `getArtistSceneScore(artistKey, targetGenre)` computes a confidence-weighted top-3 match across `subgenre_affinity_matrix`, powering `eGenius` Signal #2 (`Scene Crossover` `0.800` / `0.550` / `0.350`), Smart Playlist `artist_scene_affinity` rules (`Artist Scene [Subgenre] >= / <=`), AI `query_by_scene_matrix` calls, the **Prefs → Genre Map** ECU cell editor (`GenreMapTab.tsx`), and CLI (`npm run cli -- db rebuild-genre-matrix`, `npm run cli -- genre-map --genre <name>`).

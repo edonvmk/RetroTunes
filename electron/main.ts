@@ -87,6 +87,11 @@ import {
   generateMix as generateEGeniusMix,
   refreshMix as refreshEGeniusMix,
   explainTrack as explainEGeniusTrack,
+  getGenreMatrixData,
+  rebuildGenreMatrix,
+  setGenreMatrixCell,
+  resetGenreMatrixCell,
+  testArtistsAgainstGenre,
   MixDepthMode,
 } from './egenius';
 import {
@@ -483,20 +488,21 @@ function registerAllHandlers() {
   });
   registerChannel(
     'egenius:createPlaylist',
-    async (payload: { trackId: number; limit?: 25 | 50; mode?: MixDepthMode }) => {
+    async (payload: { trackId: number; limit?: 25 | 50; mode?: MixDepthMode; sceneThreshold?: number }) => {
       const db = getDb();
       const mix = await generateEGeniusMix({
         seedTrackId: payload.trackId,
         limit: payload.limit === 50 ? 50 : 25,
         mode: payload.mode || 'balanced',
+        sceneThreshold: payload.sceneThreshold ?? 0.55,
       });
       const plName = `eGenius: ${mix.seedTrack.title}`;
       const res = db
         .prepare(
-          `INSERT INTO playlists (name, is_smart, media_type, limit_type, limit_value, track_limit, selection_method, egenius_seed_track_id, egenius_mode)
-           VALUES (?, 0, 'music', 'tracks', ?, ?, 'egenius', ?, ?)`
+          `INSERT INTO playlists (name, is_smart, media_type, limit_type, limit_value, track_limit, selection_method, egenius_seed_track_id, egenius_mode, egenius_scene_threshold)
+           VALUES (?, 0, 'music', 'tracks', ?, ?, 'egenius', ?, ?, ?)`
         )
-        .run(plName, mix.limit, mix.limit, mix.seedTrack.id, mix.mode);
+        .run(plName, mix.limit, mix.limit, mix.seedTrack.id, mix.mode, mix.sceneThreshold);
       const newId = Number(res.lastInsertRowid);
       const ins = db.prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)');
       const tx = db.transaction(() => {
@@ -508,10 +514,11 @@ function registerAllHandlers() {
   );
   registerChannel(
     'egenius:refreshPlaylist',
-    async (payload: { playlistId: number; limit?: 25 | 50; mode?: MixDepthMode }) => {
+    async (payload: { playlistId: number; limit?: 25 | 50; mode?: MixDepthMode; sceneThreshold?: number }) => {
       const mix = await refreshEGeniusMix(payload.playlistId, {
         limit: payload.limit,
         mode: payload.mode,
+        sceneThreshold: payload.sceneThreshold,
       });
       return { playlistId: payload.playlistId, mix };
     }
@@ -527,6 +534,27 @@ function registerAllHandlers() {
     'egenius:explainTrack',
     (payload: { seedTrackId: number; candidateTrackId: number; mode?: MixDepthMode }) =>
       explainEGeniusTrack(payload.seedTrackId, payload.candidateTrackId, payload.mode || 'balanced')
+  );
+  registerChannel('genreMatrix:get', (options?: { search?: string; limit?: number }) =>
+    getGenreMatrixData(options || {})
+  );
+  registerChannel('genreMatrix:rebuild', () => rebuildGenreMatrix());
+  registerChannel(
+    'genreMatrix:setCell',
+    (payload: { genreX: string; genreY: string; similarity: number; isLocked: boolean }) =>
+      setGenreMatrixCell(payload.genreX, payload.genreY, payload.similarity, payload.isLocked)
+  );
+  registerChannel('genreMatrix:resetCell', (payload: { genreX: string; genreY: string }) =>
+    resetGenreMatrixCell(payload.genreX, payload.genreY)
+  );
+  registerChannel(
+    'genreMatrix:testArtists',
+    (payload: { targetGenre: string; artistQuery?: string; minScore?: number; limit?: number }) =>
+      testArtistsAgainstGenre(payload.targetGenre, {
+        artistQuery: payload.artistQuery,
+        minScore: payload.minScore,
+        limit: payload.limit,
+      })
   );
   registerChannel('playlists:delete', (playlistId: number) => {
     const db = getDb();

@@ -14,7 +14,13 @@ import { deduplicateLibraryTracks, runLibraryScan, syncListenBrainzPopularity } 
 import { getCacheStats } from './cacheTranscoder';
 import { getArrLiveQueue } from './storeArr';
 import { standaloneLocalProvider } from './providers/standaloneLocal';
-import { generateMix, MixDepthMode } from './egenius';
+import {
+  generateMix,
+  MixDepthMode,
+  normalizeGenreTag,
+  rebuildGenreMatrix,
+  testArtistsAgainstGenre,
+} from './egenius';
 
 function parseArgs(argv: string[]) {
   const flags: Record<string, string | boolean> = {};
@@ -346,6 +352,51 @@ async function main() {
       initDatabase();
       const res = deduplicateLibraryTracks();
       out({ ok: true, ...res }, asJson);
+      process.exitCode = 0;
+      return;
+    }
+    if (group === 'db' && sub === 'rebuild-genre-matrix') {
+      initDatabase();
+      const res = rebuildGenreMatrix();
+      out({ ok: true, ...res }, asJson);
+      process.exitCode = 0;
+      return;
+    }
+    if (group === 'genre-map') {
+      initDatabase();
+      const genreRaw = typeof flags.genre === 'string' ? flags.genre : '';
+      if (!genreRaw.trim()) {
+        console.error('Usage: npm run cli -- genre-map --genre <name> [--min 0.550] [--artist <name>] [--json]');
+        process.exitCode = 1;
+        return;
+      }
+      const targetGenre = normalizeGenreTag(genreRaw) || genreRaw.trim().toLowerCase();
+      const minScore = typeof flags.min === 'string' ? Number(flags.min) : 0.55;
+      const artistQuery = typeof flags.artist === 'string' ? flags.artist : '';
+      const db = getDb();
+      const matrixCells = db
+        .prepare(
+          `SELECT genre_x as genreX, genre_y as genreY, similarity, is_user_locked as isUserLocked
+           FROM subgenre_affinity_matrix
+           WHERE genre_x = ? AND similarity >= ?
+           ORDER BY similarity DESC`
+        )
+        .all(targetGenre, minScore) as { genreX: string; genreY: string; similarity: number; isUserLocked: number }[];
+      const matchingArtists = testArtistsAgainstGenre(targetGenre, {
+        artistQuery,
+        minScore: artistQuery ? 0 : minScore,
+        limit: 50,
+      });
+      out(
+        {
+          ok: true,
+          genre: targetGenre,
+          minScore,
+          adjacentSubgenres: matrixCells,
+          matchingArtists,
+        },
+        asJson
+      );
       process.exitCode = 0;
       return;
     }

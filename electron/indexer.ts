@@ -8,6 +8,7 @@ import { BrowserWindow } from 'electron';
 import { getDb, recalculateArtistPopularityScores, TrackRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
+import { rebuildGenreMatrix } from './egenius/genreMatrix';
 import {
   buildTrackMatchKey,
   extractCanonicalMediaSubpath,
@@ -874,6 +875,9 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
     // Scan extended media sections (Music Videos, Books, Audiobooks, Photos)
     await scanExtendedMediaSections();
 
+    // Rebuild 2D Subgenre Adjacency Matrix from updated artist tags
+    rebuildGenreMatrix();
+
     // Kick off gentle background metadata trickle if hybrid mode is enabled
     if (settings.metadataHydrationMode === 'hybrid' && !cancelRequested) {
       void startBackgroundMetadataTrickle();
@@ -1454,6 +1458,7 @@ export async function syncListenBrainzPopularity(options: {
   }
 
   const norm = recalculateArtistPopularityScores();
+  rebuildGenreMatrix();
 
   broadcastProgress(
     {

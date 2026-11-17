@@ -4,6 +4,7 @@ import { SmartRuleGroup, TrackRow } from '../types';
 export interface PlaylistToolDefinition {
   name:
     | 'search_local_catalog'
+    | 'query_by_scene_matrix'
     | 'discover_via_lastfm'
     | 'lookup_musicbrainz'
     | 'ask_user_followup'
@@ -36,6 +37,22 @@ export const PLAYLIST_TOOL_DEFINITIONS: PlaylistToolDefinition[] = [
         },
         limit: { type: 'number', description: 'Max rows to return (default 25, max 60)' },
       },
+    },
+  },
+  {
+    name: 'query_by_scene_matrix',
+    description:
+      'Queries artists using the 2D Subgenre Adjacency Matrix (0.000-1.000 artist-level scene scores) and returns owned tracks matching target_genre while optionally excluding an unwanted scene.',
+    parameters: {
+      type: 'object',
+      properties: {
+        target_genre: { type: 'string', description: 'Target subgenre or scene (e.g. emo, post-hardcore, metalcore)' },
+        min_affinity: { type: 'number', description: 'Minimum artist scene affinity 0.000-1.000 (default 0.550)' },
+        max_exclude_genre: { type: 'string', description: 'Optional subgenre to exclude (e.g. post-grunge, country)' },
+        max_exclude_affinity: { type: 'number', description: 'Max allowed score for excluded genre (default 0.250)' },
+        limit: { type: 'number', description: 'Max tracks to return (default 25, max 60)' },
+      },
+      required: ['target_genre'],
     },
   },
   {

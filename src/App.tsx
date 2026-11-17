@@ -266,6 +266,7 @@ export const App: React.FC = () => {
 
   // Modals & Drag-and-Drop Playlist state
   const [showPreferences, setShowPreferences] = useState(false);
+  const [prefsInitialTab, setPrefsInitialTab] = useState<'paths' | 'genreMap'>('paths');
   const [showAbout, setShowAbout] = useState(false);
   const [showSmartModal, setShowSmartModal] = useState(false);
   const [showAiPlaylistModal, setShowAiPlaylistModal] = useState(false);
@@ -2109,6 +2110,51 @@ export const App: React.FC = () => {
                                   </button>
                                 ))}
                               </div>
+                              <div style={{ display: 'inline-flex', gap: 3, alignItems: 'center' }}>
+                                {(
+                                  [
+                                    { label: 'Strict 0.80', threshold: 0.8 },
+                                    { label: 'Scene 0.55', threshold: 0.55 },
+                                    { label: 'Wide 0.35', threshold: 0.35 },
+                                  ] as const
+                                ).map((sc) => {
+                                  const activeTh = pl.egenius_scene_threshold ?? 0.55;
+                                  const isSel = Math.abs(activeTh - sc.threshold) < 0.05;
+                                  return (
+                                    <button
+                                      key={sc.label}
+                                      className={`aqua-btn ${isSel ? 'primary' : ''}`}
+                                      style={{ padding: '1px 7px', fontSize: 11 }}
+                                      onClick={async () => {
+                                        const res = await invokeRpc<{
+                                          playlistId: number;
+                                          mix: { tracks: TrackRow[]; distinctArtists: number };
+                                        }>('egenius:refreshPlaylist', {
+                                          playlistId: pl.id,
+                                          limit: pl.limit_value === 50 ? 50 : 25,
+                                          mode: pl.egenius_mode || 'balanced',
+                                          sceneThreshold: sc.threshold,
+                                        });
+                                        setPlaylistTracks(res.mix.tracks);
+                                        await refreshAllData();
+                                        showToast(`eGenius "${sc.label}" crossover (${res.mix.distinctArtists} artists).`);
+                                      }}
+                                    >
+                                      {sc.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <button
+                                className="aqua-btn"
+                                style={{ padding: '1px 8px' }}
+                                onClick={() => {
+                                  setPrefsInitialTab('genreMap');
+                                  setShowPreferences(true);
+                                }}
+                              >
+                                Genre Map
+                              </button>
                               <button
                                 className="aqua-btn"
                                 style={{ padding: '1px 8px', color: '#1d4ed8' }}
@@ -4604,7 +4650,11 @@ export const App: React.FC = () => {
         <PreferencesModal
           settings={settings}
           authState={authState}
-          onClose={() => setShowPreferences(false)}
+          initialTab={prefsInitialTab}
+          onClose={() => {
+            setShowPreferences(false);
+            setPrefsInitialTab('paths');
+          }}
           onSaved={(updated) => {
             setSettings(updated);
             void refreshAllData();

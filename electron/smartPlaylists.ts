@@ -1,6 +1,7 @@
 import path from 'path';
 import { getDb, PlaylistRow, TrackRow, VideoRow } from './db';
 import { logger } from './logger';
+import { getMatchingArtistsForSceneFilter, listAllMatrixGenres } from './egenius/genreMatrix';
 
 export type SmartField =
   | 'title'
@@ -33,7 +34,8 @@ export type SmartField =
   | 'has_lyrics'
   | 'has_artwork'
   | 'is_unplayed'
-  | 'is_hd_audio';
+  | 'is_hd_audio'
+  | 'artist_scene_affinity';
 
 export type SmartOperator =
   | 'is'
@@ -71,6 +73,7 @@ export interface SmartRule {
   operator: SmartOperator;
   value: string | number;
   valueTo?: string | number;
+  sceneGenre?: string;
 }
 
 export interface SmartRuleGroup {
@@ -116,9 +119,15 @@ const ALLOWED_FIELDS: Record<SmartField, 'text' | 'number' | 'date'> = {
   has_artwork: 'number',
   is_unplayed: 'number',
   is_hd_audio: 'number',
+  artist_scene_affinity: 'number',
 };
 
 export function getDistinctSmartFieldValues(field: SmartField, search = ''): string[] {
+  if (field === 'artist_scene_affinity') {
+    const q = search.trim().toLowerCase();
+    const all = listAllMatrixGenres();
+    return (q ? all.filter((g) => g.toLowerCase().includes(q)) : all).slice(0, 200);
+  }
   const allowedCols = new Set<SmartField>([
     'genre',
     'artist',
@@ -187,6 +196,31 @@ function compileCondition(node: SmartRule | SmartRuleGroup, params: unknown[]): 
   const rule = node as SmartRule;
   const fieldType = ALLOWED_FIELDS[rule.field];
   if (!fieldType) return '1=1';
+
+  if (rule.field === 'artist_scene_affinity') {
+    let targetGenre = (rule.sceneGenre || '').trim();
+    let numericThreshold = Number(rule.value ?? 0.55);
+    if (!targetGenre && typeof rule.value === 'string' && rule.value.includes(':')) {
+      const [gPart, vPart] = rule.value.split(':');
+      targetGenre = gPart.trim();
+      numericThreshold = Number(vPart ?? 0.55);
+    }
+    if (!targetGenre) targetGenre = 'emo';
+    if (!Number.isFinite(numericThreshold)) numericThreshold = 0.55;
+    const numericHi = rule.valueTo !== undefined ? Number(rule.valueTo) : undefined;
+    const { matchedArtistsLower, isNegated } = getMatchingArtistsForSceneFilter(
+      targetGenre,
+      rule.operator,
+      numericThreshold,
+      Number.isFinite(numericHi) ? numericHi : undefined
+    );
+    if (matchedArtistsLower.length === 0) {
+      return isNegated ? '1=1' : '1=0';
+    }
+    const placeholders = matchedArtistsLower.map(() => '?').join(',');
+    for (const a of matchedArtistsLower) params.push(a);
+    return isNegated ? `LOWER(TRIM(artist)) NOT IN (${placeholders})` : `LOWER(TRIM(artist)) IN (${placeholders})`;
+  }
 
   const col = getColumnExpr(rule.field);
   const val = fieldType === 'number' ? Number(rule.value || 0) : String(rule.value ?? '');

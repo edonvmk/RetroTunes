@@ -7,6 +7,7 @@ import { MixDepthMode, MixRequest, MixResult, TrackExplanation } from './types';
 
 export * from './types';
 export { classifyVariant, isInterludeOrSkit } from './variantFilter';
+export * from './genreMatrix';
 
 export async function generateMix(req: MixRequest): Promise<MixResult> {
   const start = Date.now();
@@ -21,12 +22,17 @@ export async function generateMix(req: MixRequest): Promise<MixResult> {
   const limit: 25 | 50 = req.limit === 50 ? 50 : 25;
   const mode: MixDepthMode =
     req.mode === 'hits' || req.mode === 'deep' ? req.mode : 'balanced';
+  const sceneThreshold =
+    typeof req.sceneThreshold === 'number' && Number.isFinite(req.sceneThreshold)
+      ? Math.max(0.1, Math.min(0.95, req.sceneThreshold))
+      : 0.55;
 
   const gathered = await gatherAndScoreCandidates(
     seedTrack,
     mode,
     req.excludeTrackIds || [],
-    Boolean(req.offlineOnly)
+    Boolean(req.offlineOnly),
+    sceneThreshold
   );
 
   const { tracks, scored } = sequenceMix(seedTrack, gathered.candidates, limit);
@@ -52,6 +58,7 @@ export async function generateMix(req: MixRequest): Promise<MixResult> {
     seedTrack,
     seedVariant: gathered.seedVariant,
     mode,
+    sceneThreshold,
     limit,
     tracks,
     scored,
@@ -65,7 +72,7 @@ export async function generateMix(req: MixRequest): Promise<MixResult> {
 
 export async function refreshMix(
   playlistId: number,
-  overrides: { limit?: 25 | 50; mode?: MixDepthMode } = {}
+  overrides: { limit?: 25 | 50; mode?: MixDepthMode; sceneThreshold?: number } = {}
 ): Promise<MixResult> {
   const db = getDb();
   const pl = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
@@ -75,6 +82,7 @@ export async function refreshMix(
         limit_value: number | null;
         egenius_seed_track_id: number | null;
         egenius_mode: MixDepthMode | null;
+        egenius_scene_threshold: number | null;
       }
     | undefined;
 
@@ -86,20 +94,24 @@ export async function refreshMix(
     overrides.limit === 50 || (!overrides.limit && pl.limit_value === 50) ? 50 : 25;
   const mode: MixDepthMode =
     overrides.mode || (pl.egenius_mode === 'hits' || pl.egenius_mode === 'deep' ? pl.egenius_mode : 'balanced');
+  const sceneThreshold =
+    typeof overrides.sceneThreshold === 'number'
+      ? overrides.sceneThreshold
+      : typeof pl.egenius_scene_threshold === 'number'
+      ? pl.egenius_scene_threshold
+      : 0.55;
 
   const mix = await generateMix({
     seedTrackId: pl.egenius_seed_track_id,
     limit,
     mode,
+    sceneThreshold,
   });
 
   const tx = db.transaction(() => {
-    db.prepare('UPDATE playlists SET limit_value = ?, track_limit = ?, egenius_mode = ? WHERE id = ?').run(
-      limit,
-      limit,
-      mode,
-      playlistId
-    );
+    db.prepare(
+      'UPDATE playlists SET limit_value = ?, track_limit = ?, egenius_mode = ?, egenius_scene_threshold = ? WHERE id = ?'
+    ).run(limit, limit, mode, sceneThreshold, playlistId);
     db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?').run(playlistId);
     const ins = db.prepare('INSERT INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)');
     mix.tracks.forEach((t, idx) => ins.run(playlistId, t.id, idx + 1));

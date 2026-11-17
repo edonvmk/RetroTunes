@@ -7,6 +7,11 @@ import { getSettings } from '../settings';
 import { logger } from '../logger';
 import { platformDriver } from '../platform';
 import { evaluateSmartPlaylist, SmartRule, SmartRuleGroup } from '../smartPlaylists';
+import {
+  listAllMatrixGenres,
+  normalizeGenreTag,
+  testArtistsAgainstGenre,
+} from '../egenius/genreMatrix';
 
 export interface AiPrepareProgress {
   modelId: string;
@@ -500,6 +505,72 @@ function queryLocalCatalogTool(args: {
   return compactTrackRows(rows);
 }
 
+function queryBySceneMatrixTool(args: {
+  target_genre: string;
+  min_affinity?: number;
+  max_exclude_genre?: string;
+  max_exclude_affinity?: number;
+  exclude_track_ids?: number[];
+  limit?: number;
+}) {
+  const db = getDb();
+  const limit = Math.max(1, Math.min(60, Number(args.limit) || 25));
+  const minAffinity = Number.isFinite(Number(args.min_affinity)) ? Number(args.min_affinity) : 0.55;
+  const excludeSet = new Set<number>(args.exclude_track_ids || []);
+
+  const candidates = testArtistsAgainstGenre(args.target_genre, {
+    minScore: minAffinity,
+    limit: 120,
+  });
+
+  let blockedArtists = new Set<string>();
+  if (args.max_exclude_genre && args.max_exclude_genre.trim()) {
+    const maxEx = Number.isFinite(Number(args.max_exclude_affinity))
+      ? Number(args.max_exclude_affinity)
+      : 0.25;
+    const exScored = testArtistsAgainstGenre(args.max_exclude_genre, {
+      minScore: maxEx,
+      limit: 200,
+    });
+    blockedArtists = new Set(exScored.map((a) => a.artistKey));
+  }
+
+  const allowedArtists = candidates
+    .filter((a) => !blockedArtists.has(a.artistKey))
+    .map((a) => a.artistKey);
+
+  if (allowedArtists.length === 0) {
+    return [];
+  }
+
+  const placeholders = allowedArtists.slice(0, 80).map(() => '?').join(',');
+  const rawRows = db
+    .prepare(
+      `SELECT * FROM tracks
+       WHERE LOWER(TRIM(artist)) IN (${placeholders})
+         AND COALESCE(exclude_from_smart_playlists, 0) = 0
+       ORDER BY is_loved DESC, discovery_score DESC, artist_relative_popularity_score DESC
+       LIMIT ?`
+    )
+    .all(...allowedArtists.slice(0, 80), limit * 4) as TrackRow[];
+
+  // Cap tracks per artist to ensure diverse scene coverage
+  const picked: TrackRow[] = [];
+  const perArtist = new Map<string, number>();
+  for (const r of rawRows) {
+    if (excludeSet.has(r.id)) continue;
+    const ak = r.artist.trim().toLowerCase();
+    const c = perArtist.get(ak) || 0;
+    if (c >= 2) continue;
+    perArtist.set(ak, c + 1);
+    picked.push(r);
+    sessionCollectedTracks.set(r.id, r);
+    if (picked.length >= limit) break;
+  }
+
+  return compactTrackRows(picked);
+}
+
 export function rerunAiStandardPlaylist(prompt: string, excludeTrackIds: number[] = [], limit = 25): TrackRow[] {
   const db = getDb();
   sessionCollectedTracks.clear();
@@ -760,37 +831,104 @@ function buildSmartRulesFromPrompt(
     });
   }
 
-  const keywords = combined
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length >= 3 && !STOP_WORDS.has(w) && !/^(19|20)?[0-9]0s$/.test(w))
-    .filter((w) => !['smart', 'loved', 'favorite', 'favorites', 'lossless', 'flac', 'stars', 'star'].includes(w));
+  const matrixGenres = listAllMatrixGenres().sort((a, b) => b.length - a.length);
+  const excludeClauseMatch = combined.match(/\b(?:without|no|exclude|excluding|not)\s+([a-z0-9\-\s]{3,40})/i);
+  const excludeSegment = excludeClauseMatch ? excludeClauseMatch[1].toLowerCase() : '';
+  const includeSegment = excludeClauseMatch
+    ? combined.slice(0, excludeClauseMatch.index).toLowerCase()
+    : combined.toLowerCase();
 
-  const uniqueKeywords = Array.from(new Set(keywords)).slice(0, 3);
-  if (uniqueKeywords.length > 0) {
-    if (uniqueKeywords.length === 1) {
-      conditions.push({
-        id: `ai-kw-0`,
-        type: 'rule',
-        field: 'genre',
-        operator: 'contains',
-        value: uniqueKeywords[0],
-      });
-    } else {
-      conditions.push({
-        id: `ai-kw-group`,
-        type: 'group',
-        match: 'ANY',
-        conditions: uniqueKeywords.map((kw, i) => ({
-          id: `ai-kw-${i}`,
-          type: 'rule' as const,
-          field: 'genre',
-          operator: 'contains' as const,
-          value: kw,
-        })),
-      });
+  const matchedIncludeGenres: string[] = [];
+  let scanInc = includeSegment;
+  for (const g of matrixGenres) {
+    const escaped = g.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(`\\b${escaped}\\b`, 'i');
+    if (re.test(scanInc)) {
+      matchedIncludeGenres.push(g);
+      scanInc = scanInc.replace(re, ' ');
     }
+  }
+
+  const matchedExcludeGenres: string[] = [];
+  if (excludeSegment) {
+    let scanExc = excludeSegment;
+    for (const g of matrixGenres) {
+      const escaped = g.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`\\b${escaped}\\b`, 'i');
+      if (re.test(scanExc)) {
+        matchedExcludeGenres.push(g);
+        scanExc = scanExc.replace(re, ' ');
+      }
+    }
+  }
+
+  if (matchedIncludeGenres.length === 1) {
+    conditions.push({
+      id: `ai-scene-inc-0`,
+      type: 'rule',
+      field: 'artist_scene_affinity',
+      operator: 'gte',
+      sceneGenre: normalizeGenreTag(matchedIncludeGenres[0]) || matchedIncludeGenres[0],
+      value: 0.55,
+    });
+  } else if (matchedIncludeGenres.length > 1) {
+    conditions.push({
+      id: `ai-scene-inc-group`,
+      type: 'group',
+      match: 'ANY',
+      conditions: matchedIncludeGenres.slice(0, 4).map((g, i) => ({
+        id: `ai-scene-inc-${i}`,
+        type: 'rule' as const,
+        field: 'artist_scene_affinity' as const,
+        operator: 'gte' as const,
+        sceneGenre: normalizeGenreTag(g) || g,
+        value: 0.55,
+      })),
+    });
+  } else {
+    const keywords = combined
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !STOP_WORDS.has(w) && !/^(19|20)?[0-9]0s$/.test(w))
+      .filter((w) => !['smart', 'loved', 'favorite', 'favorites', 'lossless', 'flac', 'stars', 'star'].includes(w));
+
+    const uniqueKeywords = Array.from(new Set(keywords)).slice(0, 3);
+    if (uniqueKeywords.length > 0) {
+      if (uniqueKeywords.length === 1) {
+        conditions.push({
+          id: `ai-kw-0`,
+          type: 'rule',
+          field: 'genre',
+          operator: 'contains',
+          value: uniqueKeywords[0],
+        });
+      } else {
+        conditions.push({
+          id: `ai-kw-group`,
+          type: 'group',
+          match: 'ANY',
+          conditions: uniqueKeywords.map((kw, i) => ({
+            id: `ai-kw-${i}`,
+            type: 'rule' as const,
+            field: 'genre',
+            operator: 'contains' as const,
+            value: kw,
+          })),
+        });
+      }
+    }
+  }
+
+  for (const [i, exGenre] of matchedExcludeGenres.slice(0, 3).entries()) {
+    conditions.push({
+      id: `ai-scene-exc-${i}`,
+      type: 'rule',
+      field: 'artist_scene_affinity',
+      operator: 'lte',
+      sceneGenre: normalizeGenreTag(exGenre) || exGenre,
+      value: 0.15,
+    });
   }
 
   if (/\b(with\s+lyrics|has\s+lyrics|karaoke)\b/i.test(combined)) {
@@ -890,7 +1028,7 @@ export async function runAiAgentTurn(input: {
       systemPrompt: [
         'You are the RetroTunes AI Playlist Generator.',
         'Your sole job is interviewing the user and assembling playlists exclusively from owned tracks in their SQLite library.',
-        'Never invent track IDs. Always use search_local_catalog, discover_via_lastfm, or lookup_musicbrainz to find owned track IDs.',
+        'Never invent track IDs. Always use query_by_scene_matrix, search_local_catalog, discover_via_lastfm, or lookup_musicbrainz to find owned track IDs.',
         'If the user prompt is broad or missing mood/energy/length, call ask_user_followup with 2-4 clickable options.',
         'Once you have enough owned tracks, call finalize_playlist with the validated track_ids.',
       ].join(' '),
@@ -926,6 +1064,25 @@ export async function runAiAgentTurn(input: {
           };
         }
         return queryLocalCatalogTool({ ...args, exclude_track_ids: globalExcluded });
+      },
+    }),
+    query_by_scene_matrix: defineChatSessionFunction({
+      description:
+        'Query owned artists & tracks using the 2D Subgenre Adjacency Matrix (0.000-1.000 scene affinity) with optional excluded subgenre.',
+      params: {
+        type: 'object',
+        properties: {
+          target_genre: { type: 'string' },
+          min_affinity: { type: 'number' },
+          max_exclude_genre: { type: 'string' },
+          max_exclude_affinity: { type: 'number' },
+          limit: { type: 'number' },
+        },
+        required: ['target_genre'],
+      },
+      handler: async (args: any) => {
+        logger.info('SYSTEM', 'AI tool: query_by_scene_matrix', { args });
+        return queryBySceneMatrixTool({ ...args, exclude_track_ids: globalExcluded });
       },
     }),
     discover_via_lastfm: defineChatSessionFunction({

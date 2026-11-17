@@ -14,6 +14,7 @@ import {
   VariantType,
 } from './types';
 import { classifyVariant, evaluateVariantParity } from './variantFilter';
+import { computeArtistSceneSimilarity, loadFullMatrixLookupMap } from './genreMatrix';
 
 const WEIGHT_GRAPH = 0.35;
 const WEIGHT_TAGS = 0.25;
@@ -108,7 +109,8 @@ export async function gatherAndScoreCandidates(
   seedTrack: TrackRow,
   mode: MixDepthMode,
   excludeTrackIds: number[] = [],
-  offlineOnly = false
+  offlineOnly = false,
+  sceneThreshold = 0.55
 ): Promise<GatherAndScoreResult> {
   const db = getDb();
   const seedVariant = classifyVariant(seedTrack);
@@ -221,7 +223,9 @@ export async function gatherAndScoreCandidates(
     }
   }
 
-  // Score all candidates
+  // Score all candidates using subgenre_affinity_matrix for Signal #2
+  const matrixLookup = loadFullMatrixLookupMap();
+  const artistSceneScoreCache = new Map<string, number>();
   const scored: ScoredCandidate[] = [];
   let hop1Count = 0;
   let hop2Count = 0;
@@ -251,9 +255,34 @@ export async function gatherAndScoreCandidates(
       hop2Count++;
     }
 
-    const candAff = readCachedArtistAffinity(cand.artist);
-    const candTagMap = buildTagMap(candAff?.topTags || [], cand.genre);
-    const tagScore = computeWeightedJaccard(seedTagMap, candTagMap);
+    let matrixSim = artistSceneScoreCache.get(candArtistKey);
+    if (matrixSim === undefined) {
+      matrixSim = computeArtistSceneSimilarity(
+        seedTrack.artist,
+        cand.artist,
+        seedTrack.genre,
+        cand.genre,
+        matrixLookup
+      );
+      if (matrixSim <= 0) {
+        const candAff = readCachedArtistAffinity(cand.artist);
+        const candTagMap = buildTagMap(candAff?.topTags || [], cand.genre);
+        matrixSim = computeWeightedJaccard(seedTagMap, candTagMap);
+      }
+      artistSceneScoreCache.set(candArtistKey, matrixSim);
+    }
+    const tagScore = matrixSim;
+
+    // Scene Crossover Threshold enforcement: penalize or gate out-of-scene cross-genre drift
+    const minGate = Math.max(0.1, sceneThreshold * 0.65);
+    const sceneCohesionMult =
+      candArtistKey === seedArtistKey || directTrackMatch > 0
+        ? 1.0
+        : tagScore >= sceneThreshold
+        ? 1.1
+        : tagScore >= minGate
+        ? 0.85
+        : 0.35;
 
     const eraScore = computeEraScore(seedTrack.year, cand.year);
     const relDepthScore = computeRelDepthScore(
@@ -275,14 +304,14 @@ export async function gatherAndScoreCandidates(
         ? Math.min(1.18, 1.0 + Math.max(0, (cand.artist_rarity_multiplier || 1.0) - 1.0) * 0.025 + ((cand.discovery_score || 0) / 1000) * 0.08)
         : 1.0;
     const loveBoost = cand.is_loved ? 1.08 : (cand.local_star_rating || 0) >= 4 ? 1.04 : 1.0;
-    const compositeScore = rawComposite * parity.parityMultiplier * loveBoost * rarityBonus;
+    const compositeScore = rawComposite * parity.parityMultiplier * loveBoost * rarityBonus * sceneCohesionMult;
 
     const reasons: string[] = [];
     if (directTrackMatch > 0) reasons.push(`Direct track affinity (${Math.round(directTrackMatch * 100)}%)`);
     else if (hopLevel === 1) reasons.push('Hop-1 similar artist');
     else if (hopLevel === 2) reasons.push('Hop-2 scene bridge');
     else reasons.push('Local genre/era match');
-    if (tagScore >= 0.25) reasons.push(`Tag overlap (${Math.round(tagScore * 100)}%)`);
+    if (tagScore >= 0.25) reasons.push(`Scene matrix (${tagScore.toFixed(3)})`);
     if (eraScore >= 0.75 && cand.year) reasons.push(`Era match (${cand.year})`);
     reasons.push(parity.reason);
 

@@ -1,4 +1,5 @@
 import { getDb } from '../db';
+import { getSettings } from '../settings';
 import { logger } from '../logger';
 import { normalizeArtistKey } from './affinityCache';
 import { SimilarArtistEntry, TagWeight } from './types';
@@ -21,7 +22,12 @@ export interface GenreMatrixPayload {
   genres: MatrixGenreSummary[];
   cells: MatrixCell[];
   totalArtistsWeighted: number;
+  totalLibraryArtists: number;
+  totalGenresIndexed: number;
   totalCellsStored: number;
+  hasLastfmApiKey: boolean;
+  genreMapUseLastfm: boolean;
+  genreMapLastfmWeight: number;
 }
 
 export interface ArtistSceneScoreResult {
@@ -32,11 +38,40 @@ export interface ArtistSceneScoreResult {
   topTags: { tag: string; weight: number; matrixSim: number; contribution: number }[];
 }
 
+export interface ArtistSliceEntry {
+  artistKey: string;
+  artistName: string;
+  sceneScore: number;
+  topTags: { tag: string; weight: number }[];
+}
+
+export interface ArtistSimilaritySlicePayload {
+  targetGenre: string;
+  minThreshold: number;
+  effectiveLastfmWeight: number;
+  hasLastfmApiKey: boolean;
+  totalMatchedArtists: number;
+  artists: ArtistSliceEntry[];
+  localMatrix: number[][];
+  lastfmMatrix: number[][];
+  combinedMatrix: number[][];
+  elapsedMs: number;
+}
+
+export interface RebuildGenreMatrixOptions {
+  useLastfm?: boolean;
+  lastfmWeight?: number; // 0..100
+  resetStuckMetadata?: boolean;
+}
+
 export interface RebuildGenreMatrixResult {
   artistsWeighted: number;
+  totalLibraryArtists: number;
+  taggedArtists: number;
   genresIndexed: number;
   cellsStored: number;
   lockedCellsPreserved: number;
+  effectiveLastfmWeight: number;
   elapsedMs: number;
 }
 
@@ -50,12 +85,6 @@ const NOISE_TAGS = new Set([
   'awesome',
   'love',
   'loved',
-  'cool',
-  'best',
-  'good',
-  'great',
-  'under 2000 listeners',
-  'under 5000 listeners',
   'check out',
   'to listen',
   'female vocalists',
@@ -79,7 +108,52 @@ const NOISE_TAGS = new Set([
   'album',
   'albums',
   'all',
+  'untagged',
 ]);
+
+const ID3V1_GENRE_CODES: Record<string, string> = {
+  '0': 'blues',
+  '1': 'classic rock',
+  '2': 'country',
+  '3': 'dance',
+  '4': 'disco',
+  '5': 'funk',
+  '6': 'grunge',
+  '7': 'hip hop',
+  '8': 'jazz',
+  '9': 'metal',
+  '13': 'pop',
+  '14': 'r&b',
+  '15': 'rap',
+  '16': 'reggae',
+  '17': 'rock',
+  '18': 'techno',
+  '19': 'industrial',
+  '20': 'alternative rock',
+  '21': 'ska',
+  '22': 'death metal',
+  '24': 'soundtrack',
+  '26': 'ambient',
+  '27': 'trip hop',
+  '32': 'classical',
+  '37': 'soundtrack',
+  '40': 'alternative rock',
+  '42': 'soul',
+  '43': 'punk',
+  '52': 'electronic',
+  '79': 'hard rock',
+  '80': 'folk',
+  '81': 'folk rock',
+  '91': 'gothic rock',
+  '92': 'progressive rock',
+  '93': 'psychedelic rock',
+  '121': 'punk rock',
+  '131': 'indie rock',
+  '137': 'heavy metal',
+  '138': 'black metal',
+  '141': 'christian rock',
+  '144': 'thrash metal',
+};
 
 const TAG_ALIASES: Record<string, string> = {
   emocore: 'emo',
@@ -101,25 +175,23 @@ const TAG_ALIASES: Record<string, string> = {
   numetal: 'nu metal',
   'hip-hop': 'hip hop',
   hiphop: 'hip hop',
-  'rap rock': 'rap metal',
-  'r&b': 'rnb',
-  'r and b': 'rnb',
+  rnb: 'r&b',
+  'r and b': 'r&b',
+  'alternative rnb': 'alternative r&b',
+  'melodic death': 'melodic death metal',
+  melodeath: 'melodic death metal',
+  nintendocore: 'electronicore',
+  'alt-country': 'alt country',
+  'alternative country': 'alt country',
   'synth-pop': 'synthpop',
   'indie-rock': 'indie rock',
   'indie-pop': 'indie pop',
-  'alt-country': 'alt country',
-  'alternative country': 'alt country',
   'death-metal': 'death metal',
-  'melodic death': 'melodic death metal',
-  melodeath: 'melodic death metal',
-  'melodic metalcore': 'metalcore',
-  'nintendocore': 'electronicore',
 };
 
 /**
- * Curated artist-level scene priors used only when an artist has no online Last.fm
- * affinity tags and no informative non-generic local ID3 genre tags.
- * Anchored strictly to artist identity — never track titles.
+ * Curated artist-level scene priors used ONLY when an artist has neither
+ * cached Last.fm tags nor informative local ID3 genre tags.
  */
 const ARTIST_SCENE_FALLBACKS: Record<string, Record<string, number>> = {
   'attack attack!': {
@@ -255,11 +327,63 @@ const ARTIST_SCENE_FALLBACKS: Record<string, Record<string, number>> = {
     'alternative rock': 0.7,
     emo: 0.58,
   },
+  'blink‐182': {
+    'pop punk': 0.98,
+    'skate punk': 0.82,
+    'alternative rock': 0.7,
+    emo: 0.58,
+  },
   'sum 41': {
     'pop punk': 0.94,
     'skate punk': 0.84,
     'alternative metal': 0.62,
     punk: 0.76,
+  },
+  'new found glory': {
+    'pop punk': 0.96,
+    easycore: 0.78,
+    emo: 0.7,
+    'skate punk': 0.75,
+  },
+  'the offspring': {
+    'punk rock': 0.94,
+    'skate punk': 0.86,
+    'pop punk': 0.76,
+    'alternative rock': 0.7,
+  },
+  nofx: {
+    'punk rock': 0.96,
+    'skate punk': 0.94,
+    'melodic hardcore': 0.76,
+    punk: 0.9,
+  },
+  'less than jake': {
+    'ska punk': 0.95,
+    ska: 0.88,
+    'pop punk': 0.78,
+    'punk rock': 0.82,
+  },
+  'the bouncing souls': {
+    'punk rock': 0.95,
+    punk: 0.92,
+    'skate punk': 0.76,
+  },
+  ramones: {
+    punk: 0.98,
+    'punk rock': 0.96,
+    rock: 0.65,
+  },
+  weezer: {
+    'alternative rock': 0.94,
+    'power pop': 0.86,
+    'indie rock': 0.78,
+    emo: 0.62,
+  },
+  'foo fighters': {
+    'alternative rock': 0.95,
+    'post-grunge': 0.82,
+    'hard rock': 0.8,
+    rock: 0.78,
   },
   seether: {
     'post-grunge': 0.96,
@@ -326,61 +450,72 @@ const ARTIST_SCENE_FALLBACKS: Record<string, Record<string, number>> = {
     'alternative metal': 0.82,
     'christian rock': 0.85,
   },
-  'avenged sevenfold': {
-    'heavy metal': 0.92,
-    metalcore: 0.76,
-    'hard rock': 0.84,
-    metal: 0.86,
-  },
-  'killswitch engage': {
-    metalcore: 0.98,
-    metal: 0.85,
-    'heavy metal': 0.72,
-  },
-  'all that remains': {
-    metalcore: 0.96,
-    'melodic death metal': 0.7,
-    metal: 0.82,
-  },
-  'august burns red': {
-    metalcore: 0.98,
-    'post-hardcore': 0.62,
-    metal: 0.84,
-  },
-  'parkway drive': {
-    metalcore: 0.98,
-    metal: 0.86,
-    'hardcore punk': 0.65,
-  },
   'bring me the horizon': {
-    metalcore: 0.86,
+    metalcore: 0.88,
     'post-hardcore': 0.84,
     electronicore: 0.74,
     'alternative rock': 0.76,
+    'alternative metal': 0.82,
   },
-  'bullet for my valentine': {
-    metalcore: 0.92,
-    'heavy metal': 0.84,
-    'hard rock': 0.72,
+  'bring me the horizon (2)': {
+    metalcore: 0.88,
+    'post-hardcore': 0.84,
+    electronicore: 0.74,
+    'alternative rock': 0.76,
+    'alternative metal': 0.82,
   },
-  trivium: {
-    metalcore: 0.92,
-    'thrash metal': 0.82,
-    'heavy metal': 0.85,
+  'electric callboy (2)': {
+    electronicore: 0.96,
+    metalcore: 0.88,
+    'post-hardcore': 0.74,
+    crabcore: 0.72,
+  },
+  metallica: {
+    'thrash metal': 0.96,
+    'heavy metal': 0.95,
+    metal: 0.94,
+    'hard rock': 0.74,
+  },
+  'black sabbath': {
+    'heavy metal': 0.98,
+    metal: 0.95,
+    'hard rock': 0.84,
+    'classic rock': 0.76,
+  },
+  'ozzy osbourne': {
+    'heavy metal': 0.96,
+    'hard rock': 0.88,
+    metal: 0.9,
+    'classic rock': 0.72,
+  },
+  'judas priest': {
+    'heavy metal': 0.98,
+    metal: 0.94,
+    'hard rock': 0.78,
+  },
+  sabaton: {
+    'power metal': 0.98,
+    'heavy metal': 0.9,
+    metal: 0.88,
+  },
+  eminem: {
+    'hip hop': 0.96,
+    rap: 0.96,
+    'hardcore hip hop': 0.82,
   },
   'johnny cash': {
     country: 0.98,
-    'outlaw country': 0.92,
+    'outlaw country': 0.94,
     americana: 0.86,
-    folk: 0.7,
+    folk: 0.72,
   },
   'morgan wallen': {
     country: 0.98,
-    'country pop': 0.84,
+    'country pop': 0.86,
   },
   'luke combs': {
     country: 0.98,
-    'country rock': 0.74,
+    'country rock': 0.76,
   },
   'chris stapleton': {
     country: 0.95,
@@ -394,14 +529,71 @@ const ARTIST_SCENE_FALLBACKS: Record<string, Record<string, number>> = {
     'alt country': 0.85,
     folk: 0.74,
   },
+  'pink floyd': {
+    'progressive rock': 0.98,
+    'psychedelic rock': 0.92,
+    'classic rock': 0.88,
+    'art rock': 0.86,
+  },
+  'the beatles': {
+    'classic rock': 0.96,
+    rock: 0.9,
+    pop: 0.82,
+    'psychedelic rock': 0.76,
+  },
+  'the rolling stones': {
+    'classic rock': 0.98,
+    'blues rock': 0.86,
+    rock: 0.92,
+  },
+  'led zeppelin': {
+    'classic rock': 0.98,
+    'hard rock': 0.94,
+    'blues rock': 0.88,
+  },
+  'deep purple': {
+    'hard rock': 0.96,
+    'classic rock': 0.92,
+    'heavy metal': 0.76,
+  },
+  'fleetwood mac': {
+    'classic rock': 0.96,
+    'soft rock': 0.88,
+    'pop rock': 0.82,
+  },
+  'neil young': {
+    'classic rock': 0.92,
+    'folk rock': 0.9,
+    folk: 0.82,
+    country: 0.56,
+  },
+  'bob dylan': {
+    folk: 0.95,
+    'folk rock': 0.92,
+    'classic rock': 0.86,
+    americana: 0.78,
+  },
+  'the cure': {
+    'post-punk': 0.94,
+    'gothic rock': 0.9,
+    'new wave': 0.86,
+    'alternative rock': 0.78,
+  },
+  prince: {
+    funk: 0.94,
+    pop: 0.9,
+    'r&b': 0.88,
+    rock: 0.62,
+  },
+  'elton john': {
+    'classic rock': 0.92,
+    'pop rock': 0.88,
+    'soft rock': 0.82,
+    pop: 0.8,
+  },
 };
 
-/**
- * Symmetric musicological co-occurrence / co-listening priors (`0.000` - `1.000`)
- * representing scene bridges before/beyond sparse online Last.fm caches.
- */
 const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
-  // Emo / Post-Hardcore / Crabcore / Pop Punk / Metalcore constellation
   ['emo', 'post-hardcore', 0.805],
   ['emo', 'pop punk', 0.81],
   ['emo', 'emo pop', 0.86],
@@ -439,13 +631,11 @@ const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
   ['crabcore', 'easycore', 0.74],
   ['crabcore', 'pop punk', 0.54],
   ['crabcore', 'post-grunge', 0.16],
-  ['crabcore', 'country', 0.0],
 
   ['electronicore', 'metalcore', 0.83],
   ['electronicore', 'screamo', 0.72],
   ['electronicore', 'easycore', 0.68],
   ['electronicore', 'electronic', 0.58],
-  ['electronicore', 'country', 0.0],
 
   ['easycore', 'pop punk', 0.885],
   ['easycore', 'metalcore', 0.76],
@@ -460,6 +650,7 @@ const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
   ['pop punk', 'alternative rock', 0.66],
   ['pop punk', 'pop rock', 0.68],
   ['pop punk', 'power pop', 0.71],
+  ['pop punk', 'ska punk', 0.74],
 
   ['metalcore', 'screamo', 0.74],
   ['metalcore', 'melodic death metal', 0.71],
@@ -471,9 +662,7 @@ const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
   ['metalcore', 'metal', 0.74],
   ['metalcore', 'nu metal', 0.56],
   ['metalcore', 'post-grunge', 0.34],
-  ['metalcore', 'country', 0.0],
 
-  // Post-grunge / Alternative Metal / Hard Rock / Nu Metal / Grunge
   ['post-grunge', 'alternative metal', 0.82],
   ['post-grunge', 'hard rock', 0.845],
   ['post-grunge', 'alternative rock', 0.775],
@@ -489,7 +678,6 @@ const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
   ['alternative metal', 'metal', 0.75],
   ['alternative metal', 'alternative rock', 0.71],
   ['alternative metal', 'grunge', 0.62],
-  ['alternative metal', 'country', 0.0],
 
   ['hard rock', 'rock', 0.82],
   ['hard rock', 'heavy metal', 0.76],
@@ -506,34 +694,34 @@ const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
   ['alternative rock', 'pop rock', 0.67],
   ['alternative rock', 'punk rock', 0.62],
   ['alternative rock', 'post-punk', 0.65],
-  ['alternative rock', 'country', 0.01],
 
   ['grunge', 'rock', 0.72],
   ['grunge', 'punk', 0.58],
-  ['grunge', 'country', 0.0],
 
   ['punk', 'punk rock', 0.92],
   ['punk', 'hardcore punk', 0.86],
   ['punk', 'skate punk', 0.88],
   ['punk', 'melodic hardcore', 0.82],
+  ['punk', 'ska punk', 0.78],
   ['punk', 'rock', 0.62],
   ['punk rock', 'skate punk', 0.87],
   ['punk rock', 'hardcore punk', 0.81],
   ['punk rock', 'melodic hardcore', 0.82],
+  ['punk rock', 'ska punk', 0.79],
+  ['ska punk', 'ska', 0.88],
   ['hardcore punk', 'melodic hardcore', 0.85],
 
-  // Metal spectrum
   ['metal', 'heavy metal', 0.91],
   ['metal', 'thrash metal', 0.85],
+  ['metal', 'power metal', 0.82],
   ['metal', 'death metal', 0.82],
   ['metal', 'melodic death metal', 0.83],
-  ['metal', 'groove metal', 0.8],
   ['heavy metal', 'thrash metal', 0.84],
+  ['heavy metal', 'power metal', 0.81],
   ['heavy metal', 'classic rock', 0.58],
   ['death metal', 'melodic death metal', 0.84],
   ['death metal', 'deathcore', 0.78],
 
-  // Country / Americana / Folk / Southern Rock
   ['country', 'outlaw country', 0.89],
   ['country', 'alt country', 0.84],
   ['country', 'country pop', 0.86],
@@ -547,16 +735,24 @@ const SCENE_CROSSOVER_PRIORS: [string, string, number][] = [
   ['americana', 'southern rock', 0.71],
   ['classic rock', 'southern rock', 0.74],
   ['classic rock', 'blues rock', 0.81],
+  ['classic rock', 'folk rock', 0.76],
+  ['classic rock', 'progressive rock', 0.72],
+  ['classic rock', 'psychedelic rock', 0.74],
+  ['classic rock', 'soft rock', 0.75],
   ['blues', 'blues rock', 0.86],
 
-  // Hip Hop / Pop / Electronic / R&B
   ['hip hop', 'rap', 0.94],
+  ['hip hop', 'gangsta rap', 0.88],
+  ['hip hop', 'hardcore hip hop', 0.89],
+  ['hip hop', 'boom bap', 0.87],
   ['hip hop', 'trap', 0.85],
-  ['hip hop', 'rnb', 0.71],
+  ['hip hop', 'r&b', 0.71],
+  ['rap', 'gangsta rap', 0.9],
+  ['rap', 'hardcore hip hop', 0.89],
   ['pop', 'pop rock', 0.78],
   ['pop', 'synthpop', 0.79],
   ['pop', 'indie pop', 0.76],
-  ['pop', 'rnb', 0.67],
+  ['pop', 'r&b', 0.67],
   ['electronic', 'synthpop', 0.79],
   ['electronic', 'edm', 0.86],
   ['electronic', 'house', 0.84],
@@ -575,6 +771,10 @@ function getScenePrior(gx: string, gy: string): number | null {
   return PRIOR_LOOKUP.get(`${gx}|||${gy}`) ?? null;
 }
 
+function round3(val: number): number {
+  return Math.round(Math.max(0, Math.min(1, val)) * 1000) / 1000;
+}
+
 export function normalizeGenreTag(raw?: string | null): string | null {
   if (!raw) return null;
   let cleaned = raw
@@ -583,6 +783,12 @@ export function normalizeGenreTag(raw?: string | null): string | null {
     .replace(/[_]+/g, ' ')
     .replace(/\s+/g, ' ');
   if (!cleaned || cleaned.length < 2) return null;
+
+  if (ID3V1_GENRE_CODES[cleaned]) {
+    cleaned = ID3V1_GENRE_CODES[cleaned];
+  } else if (/^\d+$/.test(cleaned)) {
+    return null;
+  }
 
   if (/^(19\d\d|20\d\d|'\d\d|\d{1,2}0s|\d{4}s)$/.test(cleaned)) {
     return null;
@@ -597,41 +803,41 @@ export function normalizeGenreTag(raw?: string | null): string | null {
 function splitLocalGenreField(genreField?: string | null): string[] {
   if (!genreField) return [];
   const parts = genreField
-    .split(/[;,/|&]+/)
+    .split(/[;,/|]+/)
     .map((p) => normalizeGenreTag(p))
     .filter((p): p is string => Boolean(p));
   return Array.from(new Set(parts));
 }
 
-function round3(val: number): number {
-  return Math.round(Math.max(0, Math.min(1, val)) * 1000) / 1000;
-}
+function resolveEffectiveLastfmWeight(options?: {
+  useLastfm?: boolean;
+  lastfmWeight?: number;
+}): { effectiveWeight: number; hasApiKey: boolean } {
+  const settings = getSettings();
+  const hasApiKey = Boolean(settings.lastfmApiKey && settings.lastfmApiKey.trim().length > 0);
+  const weightOverrideProvided = typeof options?.lastfmWeight === 'number' && Number.isFinite(options.lastfmWeight);
 
-function buildArtistFallbackTagMap(artistName: string, localGenreField?: string | null): Map<string, number> {
-  const key = normalizeArtistKey(artistName);
-  const out = new Map<string, number>();
-
-  const curated = ARTIST_SCENE_FALLBACKS[key];
-  const localTags = splitLocalGenreField(localGenreField);
-  const nonGenericLocal = localTags.filter((t) => t !== 'rock' && t !== 'pop' && t !== 'music');
-
-  if (nonGenericLocal.length > 0) {
-    const step = 1 / Math.max(1, nonGenericLocal.length);
-    nonGenericLocal.forEach((tag, idx) => {
-      out.set(tag, Math.max(out.get(tag) || 0, round3(Math.max(0.45, 0.95 - idx * step * 0.45))));
-    });
-  } else if (curated) {
-    for (const [tag, weight] of Object.entries(curated)) {
-      const norm = normalizeGenreTag(tag);
-      if (norm) out.set(norm, round3(weight));
-    }
-  } else if (localTags.length > 0) {
-    for (const tag of localTags) {
-      out.set(tag, 0.75);
-    }
+  if (!hasApiKey && !weightOverrideProvided) {
+    return { effectiveWeight: 0, hasApiKey: false };
   }
 
-  return out;
+  const useFlag =
+    options?.useLastfm !== undefined
+      ? options.useLastfm
+      : weightOverrideProvided
+      ? (options!.lastfmWeight as number) > 0
+      : Boolean(settings.genreMapUseLastfm);
+
+  if (!useFlag) {
+    return { effectiveWeight: 0, hasApiKey };
+  }
+
+  const rawPct =
+    weightOverrideProvided
+      ? Number(options!.lastfmWeight)
+      : Number(settings.genreMapLastfmWeight ?? 20);
+  const clamped = Math.max(0, Math.min(1, (rawPct > 1 ? rawPct / 100 : rawPct) || 0));
+  return { effectiveWeight: round3(clamped), hasApiKey };
 }
 
 export function ensureGenreMatrixReady(): void {
@@ -643,26 +849,32 @@ export function ensureGenreMatrixReady(): void {
 }
 
 /**
- * Rebuilds `artist_genre_weights` and `subgenre_affinity_matrix` strictly from artist-level
- * folksonomy tags, local artist-majority ID3 genres, and co-listening graph edges.
- * Preserves any cells where `is_user_locked = 1`.
+ * Indexes 100% of library artists and genres in `tracks` + `artist_affinity_cache` into
+ * `artist_genre_weights`, then rebuilds the persistent N x N `subgenre_affinity_matrix`
+ * using Method 1 (Ochiai + Multi-Artist Reinforcement) blended with Method 2 (Last.fm Graph).
  */
-export function rebuildGenreMatrix(): RebuildGenreMatrixResult {
+export function rebuildGenreMatrix(options: RebuildGenreMatrixOptions = {}): RebuildGenreMatrixResult {
   const start = Date.now();
   const db = getDb();
 
-  // 1. Load locked matrix cells so user ECU trims are never overwritten
-  const lockedRows = db
-    .prepare(
-      'SELECT genre_x, genre_y, similarity, updated_at FROM subgenre_affinity_matrix WHERE is_user_locked = 1'
-    )
-    .all() as { genre_x: string; genre_y: string; similarity: number; updated_at: number }[];
-  const lockedKeys = new Set<string>();
-  for (const r of lockedRows) {
-    lockedKeys.add(`${r.genre_x}|||${r.genre_y}`);
+  if (options.resetStuckMetadata) {
+    db.prepare('UPDATE tracks SET metadata_loaded = 0 WHERE metadata_loaded = -1').run();
   }
 
-  // 2. Gather artist-level Last.fm tags + co-listening edges
+  const { effectiveWeight } = resolveEffectiveLastfmWeight({
+    useLastfm: options.useLastfm,
+    lastfmWeight: options.lastfmWeight,
+  });
+
+  // 1. Preserve user-locked matrix cells
+  const lockedRows = db
+    .prepare(
+      'SELECT genre_x, genre_y FROM subgenre_affinity_matrix WHERE is_user_locked = 1'
+    )
+    .all() as { genre_x: string; genre_y: string }[];
+  const lockedKeys = new Set<string>(lockedRows.map((r) => `${r.genre_x}|||${r.genre_y}`));
+
+  // 2. Load Last.fm artist folksonomy tags & co-listening similarity edges
   const affRows = db
     .prepare('SELECT artist_key, artist_name, similar_artists_json, top_tags_json FROM artist_affinity_cache')
     .all() as {
@@ -689,12 +901,12 @@ export function rebuildGenreMatrix(): RebuildGenreMatrixResult {
         for (const t of tags) {
           const norm = normalizeGenreTag(t?.name);
           if (!norm) continue;
-          const w = Math.max(0.12, Math.min(1.0, (Number(t.count) || 50) / 100));
+          const w = Math.max(0.15, Math.min(1.0, (Number(t.count) || 50) / 100));
           map.set(norm, Math.max(map.get(norm) || 0, w));
         }
       }
     } catch {
-      // ignore malformed JSON
+      // ignore
     }
     try {
       const sims = JSON.parse(row.similar_artists_json) as SimilarArtistEntry[];
@@ -706,8 +918,8 @@ export function rebuildGenreMatrix(): RebuildGenreMatrixResult {
     }
   }
 
-  // 3. Aggregate local artist-level majority ID3 genre tokens (never from track titles)
-  const localGenreStats = db
+  // 3. Scan 100% of artists and genres across all tracks in SQLite (splitting ; , / |)
+  const localRows = db
     .prepare(
       `SELECT LOWER(TRIM(artist)) as akey, genre, COUNT(*) as cnt
        FROM tracks
@@ -716,126 +928,107 @@ export function rebuildGenreMatrix(): RebuildGenreMatrixResult {
     )
     .all() as { akey: string; genre: string | null; cnt: number }[];
 
-  const localCountsByArtist = new Map<string, { counts: Map<string, number>; totalTagged: number }>();
-  const allLibraryArtistKeys = new Set<string>();
+  const localCountsByArtist = new Map<string, { counts: Map<string, number>; taggedTracks: number }>();
+  const allLibraryArtists = new Set<string>();
 
-  for (const r of localGenreStats) {
+  for (const r of localRows) {
     const ak = normalizeArtistKey(r.akey);
     if (!ak) continue;
-    allLibraryArtistKeys.add(ak);
+    allLibraryArtists.add(ak);
     const tokens = splitLocalGenreField(r.genre);
     if (tokens.length === 0) continue;
 
     let entry = localCountsByArtist.get(ak);
     if (!entry) {
-      entry = { counts: new Map<string, number>(), totalTagged: 0 };
+      entry = { counts: new Map<string, number>(), taggedTracks: 0 };
       localCountsByArtist.set(ak, entry);
     }
-    entry.totalTagged += r.cnt;
+    entry.taggedTracks += r.cnt;
     for (const tok of tokens) {
       entry.counts.set(tok, (entry.counts.get(tok) || 0) + r.cnt);
     }
   }
 
+  // Weight ALL genres associated with each artist by share of tagged tracks
   for (const [ak, entry] of localCountsByArtist.entries()) {
     let map = artistTagWeights.get(ak);
     if (!map) {
       map = new Map<string, number>();
       artistTagWeights.set(ak, map);
     }
-    const maxCount = Math.max(1, ...entry.counts.values());
+    const denom = Math.max(1, entry.taggedTracks);
     for (const [tag, cnt] of entry.counts.entries()) {
-      const ratio = cnt / maxCount;
-      const localWeight = tag === 'rock' && entry.counts.size > 1 ? ratio * 0.45 : Math.max(0.25, ratio * 0.92);
-      // Last.fm artist folksonomy retains slight precedence if both exist
-      map.set(tag, Math.max(map.get(tag) || 0, localWeight));
+      const share = cnt / denom;
+      const w = Math.max(0.15, Math.min(1.0, share));
+      map.set(tag, Math.max(map.get(tag) || 0, w));
     }
   }
 
-  // Apply artist-level scene fallback for known scene artists lacking non-generic tags
-  for (const ak of allLibraryArtistKeys) {
-    const curated = ARTIST_SCENE_FALLBACKS[ak];
-    if (!curated) continue;
+  // Ensure every library artist without hydrated tags checks artist-level fallback priors or is indexed as 'untagged'
+  let taggedArtists = 0;
+  for (const ak of allLibraryArtists) {
     let map = artistTagWeights.get(ak);
     if (!map) {
       map = new Map<string, number>();
       artistTagWeights.set(ak, map);
     }
-    const nonGenericCount = Array.from(map.keys()).filter((k) => k !== 'rock' && k !== 'pop').length;
-    if (nonGenericCount === 0) {
+    const nonGeneric = Array.from(map.keys()).filter((k) => k !== 'rock' && k !== 'pop' && k !== 'untagged');
+    const curated = ARTIST_SCENE_FALLBACKS[ak] || ARTIST_SCENE_FALLBACKS[ak.replace(/\s*\(\d+\)$/, '')];
+    if (nonGeneric.length === 0 && curated) {
       for (const [tag, weight] of Object.entries(curated)) {
         const norm = normalizeGenreTag(tag);
         if (norm) map.set(norm, Math.max(map.get(norm) || 0, weight));
       }
     }
-  }
-
-  // Also seed curated scene artists present in ARTIST_SCENE_FALLBACKS even if not yet tagged
-  for (const [ak, curated] of Object.entries(ARTIST_SCENE_FALLBACKS)) {
-    if (!artistTagWeights.has(ak)) {
-      const m = new Map<string, number>();
-      for (const [tag, w] of Object.entries(curated)) {
-        const norm = normalizeGenreTag(tag);
-        if (norm) m.set(norm, w);
-      }
-      if (m.size > 0) artistTagWeights.set(ak, m);
+    if (map.size === 0) {
+      map.set('untagged', 0.1);
+    } else {
+      taggedArtists++;
     }
   }
 
-  // 4. Trim each artist to top 8 weighted tags (0.000 - 1.000) & compute genre popularity
+  // Keep ALL normalized genres per artist (no fixed cap)
   const finalArtistVectors = new Map<string, [string, number][]>();
   const genreTotalWeight = new Map<string, number>();
-  const genreArtistVectors = new Map<string, Map<string, number>>();
-  const genreNormSq = new Map<string, number>();
+  const genreArtistWeights = new Map<string, Map<string, number>>();
+  const allRealGenresSet = new Set<string>();
 
   for (const [ak, tagMap] of artistTagWeights.entries()) {
-    const sorted = Array.from(tagMap.entries())
+    const entries = Array.from(tagMap.entries())
       .map(([tag, w]) => [tag, round3(w)] as [string, number])
-      .filter(([, w]) => w >= 0.05)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8);
-    if (sorted.length === 0) continue;
+      .filter(([, w]) => w > 0)
+      .sort((a, b) => b[1] - a[1]);
+    if (entries.length === 0) continue;
 
-    finalArtistVectors.set(ak, sorted);
-    for (const [tag, w] of sorted) {
+    finalArtistVectors.set(ak, entries);
+    for (const [tag, w] of entries) {
+      if (tag === 'untagged') continue;
+      allRealGenresSet.add(tag);
       genreTotalWeight.set(tag, (genreTotalWeight.get(tag) || 0) + w);
-      let ga = genreArtistVectors.get(tag);
+      let ga = genreArtistWeights.get(tag);
       if (!ga) {
         ga = new Map<string, number>();
-        genreArtistVectors.set(tag, ga);
+        genreArtistWeights.set(tag, ga);
       }
       ga.set(ak, w);
-      genreNormSq.set(tag, (genreNormSq.get(tag) || 0) + w * w);
     }
   }
 
-  // Include canonical scene genres that appear in priors alongside top library subgenres (capped at 120 genres)
-  for (const [gx, gy] of SCENE_CROSSOVER_PRIORS) {
-    if (!genreTotalWeight.has(gx)) genreTotalWeight.set(gx, 0.25);
-    if (!genreTotalWeight.has(gy)) genreTotalWeight.set(gy, 0.25);
-  }
+  const allGenres = Array.from(allRealGenresSet).sort((a, b) => a.localeCompare(b));
 
-  const activeGenres = Array.from(genreTotalWeight.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 120)
-    .map(([g]) => g);
-  const activeGenreSet = new Set(activeGenres);
-
-  // 5. Compute Co-Listening Graph Bridges (35% signal) from `artist_affinity_cache`
+  // 4. Method 2 (Last.fm Graph): compute empirical genre-to-genre Last.fm transition density
   const edgeBridgeWeights = new Map<string, number>();
   const genreOutWeight = new Map<string, number>();
   for (const [ak, sims] of similarGraphEdges.entries()) {
-    const srcTags = finalArtistVectors.get(ak);
+    const srcTags = finalArtistVectors.get(ak)?.filter(([t]) => t !== 'untagged');
     if (!srcTags || srcTags.length === 0) continue;
-    for (const sim of sims.slice(0, 20)) {
+    for (const sim of sims.slice(0, 25)) {
       const dstKey = normalizeArtistKey(sim.name);
-      const dstTags = finalArtistVectors.get(dstKey);
+      const dstTags = finalArtistVectors.get(dstKey)?.filter(([t]) => t !== 'untagged');
       if (!dstTags || dstTags.length === 0) continue;
       const edgeMatch = Math.max(0.1, Number(sim.match) || 0.5);
       for (const [gx, wx] of srcTags) {
-        if (!activeGenreSet.has(gx)) continue;
         for (const [gy, wy] of dstTags) {
-          if (!activeGenreSet.has(gy)) continue;
           const contrib = edgeMatch * wx * wy;
           const k = `${gx}|||${gy}`;
           edgeBridgeWeights.set(k, (edgeBridgeWeights.get(k) || 0) + contrib);
@@ -845,68 +1038,76 @@ export function rebuildGenreMatrix(): RebuildGenreMatrixResult {
     }
   }
 
-  // 6. Compute NxN subgenre similarity cells
+  // 5. Compute sparse NxN subgenre similarity cells using Method 1 + Method 2
   const nowSec = Math.floor(Date.now() / 1000);
   const cellsToWrite: [string, string, number][] = [];
 
-  for (let i = 0; i < activeGenres.length; i++) {
-    const gx = activeGenres[i];
+  for (let i = 0; i < allGenres.length; i++) {
+    const gx = allGenres[i];
     if (!lockedKeys.has(`${gx}|||${gx}`)) {
       cellsToWrite.push([gx, gx, 1.0]);
     }
 
-    const vecX = genreArtistVectors.get(gx);
-    const normX = Math.sqrt(genreNormSq.get(gx) || 0);
+    const vecX = genreArtistWeights.get(gx);
+    const totalX = genreTotalWeight.get(gx) || 0;
 
-    for (let j = i + 1; j < activeGenres.length; j++) {
-      const gy = activeGenres[j];
+    for (let j = i + 1; j < allGenres.length; j++) {
+      const gy = allGenres[j];
+      const vecY = genreArtistWeights.get(gy);
+      const totalY = genreTotalWeight.get(gy) || 0;
 
-      // Same-Artist Co-Occurrence Cosine Similarity (65%)
-      let dot = 0;
-      const vecY = genreArtistVectors.get(gy);
-      const normY = Math.sqrt(genreNormSq.get(gy) || 0);
-      if (vecX && vecY && normX > 0 && normY > 0) {
+      // Method 1: Weighted Ochiai Co-occurrence * Multi-Artist Reinforcement Curve
+      let sharedWeightedSum = 0;
+      let sharedArtistCount = 0;
+      if (vecX && vecY && totalX > 0 && totalY > 0) {
         const [smaller, larger] = vecX.size <= vecY.size ? [vecX, vecY] : [vecY, vecX];
-        for (const [ak, wx] of smaller.entries()) {
-          const wy = larger.get(ak);
-          if (wy) dot += wx * wy;
+        for (const [ak, w1] of smaller.entries()) {
+          const w2 = larger.get(ak);
+          if (w2) {
+            sharedArtistCount++;
+            sharedWeightedSum += Math.sqrt(w1 * w2);
+          }
         }
       }
-      const cosineSim = normX > 0 && normY > 0 ? dot / (normX * normY) : 0;
+      const ochiaiSim =
+        totalX > 0 && totalY > 0 ? sharedWeightedSum / (Math.sqrt(totalX) * Math.sqrt(totalY)) : 0;
+      const supportBoost =
+        sharedArtistCount > 0 ? sharedArtistCount / (sharedArtistCount + 3.0) : 0;
+      const empiricalLocal = Math.min(1.0, ochiaiSim * supportBoost * 1.45);
+      const prior = getScenePrior(gx, gy);
 
-      // Co-Listening Graph Bridge (35%)
+      let localSim: number;
+      if (sharedArtistCount >= 4) {
+        localSim = prior !== null ? empiricalLocal * 0.72 + prior * 0.28 : empiricalLocal;
+      } else if (sharedArtistCount > 0) {
+        localSim = prior !== null ? empiricalLocal * 0.45 + prior * 0.55 : empiricalLocal;
+      } else {
+        localSim = prior !== null ? prior * 0.85 : 0;
+      }
+
+      // Method 2: Last.fm Graph Genre Bridge (0.000 - 1.000)
       const outX = genreOutWeight.get(gx) || 0;
       const outY = genreOutWeight.get(gy) || 0;
       const rawBridgeXY = outX > 0 ? (edgeBridgeWeights.get(`${gx}|||${gy}`) || 0) / outX : 0;
       const rawBridgeYX = outY > 0 ? (edgeBridgeWeights.get(`${gy}|||${gx}`) || 0) / outY : 0;
-      const graphBridge = Math.min(1, (rawBridgeXY + rawBridgeYX) * 1.8);
+      const lastfmGenreSim =
+        outX > 0 || outY > 0
+          ? Math.min(1.0, Math.sqrt(Math.max(rawBridgeXY, rawBridgeYX)) * 1.2)
+          : 0;
 
-      const empirical = cosineSim * 0.65 + graphBridge * 0.35;
-      const prior = getScenePrior(gx, gy);
-
-      let blended: number;
-      if (prior !== null) {
-        // Blend empirical library statistics with calibrated scene prior (stronger weight as empirical samples grow)
-        const hasGraphData = outX > 0 || outY > 0;
-        const empWeight = hasGraphData ? 0.55 : vecX && vecX.size >= 3 && vecY && vecY.size >= 3 ? 0.35 : 0.1;
-        blended = empirical * empWeight + prior * (1 - empWeight);
-      } else {
-        blended = empirical;
-      }
-
-      const simRounded = round3(blended);
-      if (simRounded < 0.01) continue;
+      const combined = round3((1 - effectiveWeight) * localSim + effectiveWeight * lastfmGenreSim);
+      if (combined < 0.01) continue;
 
       if (!lockedKeys.has(`${gx}|||${gy}`)) {
-        cellsToWrite.push([gx, gy, simRounded]);
+        cellsToWrite.push([gx, gy, combined]);
       }
       if (!lockedKeys.has(`${gy}|||${gx}`)) {
-        cellsToWrite.push([gy, gx, simRounded]);
+        cellsToWrite.push([gy, gx, combined]);
       }
     }
   }
 
-  // 7. Persist in a single fast SQLite transaction
+  // 6. Persist `artist_genre_weights` + `subgenre_affinity_matrix` in one fast SQLite transaction
   const insertArtistWeight = db.prepare(
     'INSERT OR REPLACE INTO artist_genre_weights (artist_key, genre_tag, weight) VALUES (?, ?, ?)'
   );
@@ -933,73 +1134,121 @@ export function rebuildGenreMatrix(): RebuildGenreMatrixResult {
   const elapsedMs = Date.now() - start;
   logger.info(
     'SMART_PLAYLIST',
-    `Rebuilt 2D Genre Matrix: ${activeGenres.length} subgenres, ${cellsToWrite.length} cells across ${finalArtistVectors.size} artists.`,
+    `Rebuilt Full-Library Genre Map: ${allGenres.length} genres, ${cellsToWrite.length} cells across ${finalArtistVectors.size} library artists (Last.fm weight ${Math.round(effectiveWeight * 100)}%).`,
     {
       artistsWeighted: finalArtistVectors.size,
-      genresIndexed: activeGenres.length,
+      totalLibraryArtists: allLibraryArtists.size,
+      taggedArtists,
+      genresIndexed: allGenres.length,
       cellsStored: cellsToWrite.length,
       lockedCellsPreserved: lockedRows.length,
+      effectiveLastfmWeight: effectiveWeight,
     },
     elapsedMs
   );
 
   return {
     artistsWeighted: finalArtistVectors.size,
-    genresIndexed: activeGenres.length,
+    totalLibraryArtists: allLibraryArtists.size,
+    taggedArtists,
+    genresIndexed: allGenres.length,
     cellsStored: cellsToWrite.length,
     lockedCellsPreserved: lockedRows.length,
+    effectiveLastfmWeight: effectiveWeight,
     elapsedMs,
   };
 }
 
-function getArtistTagVector(artistNameOrKey: string, fallbackGenre?: string | null): [string, number][] {
-  const db = getDb();
-  const ak = normalizeArtistKey(artistNameOrKey);
-  if (!ak) return [];
-
-  const rows = db
-    .prepare('SELECT genre_tag, weight FROM artist_genre_weights WHERE artist_key = ? ORDER BY weight DESC')
-    .all(ak) as { genre_tag: string; weight: number }[];
-  if (rows.length > 0) {
-    return rows.map((r) => [r.genre_tag, r.weight]);
-  }
-
-  const fallback = buildArtistFallbackTagMap(artistNameOrKey, fallbackGenre);
-  return Array.from(fallback.entries())
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8);
+interface GenreComputationContext {
+  displayNames: Map<string, string>;
+  weightsByArtist: Map<string, { tag: string; weight: number }[]>;
+  matrixLookup: Map<string, number>;
+  artistNorms: Map<string, number>;
+  lastfmSimLookup: Map<string, number>;
 }
 
-function lookupMatrixSimilarityMap(targetGenre: string): Map<string, number> {
-  const db = getDb();
-  const map = new Map<string, number>();
-  map.set(targetGenre, 1.0);
-  const rows = db
-    .prepare('SELECT genre_x, similarity FROM subgenre_affinity_matrix WHERE genre_y = ?')
-    .all(targetGenre) as { genre_x: string; similarity: number }[];
-  for (const r of rows) {
-    map.set(r.genre_x, r.similarity);
-  }
-  return map;
-}
-
-/**
- * Resolves an artist's `0.000` - `1.000` affinity against a target subgenre
- * using strictly artist-level tags bridged through `subgenre_affinity_matrix`.
- */
-export function getArtistSceneScore(
-  artistNameOrKey: string,
-  targetGenreRaw: string,
-  fallbackGenre?: string | null
-): ArtistSceneScoreResult {
+function buildGenreComputationContext(): GenreComputationContext {
   ensureGenreMatrixReady();
-  const targetGenre = normalizeGenreTag(targetGenreRaw) || targetGenreRaw.trim().toLowerCase();
-  const ak = normalizeArtistKey(artistNameOrKey);
-  const vec = getArtistTagVector(artistNameOrKey, fallbackGenre);
-  const simMap = lookupMatrixSimilarityMap(targetGenre);
+  const db = getDb();
 
-  const breakdown = vec.map(([tag, weight]) => {
-    const matrixSim = simMap.get(tag) ?? (tag === targetGenre ? 1.0 : getScenePrior(tag, targetGenre) ?? 0);
+  const artistNameRows = db
+    .prepare(
+      `SELECT LOWER(TRIM(artist)) as akey, MIN(artist) as displayName
+       FROM tracks
+       WHERE COALESCE(TRIM(artist), '') != ''
+       GROUP BY LOWER(TRIM(artist))`
+    )
+    .all() as { akey: string; displayName: string }[];
+  const displayNames = new Map<string, string>();
+  for (const r of artistNameRows) {
+    displayNames.set(normalizeArtistKey(r.akey), r.displayName);
+  }
+
+  const weightRows = db
+    .prepare('SELECT artist_key, genre_tag, weight FROM artist_genre_weights ORDER BY weight DESC')
+    .all() as { artist_key: string; genre_tag: string; weight: number }[];
+  const weightsByArtist = new Map<string, { tag: string; weight: number }[]>();
+  for (const w of weightRows) {
+    let arr = weightsByArtist.get(w.artist_key);
+    if (!arr) {
+      arr = [];
+      weightsByArtist.set(w.artist_key, arr);
+    }
+    if (w.genre_tag !== 'untagged') {
+      arr.push({ tag: w.genre_tag, weight: w.weight });
+    }
+  }
+
+  const matrixRows = db
+    .prepare('SELECT genre_x, genre_y, similarity FROM subgenre_affinity_matrix')
+    .all() as { genre_x: string; genre_y: string; similarity: number }[];
+  const matrixLookup = new Map<string, number>();
+  for (const m of matrixRows) {
+    matrixLookup.set(`${m.genre_x}|||${m.genre_y}`, m.similarity);
+  }
+
+  const artistNorms = new Map<string, number>();
+
+  const lastfmSimLookup = new Map<string, number>();
+  const affRows = db
+    .prepare('SELECT artist_key, similar_artists_json FROM artist_affinity_cache')
+    .all() as { artist_key: string; similar_artists_json: string }[];
+  for (const r of affRows) {
+    try {
+      const sims = JSON.parse(r.similar_artists_json) as SimilarArtistEntry[];
+      for (const s of sims) {
+        const dk = normalizeArtistKey(s.name);
+        if (!dk) continue;
+        const m = round3(Number(s.match) || 0);
+        const k1 = `${r.artist_key}|||${dk}`;
+        const k2 = `${dk}|||${r.artist_key}`;
+        if ((lastfmSimLookup.get(k1) || 0) < m) lastfmSimLookup.set(k1, m);
+        if ((lastfmSimLookup.get(k2) || 0) < m) lastfmSimLookup.set(k2, m);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { displayNames, weightsByArtist, matrixLookup, artistNorms, lastfmSimLookup };
+}
+
+function scoreArtistAgainstTargetInContext(
+  ctx: GenreComputationContext,
+  artistKey: string,
+  targetGenre: string
+): {
+  score: number;
+  topTags: { tag: string; weight: number; matrixSim: number; contribution: number }[];
+} {
+  const vec = ctx.weightsByArtist.get(artistKey) || [];
+  if (vec.length === 0) return { score: 0, topTags: [] };
+
+  const breakdown = vec.map(({ tag, weight }) => {
+    const matrixSim =
+      tag === targetGenre
+        ? 1.0
+        : ctx.matrixLookup.get(`${tag}|||${targetGenre}`) ?? getScenePrior(tag, targetGenre) ?? 0;
     return {
       tag,
       weight,
@@ -1013,85 +1262,247 @@ export function getArtistSceneScore(
   const c2 = sorted[1]?.contribution || 0;
   const c3 = sorted[2]?.contribution || 0;
   const score = round3(Math.min(1.0, c1 + c2 * 0.22 + c3 * 0.1));
+  return { score, topTags: sorted };
+}
+
+function getArtistBilinearNorm(ctx: GenreComputationContext, ak: string): number {
+  const cached = ctx.artistNorms.get(ak);
+  if (cached !== undefined) return cached;
+  const vec = ctx.weightsByArtist.get(ak);
+  if (!vec || vec.length === 0) {
+    ctx.artistNorms.set(ak, 0);
+    return 0;
+  }
+  let normSq = 0;
+  for (let i = 0; i < vec.length; i++) {
+    const a = vec[i];
+    normSq += a.weight * a.weight;
+    for (let j = i + 1; j < vec.length; j++) {
+      const b = vec[j];
+      const sim =
+        a.tag === b.tag
+          ? 1.0
+          : ctx.matrixLookup.get(`${a.tag}|||${b.tag}`) ?? getScenePrior(a.tag, b.tag) ?? 0;
+      normSq += 2 * a.weight * b.weight * sim;
+    }
+  }
+  const norm = Math.sqrt(Math.max(0, normSq));
+  ctx.artistNorms.set(ak, norm);
+  return norm;
+}
+
+function computeLocalArtistPairwiseScore(
+  ctx: GenreComputationContext,
+  akA: string,
+  akB: string
+): number {
+  if (akA === akB) return 1.0;
+  const vecA = ctx.weightsByArtist.get(akA);
+  const vecB = ctx.weightsByArtist.get(akB);
+  const normA = getArtistBilinearNorm(ctx, akA);
+  const normB = getArtistBilinearNorm(ctx, akB);
+  if (!vecA || !vecB || vecA.length === 0 || vecB.length === 0 || normA <= 0 || normB <= 0) {
+    return 0;
+  }
+
+  let dot = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    const a = vecA[i];
+    for (let j = 0; j < vecB.length; j++) {
+      const b = vecB[j];
+      const sim =
+        a.tag === b.tag
+          ? 1.0
+          : ctx.matrixLookup.get(`${a.tag}|||${b.tag}`) ?? getScenePrior(a.tag, b.tag) ?? 0;
+      if (sim > 0) {
+        dot += a.weight * b.weight * sim;
+      }
+    }
+  }
+  return round3(Math.min(1.0, dot / (normA * normB)));
+}
+
+/**
+ * Shared artist-filtering engine used by both the Read-Only Artist Similarity Map UI
+ * and `eGenius` candidate expansion.
+ */
+export function getArtistsForGenre(
+  targetGenreRaw: string,
+  minThreshold = 0.55,
+  ctx?: GenreComputationContext
+): ArtistSliceEntry[] {
+  const c = ctx || buildGenreComputationContext();
+  const targetGenre = normalizeGenreTag(targetGenreRaw) || targetGenreRaw.trim().toLowerCase();
+  const results: ArtistSliceEntry[] = [];
+
+  for (const [ak, displayName] of c.displayNames.entries()) {
+    const { score, topTags } = scoreArtistAgainstTargetInContext(c, ak, targetGenre);
+    if (score >= minThreshold) {
+      results.push({
+        artistKey: ak,
+        artistName: displayName,
+        sceneScore: score,
+        topTags: topTags.slice(0, 6).map((t) => ({ tag: t.tag, weight: t.weight })),
+      });
+    }
+  }
+
+  results.sort((a, b) => b.sceneScore - a.sceneScore || a.artistName.localeCompare(b.artistName));
+  return results;
+}
+
+/**
+ * Computes a genre-scoped, read-only M x M Artist Similarity Matrix purely in memory (< 20ms)
+ * without persisting an artist-to-artist table in SQLite.
+ */
+export function computeGenreArtistSlice(options: {
+  targetGenre: string;
+  minThreshold?: number;
+  artistFilter?: string;
+  useLastfm?: boolean;
+  lastfmWeight?: number;
+  maxArtists?: number;
+}): ArtistSimilaritySlicePayload {
+  const start = Date.now();
+  const ctx = buildGenreComputationContext();
+  const targetGenre = normalizeGenreTag(options.targetGenre) || options.targetGenre.trim().toLowerCase();
+  const minThreshold =
+    typeof options.minThreshold === 'number' && Number.isFinite(options.minThreshold)
+      ? round3(options.minThreshold)
+      : 0.55;
+  const maxArtists = Math.max(5, Math.min(220, options.maxArtists ?? 140));
+  const { effectiveWeight, hasApiKey } = resolveEffectiveLastfmWeight({
+    useLastfm: options.useLastfm,
+    lastfmWeight: options.lastfmWeight,
+  });
+
+  let matched = getArtistsForGenre(targetGenre, minThreshold, ctx);
+  const filterQ = (options.artistFilter || '').trim().toLowerCase();
+  if (filterQ) {
+    matched = matched.filter((a) => a.artistName.toLowerCase().includes(filterQ));
+  }
+
+  const totalMatchedArtists = matched.length;
+  const artists = matched.slice(0, maxArtists);
+  const m = artists.length;
+
+  const localMatrix: number[][] = Array.from({ length: m }, () => new Array<number>(m).fill(0));
+  const lastfmMatrix: number[][] = Array.from({ length: m }, () => new Array<number>(m).fill(0));
+  const combinedMatrix: number[][] = Array.from({ length: m }, () => new Array<number>(m).fill(0));
+
+  for (let i = 0; i < m; i++) {
+    localMatrix[i][i] = 1.0;
+    lastfmMatrix[i][i] = 1.0;
+    combinedMatrix[i][i] = 1.0;
+
+    const akI = artists[i].artistKey;
+    for (let j = i + 1; j < m; j++) {
+      const akJ = artists[j].artistKey;
+      const localSim = computeLocalArtistPairwiseScore(ctx, akI, akJ);
+      const lfmSim = ctx.lastfmSimLookup.get(`${akI}|||${akJ}`) || 0;
+      const combined = round3((1 - effectiveWeight) * localSim + effectiveWeight * lfmSim);
+
+      localMatrix[i][j] = localSim;
+      localMatrix[j][i] = localSim;
+      lastfmMatrix[i][j] = lfmSim;
+      lastfmMatrix[j][i] = lfmSim;
+      combinedMatrix[i][j] = combined;
+      combinedMatrix[j][i] = combined;
+    }
+  }
 
   return {
-    artistName: artistNameOrKey,
-    artistKey: ak,
     targetGenre,
-    score,
-    topTags: sorted.slice(0, 5),
+    minThreshold,
+    effectiveLastfmWeight: effectiveWeight,
+    hasLastfmApiKey: hasApiKey,
+    totalMatchedArtists,
+    artists,
+    localMatrix,
+    lastfmMatrix,
+    combinedMatrix,
+    elapsedMs: Date.now() - start,
   };
 }
 
 /**
- * Pairwise artist-to-artist similarity (`0.000` - `1.000`) through `subgenre_affinity_matrix`,
- * replacing raw string-exact Jaccard overlap in eGenius Signal #2.
+ * Shared pairwise artist scorer used by `eGenius` for both Signal #1 (Artist Affinity 35%)
+ * and Signal #2 (Subgenre Matrix Scene Score 25%).
  */
-export function computeArtistSceneSimilarity(
-  artistA: string,
-  artistB: string,
-  fallbackGenreA?: string | null,
-  fallbackGenreB?: string | null,
-  matrixLookup?: Map<string, number>
-): number {
-  ensureGenreMatrixReady();
-  const akA = normalizeArtistKey(artistA);
-  const akB = normalizeArtistKey(artistB);
-  if (akA && akB && akA === akB) return 1.0;
+export function createSharedArtistScorer(options?: { useLastfm?: boolean; lastfmWeight?: number }) {
+  const ctx = buildGenreComputationContext();
+  const { effectiveWeight } = resolveEffectiveLastfmWeight(options);
 
-  const vecA = getArtistTagVector(artistA, fallbackGenreA);
-  const vecB = getArtistTagVector(artistB, fallbackGenreB);
-  if (vecA.length === 0 || vecB.length === 0) return 0;
-
-  const simCache = matrixLookup || loadFullMatrixLookupMap();
-  const getSim = (gx: string, gy: string): number => {
-    if (gx === gy) return 1.0;
-    return simCache.get(`${gx}|||${gy}`) ?? getScenePrior(gx, gy) ?? 0;
-  };
-
-  let weightedCrossSum = 0;
-  let normA = 0;
-  let normB = 0;
-  for (const [, wa] of vecA) normA += wa * wa;
-  for (const [, wb] of vecB) normB += wb * wb;
-
-  for (const [ga, wa] of vecA) {
-    for (const [gb, wb] of vecB) {
-      const s = getSim(ga, gb);
-      if (s > 0) {
-        weightedCrossSum += wa * wb * s;
+  return {
+    effectiveLastfmWeight: effectiveWeight,
+    getArtistGenres(artistName: string): { tag: string; weight: number }[] {
+      return ctx.weightsByArtist.get(normalizeArtistKey(artistName)) || [];
+    },
+    getGenrePeers(targetGenre: string, minThreshold = 0.55): ArtistSliceEntry[] {
+      return getArtistsForGenre(targetGenre, minThreshold, ctx);
+    },
+    scorePair(artistA: string, artistB: string): {
+      localGenreSim: number;
+      lastfmArtistSim: number;
+      combinedArtistSim: number;
+    } {
+      const akA = normalizeArtistKey(artistA);
+      const akB = normalizeArtistKey(artistB);
+      if (akA && akB && akA === akB) {
+        return { localGenreSim: 1.0, lastfmArtistSim: 1.0, combinedArtistSim: 1.0 };
       }
-    }
-  }
-
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denom <= 0) return 0;
-  return round3(Math.min(1.0, weightedCrossSum / denom));
+      const localGenreSim = computeLocalArtistPairwiseScore(ctx, akA, akB);
+      const lastfmArtistSim = ctx.lastfmSimLookup.get(`${akA}|||${akB}`) || 0;
+      const combinedArtistSim = round3(
+        (1 - effectiveWeight) * localGenreSim + effectiveWeight * lastfmArtistSim
+      );
+      return { localGenreSim, lastfmArtistSim, combinedArtistSim };
+    },
+  };
 }
 
-export function loadFullMatrixLookupMap(): Map<string, number> {
-  ensureGenreMatrixReady();
-  const db = getDb();
-  const rows = db
-    .prepare('SELECT genre_x, genre_y, similarity FROM subgenre_affinity_matrix')
-    .all() as { genre_x: string; genre_y: string; similarity: number }[];
-  const map = new Map<string, number>();
-  for (const r of rows) {
-    map.set(`${r.genre_x}|||${r.genre_y}`, r.similarity);
-  }
-  return map;
+export function getArtistSceneScore(
+  artistNameOrKey: string,
+  targetGenreRaw: string,
+  _fallbackGenre?: string | null
+): ArtistSceneScoreResult {
+  const ctx = buildGenreComputationContext();
+  const targetGenre = normalizeGenreTag(targetGenreRaw) || targetGenreRaw.trim().toLowerCase();
+  const ak = normalizeArtistKey(artistNameOrKey);
+  const { score, topTags } = scoreArtistAgainstTargetInContext(ctx, ak, targetGenre);
+  return {
+    artistName: ctx.displayNames.get(ak) || artistNameOrKey,
+    artistKey: ak,
+    targetGenre,
+    score,
+    topTags: topTags.slice(0, 5),
+  };
+}
+
+export function computeArtistSceneSimilarity(artistA: string, artistB: string): number {
+  const ctx = buildGenreComputationContext();
+  return computeLocalArtistPairwiseScore(
+    ctx,
+    normalizeArtistKey(artistA),
+    normalizeArtistKey(artistB)
+  );
 }
 
 export function getGenreMatrixData(options: { search?: string; limit?: number } = {}): GenreMatrixPayload {
   ensureGenreMatrixReady();
   const db = getDb();
-  const limit = Math.max(6, Math.min(60, options.limit ?? 22));
+  const settings = getSettings();
+  const hasLastfmApiKey = Boolean(settings.lastfmApiKey && settings.lastfmApiKey.trim().length > 0);
+  const genreMapUseLastfm = hasLastfmApiKey ? Boolean(settings.genreMapUseLastfm) : false;
+  const genreMapLastfmWeight = Number(settings.genreMapLastfmWeight ?? 20);
+
   const q = (options.search || '').trim().toLowerCase();
 
   const summaryRows = db
     .prepare(
       `SELECT genre_tag as genre, COUNT(DISTINCT artist_key) as artistCount, SUM(weight) as totalWeight
        FROM artist_genre_weights
+       WHERE genre_tag != 'untagged'
        GROUP BY genre_tag
        ORDER BY totalWeight DESC, artistCount DESC`
     )
@@ -1103,6 +1514,7 @@ export function getGenreMatrixData(options: { search?: string; limit?: number } 
 
   const summaryByGenre = new Map(summaryRows.map((r) => [r.genre, r]));
   for (const mg of matrixGenresRows) {
+    if (mg.genre === 'untagged') continue;
     if (!summaryByGenre.has(mg.genre)) {
       summaryByGenre.set(mg.genre, { genre: mg.genre, artistCount: 0, totalWeight: 0.1 });
     }
@@ -1111,48 +1523,80 @@ export function getGenreMatrixData(options: { search?: string; limit?: number } 
   let genres = Array.from(summaryByGenre.values()).sort(
     (a, b) => b.totalWeight - a.totalWeight || b.artistCount - a.artistCount
   );
+  const totalGenresIndexed = genres.length;
   if (q) {
     genres = genres.filter((g) => g.genre.toLowerCase().includes(q));
   }
-  genres = genres.slice(0, limit);
+  if (options.limit && options.limit > 0) {
+    genres = genres.slice(0, options.limit);
+  }
 
   const genreNames = genres.map((g) => g.genre);
   let cells: MatrixCell[] = [];
   if (genreNames.length > 0) {
-    const placeholders = genreNames.map(() => '?').join(',');
-    const rows = db
-      .prepare(
-        `SELECT genre_x, genre_y, similarity, is_user_locked, updated_at
-         FROM subgenre_affinity_matrix
-         WHERE genre_x IN (${placeholders}) AND genre_y IN (${placeholders})`
-      )
-      .all(...genreNames, ...genreNames) as {
-      genre_x: string;
-      genre_y: string;
-      similarity: number;
-      is_user_locked: number;
-      updated_at: number;
-    }[];
-    cells = rows.map((r) => ({
-      genreX: r.genre_x,
-      genreY: r.genre_y,
-      similarity: round3(r.similarity),
-      isUserLocked: Boolean(r.is_user_locked),
-      updatedAt: r.updated_at,
-    }));
+    if (!q && (!options.limit || options.limit >= totalGenresIndexed)) {
+      const rows = db
+        .prepare(
+          'SELECT genre_x, genre_y, similarity, is_user_locked, updated_at FROM subgenre_affinity_matrix'
+        )
+        .all() as {
+        genre_x: string;
+        genre_y: string;
+        similarity: number;
+        is_user_locked: number;
+        updated_at: number;
+      }[];
+      cells = rows.map((r) => ({
+        genreX: r.genre_x,
+        genreY: r.genre_y,
+        similarity: round3(r.similarity),
+        isUserLocked: Boolean(r.is_user_locked),
+        updatedAt: r.updated_at,
+      }));
+    } else {
+      const placeholders = genreNames.map(() => '?').join(',');
+      const rows = db
+        .prepare(
+          `SELECT genre_x, genre_y, similarity, is_user_locked, updated_at
+           FROM subgenre_affinity_matrix
+           WHERE genre_x IN (${placeholders}) AND genre_y IN (${placeholders})`
+        )
+        .all(...genreNames, ...genreNames) as {
+        genre_x: string;
+        genre_y: string;
+        similarity: number;
+        is_user_locked: number;
+        updated_at: number;
+      }[];
+      cells = rows.map((r) => ({
+        genreX: r.genre_x,
+        genreY: r.genre_y,
+        similarity: round3(r.similarity),
+        isUserLocked: Boolean(r.is_user_locked),
+        updatedAt: r.updated_at,
+      }));
+    }
   }
 
   const stats = db
     .prepare(
-      'SELECT (SELECT COUNT(DISTINCT artist_key) FROM artist_genre_weights) as aCount, (SELECT COUNT(*) FROM subgenre_affinity_matrix) as cCount'
+      `SELECT
+        (SELECT COUNT(DISTINCT artist_key) FROM artist_genre_weights) as aCount,
+        (SELECT COUNT(DISTINCT LOWER(TRIM(artist))) FROM tracks WHERE COALESCE(TRIM(artist), '') != '') as libArtists,
+        (SELECT COUNT(*) FROM subgenre_affinity_matrix) as cCount`
     )
-    .get() as { aCount: number; cCount: number };
+    .get() as { aCount: number; libArtists: number; cCount: number };
 
   return {
     genres,
     cells,
     totalArtistsWeighted: stats.aCount || 0,
+    totalLibraryArtists: stats.libArtists || 0,
+    totalGenresIndexed,
     totalCellsStored: stats.cCount || 0,
+    hasLastfmApiKey,
+    genreMapUseLastfm,
+    genreMapLastfmWeight,
   };
 }
 
@@ -1208,7 +1652,7 @@ export function listAllMatrixGenres(): string[] {
     .prepare(
       `SELECT genre_x as g FROM subgenre_affinity_matrix
        UNION
-       SELECT genre_tag as g FROM artist_genre_weights
+       SELECT genre_tag as g FROM artist_genre_weights WHERE genre_tag != 'untagged'
        ORDER BY g ASC`
     )
     .all() as { g: string }[];
@@ -1219,81 +1663,23 @@ export function testArtistsAgainstGenre(
   targetGenreRaw: string,
   options: { artistQuery?: string; minScore?: number; limit?: number } = {}
 ): ArtistSceneScoreResult[] {
-  ensureGenreMatrixReady();
-  const db = getDb();
+  const ctx = buildGenreComputationContext();
   const targetGenre = normalizeGenreTag(targetGenreRaw) || targetGenreRaw.trim().toLowerCase();
-  const q = (options.artistQuery || '').trim();
+  const q = (options.artistQuery || '').trim().toLowerCase();
   const minScore = options.minScore ?? 0;
-  const limit = Math.max(1, Math.min(200, options.limit ?? 40));
-
-  const simMap = lookupMatrixSimilarityMap(targetGenre);
-
-  // Pull candidate artists from library + artist_genre_weights
-  let artistRows: { artist_name: string; artist_key: string }[];
-  if (q) {
-    artistRows = db
-      .prepare(
-        `SELECT MIN(artist) as artist_name, LOWER(TRIM(artist)) as artist_key
-         FROM tracks
-         WHERE LOWER(artist) LIKE ?
-         GROUP BY LOWER(TRIM(artist))
-         LIMIT 250`
-      )
-      .all(`%${q.toLowerCase()}%`) as { artist_name: string; artist_key: string }[];
-  } else {
-    artistRows = db
-      .prepare(
-        `SELECT COALESCE(MIN(t.artist), agw.artist_key) as artist_name, agw.artist_key as artist_key
-         FROM artist_genre_weights agw
-         LEFT JOIN tracks t ON LOWER(TRIM(t.artist)) = agw.artist_key
-         GROUP BY agw.artist_key`
-      )
-      .all() as { artist_name: string; artist_key: string }[];
-  }
-
-  // Preload all artist_genre_weights into memory for sub-10ms scoring across 1,200+ artists
-  const weightRows = db
-    .prepare('SELECT artist_key, genre_tag, weight FROM artist_genre_weights ORDER BY weight DESC')
-    .all() as { artist_key: string; genre_tag: string; weight: number }[];
-  const weightsByArtist = new Map<string, [string, number][]>();
-  for (const w of weightRows) {
-    let arr = weightsByArtist.get(w.artist_key);
-    if (!arr) {
-      arr = [];
-      weightsByArtist.set(w.artist_key, arr);
-    }
-    arr.push([w.genre_tag, w.weight]);
-  }
+  const limit = Math.max(1, Math.min(250, options.limit ?? 50));
 
   const results: ArtistSceneScoreResult[] = [];
-  for (const art of artistRows) {
-    const ak = normalizeArtistKey(art.artist_key || art.artist_name);
-    let vec = weightsByArtist.get(ak);
-    if (!vec || vec.length === 0) {
-      vec = getArtistTagVector(art.artist_name);
-    }
-    const breakdown = vec.map(([tag, weight]) => {
-      const matrixSim = simMap.get(tag) ?? (tag === targetGenre ? 1.0 : getScenePrior(tag, targetGenre) ?? 0);
-      return {
-        tag,
-        weight,
-        matrixSim: round3(matrixSim),
-        contribution: round3(weight * matrixSim),
-      };
-    });
-    const sorted = [...breakdown].sort((a, b) => b.contribution - a.contribution);
-    const c1 = sorted[0]?.contribution || 0;
-    const c2 = sorted[1]?.contribution || 0;
-    const c3 = sorted[2]?.contribution || 0;
-    const score = round3(Math.min(1.0, c1 + c2 * 0.22 + c3 * 0.1));
-
+  for (const [ak, displayName] of ctx.displayNames.entries()) {
+    if (q && !displayName.toLowerCase().includes(q) && !ak.includes(q)) continue;
+    const { score, topTags } = scoreArtistAgainstTargetInContext(ctx, ak, targetGenre);
     if (score >= minScore || q) {
       results.push({
-        artistName: art.artist_name,
+        artistName: displayName,
         artistKey: ak,
         targetGenre,
         score,
-        topTags: sorted.slice(0, 5),
+        topTags: topTags.slice(0, 5),
       });
     }
   }
@@ -1302,40 +1688,14 @@ export function testArtistsAgainstGenre(
   return results.slice(0, limit);
 }
 
-/**
- * Resolves a Smart Playlist `artist_scene_affinity` filter into SQL-ready lowercase artist keys.
- */
 export function getMatchingArtistsForSceneFilter(
   targetGenreRaw: string,
   operator: string,
   value: number,
   valueTo?: number
 ): { matchedArtistsLower: string[]; isNegated: boolean } {
-  ensureGenreMatrixReady();
-  const db = getDb();
+  const ctx = buildGenreComputationContext();
   const targetGenre = normalizeGenreTag(targetGenreRaw) || targetGenreRaw.trim().toLowerCase();
-  const simMap = lookupMatrixSimilarityMap(targetGenre);
-
-  const artistKeysRows = db
-    .prepare(
-      `SELECT DISTINCT LOWER(TRIM(artist)) as ak FROM tracks WHERE COALESCE(TRIM(artist), '') != ''
-       UNION
-       SELECT DISTINCT artist_key as ak FROM artist_genre_weights`
-    )
-    .all() as { ak: string }[];
-
-  const weightRows = db
-    .prepare('SELECT artist_key, genre_tag, weight FROM artist_genre_weights ORDER BY weight DESC')
-    .all() as { artist_key: string; genre_tag: string; weight: number }[];
-  const weightsByArtist = new Map<string, [string, number][]>();
-  for (const w of weightRows) {
-    let arr = weightsByArtist.get(w.artist_key);
-    if (!arr) {
-      arr = [];
-      weightsByArtist.set(w.artist_key, arr);
-    }
-    arr.push([w.genre_tag, w.weight]);
-  }
 
   const threshold = Number.isFinite(value) ? value : 0.55;
   const thresholdHi = Number.isFinite(valueTo) ? Number(valueTo) : threshold;
@@ -1361,16 +1721,10 @@ export function getMatchingArtistsForSceneFilter(
     }
   };
 
-  // For upper-bound rules (`<= 0.050` / `< 0.050`), artists with 0 vector entries evaluate to 0.000
-  // and match cleanly via NOT IN (artists whose score exceeds threshold).
   if ((operator === 'lte' || operator === 'lt') && threshold < 0.5) {
     const excluded: string[] = [];
-    for (const { ak } of artistKeysRows) {
-      const vec = weightsByArtist.get(ak) || getArtistTagVector(ak);
-      const contribs = vec
-        .map(([tag, weight]) => weight * (simMap.get(tag) ?? (tag === targetGenre ? 1.0 : getScenePrior(tag, targetGenre) ?? 0)))
-        .sort((a, b) => b - a);
-      const score = round3(Math.min(1.0, (contribs[0] || 0) + (contribs[1] || 0) * 0.22 + (contribs[2] || 0) * 0.1));
+    for (const ak of ctx.displayNames.keys()) {
+      const { score } = scoreArtistAgainstTargetInContext(ctx, ak, targetGenre);
       if ((operator === 'lte' && score > threshold) || (operator === 'lt' && score >= threshold)) {
         excluded.push(ak);
       }
@@ -1379,12 +1733,8 @@ export function getMatchingArtistsForSceneFilter(
   }
 
   const matched: string[] = [];
-  for (const { ak } of artistKeysRows) {
-    const vec = weightsByArtist.get(ak) || getArtistTagVector(ak);
-    const contribs = vec
-      .map(([tag, weight]) => weight * (simMap.get(tag) ?? (tag === targetGenre ? 1.0 : getScenePrior(tag, targetGenre) ?? 0)))
-      .sort((a, b) => b - a);
-    const score = round3(Math.min(1.0, (contribs[0] || 0) + (contribs[1] || 0) * 0.22 + (contribs[2] || 0) * 0.1));
+  for (const ak of ctx.displayNames.keys()) {
+    const { score } = scoreArtistAgainstTargetInContext(ctx, ak, targetGenre);
     if (evalOp(score)) {
       matched.push(ak);
     }

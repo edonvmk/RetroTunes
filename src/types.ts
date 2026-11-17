@@ -501,6 +501,8 @@ export interface AppSettings {
   metadataHydrationMode: 'hybrid' | 'on_demand';
   tableColumnsJson: string;
   showOfflineDevices?: boolean;
+  genreMapUseLastfm?: boolean;
+  genreMapLastfmWeight?: number;
 
   authMode: 'standalone' | 'authentik';
   authentikIssuerUrl: string;

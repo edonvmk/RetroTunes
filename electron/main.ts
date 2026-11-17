@@ -92,6 +92,8 @@ import {
   setGenreMatrixCell,
   resetGenreMatrixCell,
   testArtistsAgainstGenre,
+  computeGenreArtistSlice,
+  RebuildGenreMatrixOptions,
   MixDepthMode,
 } from './egenius';
 import {
@@ -538,7 +540,35 @@ function registerAllHandlers() {
   registerChannel('genreMatrix:get', (options?: { search?: string; limit?: number }) =>
     getGenreMatrixData(options || {})
   );
-  registerChannel('genreMatrix:rebuild', () => rebuildGenreMatrix());
+  registerChannel('genreMatrix:rebuild', (options?: RebuildGenreMatrixOptions) => {
+    const currentSettings = getSettings();
+    const hasKey = Boolean(currentSettings.lastfmApiKey && currentSettings.lastfmApiKey.trim().length > 0);
+    if (options && (options.useLastfm !== undefined || options.lastfmWeight !== undefined)) {
+      saveSettings({
+        genreMapUseLastfm: hasKey ? Boolean(options.useLastfm) : false,
+        genreMapLastfmWeight:
+          typeof options.lastfmWeight === 'number'
+            ? Math.max(0, Math.min(100, Math.round(options.lastfmWeight)))
+            : currentSettings.genreMapLastfmWeight ?? 20,
+      });
+    }
+    return rebuildGenreMatrix({
+      useLastfm: hasKey ? options?.useLastfm : false,
+      lastfmWeight: options?.lastfmWeight,
+      resetStuckMetadata: options?.resetStuckMetadata,
+    });
+  });
+  registerChannel(
+    'genreMatrix:getArtistSlice',
+    (payload: {
+      targetGenre: string;
+      minThreshold?: number;
+      artistFilter?: string;
+      useLastfm?: boolean;
+      lastfmWeight?: number;
+      maxArtists?: number;
+    }) => computeGenreArtistSlice(payload)
+  );
   registerChannel(
     'genreMatrix:setCell',
     (payload: { genreX: string; genreY: string; similarity: number; isLocked: boolean }) =>

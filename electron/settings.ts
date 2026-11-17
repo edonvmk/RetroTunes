@@ -48,6 +48,8 @@ export interface AppSettings {
   metadataHydrationMode: 'hybrid' | 'on_demand';
   tableColumnsJson: string;
   showOfflineDevices?: boolean;
+  genreMapUseLastfm?: boolean;
+  genreMapLastfmWeight?: number;
 
   // Authentication (Authentik SSO / OIDC + Homelab Gateway)
   authMode: 'standalone' | 'authentik';
@@ -148,6 +150,8 @@ export function getDefaultSettings(): AppSettings {
     metadataHydrationMode: 'hybrid',
     tableColumnsJson: '',
     showOfflineDevices: false,
+    genreMapUseLastfm: false,
+    genreMapLastfmWeight: 20,
 
     authMode: 'standalone',
     authentikIssuerUrl: '',

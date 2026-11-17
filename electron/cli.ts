@@ -15,6 +15,7 @@ import { getCacheStats } from './cacheTranscoder';
 import { getArrLiveQueue } from './storeArr';
 import { standaloneLocalProvider } from './providers/standaloneLocal';
 import {
+  computeGenreArtistSlice,
   generateMix,
   MixDepthMode,
   normalizeGenreTag,
@@ -287,16 +288,22 @@ async function cmdPlaylistEgenius(flags: Record<string, string | boolean>, asJso
         hop2Count: mix.hop2Count,
         cacheHit: mix.cacheHit,
         elapsedMs: mix.elapsedMs,
-        tracks: mix.tracks.map((t, i) => ({
-          pos: i + 1,
-          id: t.id,
-          title: t.title,
-          artist: t.artist,
-          album: t.album,
-          year: t.year,
-          duration: t.duration,
-          relScore: t.artist_relative_popularity_score,
-        })),
+        tracks: mix.tracks.map((t, i) => {
+          const scoredMatch = mix.scored.find((s) => s.track.id === t.id);
+          return {
+            pos: i + 1,
+            id: t.id,
+            title: t.title,
+            artist: t.artist,
+            album: t.album,
+            year: t.year,
+            duration: t.duration,
+            relScore: t.artist_relative_popularity_score,
+            ...(flags.explain && scoredMatch
+              ? { breakdown: scoredMatch.breakdown }
+              : {}),
+          };
+        }),
       },
       true
     );
@@ -357,8 +364,60 @@ async function main() {
     }
     if (group === 'db' && sub === 'rebuild-genre-matrix') {
       initDatabase();
-      const res = rebuildGenreMatrix();
+      const lfmWeight =
+        typeof flags['lastfm-weight'] === 'string'
+          ? Number(flags['lastfm-weight'])
+          : undefined;
+      const res = rebuildGenreMatrix({
+        useLastfm: lfmWeight !== undefined ? lfmWeight > 0 : undefined,
+        lastfmWeight: lfmWeight,
+        resetStuckMetadata: Boolean(flags['reset-stuck']),
+      });
       out({ ok: true, ...res }, asJson);
+      process.exitCode = 0;
+      return;
+    }
+    if (group === 'artist-map') {
+      initDatabase();
+      const genreRaw = typeof flags.genre === 'string' ? flags.genre : '';
+      if (!genreRaw.trim()) {
+        console.error('Usage: npm run cli -- artist-map --genre "<genre>" [--min 0.550] [--artist "<name>"] [--lastfm-weight <0-100>] [--json]');
+        process.exitCode = 1;
+        return;
+      }
+      const minThreshold = typeof flags.min === 'string' ? Number(flags.min) : 0.55;
+      const artistFilter = typeof flags.artist === 'string' ? flags.artist : '';
+      const lfmWeight =
+        typeof flags['lastfm-weight'] === 'string'
+          ? Number(flags['lastfm-weight'])
+          : undefined;
+      const slice = computeGenreArtistSlice({
+        targetGenre: genreRaw,
+        minThreshold,
+        artistFilter,
+        useLastfm: lfmWeight !== undefined ? lfmWeight > 0 : undefined,
+        lastfmWeight: lfmWeight,
+      });
+      out(
+        {
+          ok: true,
+          targetGenre: slice.targetGenre,
+          minThreshold: slice.minThreshold,
+          effectiveLastfmWeight: slice.effectiveLastfmWeight,
+          hasLastfmApiKey: slice.hasLastfmApiKey,
+          totalMatchedArtists: slice.totalMatchedArtists,
+          elapsedMs: slice.elapsedMs,
+          artists: slice.artists.slice(0, 25),
+          sampleMatrixRows: slice.artists.slice(0, 10).map((a, i) => ({
+            artist: a.artistName,
+            sceneScore: a.sceneScore,
+            topPeerScores: slice.artists
+              .slice(0, 10)
+              .map((b, j) => ({ peer: b.artistName, combined: slice.combinedMatrix[i][j], local: slice.localMatrix[i][j], lastfm: slice.lastfmMatrix[i][j] })),
+          })),
+        },
+        asJson
+      );
       process.exitCode = 0;
       return;
     }
@@ -404,7 +463,7 @@ async function main() {
       process.exitCode = await cmdStoreQueue(asJson);
       return;
     }
-    if (group === 'playlist' && sub === 'egenius') {
+    if ((group === 'playlist' && sub === 'egenius') || group === 'egenius') {
       process.exitCode = await cmdPlaylistEgenius(flags, asJson);
       return;
     }

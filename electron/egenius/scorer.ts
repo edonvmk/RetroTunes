@@ -14,7 +14,7 @@ import {
   VariantType,
 } from './types';
 import { classifyVariant, evaluateVariantParity } from './variantFilter';
-import { computeArtistSceneSimilarity, loadFullMatrixLookupMap } from './genreMatrix';
+import { createSharedArtistScorer } from './genreMatrix';
 
 const WEIGHT_GRAPH = 0.35;
 const WEIGHT_TAGS = 0.25;
@@ -163,12 +163,28 @@ export async function gatherAndScoreCandidates(
     }
   }
 
+  // Shared in-memory Genre Map + Artist Matrix scorer (used identically by Prefs Artist Map & eGenius)
+  const sharedScorer = createSharedArtistScorer();
+  const seedGenres = sharedScorer.getArtistGenres(seedTrack.artist);
+  const primarySeedGenre = seedGenres[0]?.tag || tokenizeGenre(seedTrack.genre)[0] || '';
+  const scenePeerArtists = primarySeedGenre
+    ? sharedScorer
+        .getGenrePeers(primarySeedGenre, Math.min(0.45, sceneThreshold * 0.8))
+        .slice(0, 45)
+        .map((a) => a.artistName)
+    : [];
+
   // Pull candidate tracks from local SQLite
   const candidateMap = new Map<number, TrackRow>();
   const excludeSet = new Set<number>([seedTrack.id, ...excludeTrackIds]);
 
   const targetArtists = Array.from(
-    new Set([seedTrack.artist, ...hop1ArtistNames.slice(0, 20), ...Array.from(hop2ArtistScores.keys()).slice(0, 35)])
+    new Set([
+      seedTrack.artist,
+      ...hop1ArtistNames.slice(0, 20),
+      ...Array.from(hop2ArtistScores.keys()).slice(0, 35),
+      ...scenePeerArtists,
+    ])
   ).filter(Boolean);
 
   if (targetArtists.length > 0) {
@@ -223,9 +239,11 @@ export async function gatherAndScoreCandidates(
     }
   }
 
-  // Score all candidates using subgenre_affinity_matrix for Signal #2
-  const matrixLookup = loadFullMatrixLookupMap();
-  const artistSceneScoreCache = new Map<string, number>();
+  // Score all candidates using the unified pairwise artist + subgenre matrix helpers
+  const pairScoreCache = new Map<
+    string,
+    { localGenreSim: number; lastfmArtistSim: number; combinedArtistSim: number }
+  >();
   const scored: ScoredCandidate[] = [];
   let hop1Count = 0;
   let hop2Count = 0;
@@ -240,38 +258,40 @@ export async function gatherAndScoreCandidates(
     const h1ArtistMatch = hop1ArtistScores.get(candArtistKey) || 0;
     const h2ArtistMatch = hop2ArtistScores.get(candArtistKey) || 0;
 
+    let pair = pairScoreCache.get(candArtistKey);
+    if (!pair) {
+      pair = sharedScorer.scorePair(seedTrack.artist, cand.artist);
+      if (pair.localGenreSim <= 0) {
+        const candAff = readCachedArtistAffinity(cand.artist);
+        const candTagMap = buildTagMap(candAff?.topTags || [], cand.genre);
+        const jac = computeWeightedJaccard(seedTagMap, candTagMap);
+        if (jac > 0) {
+          pair = {
+            ...pair,
+            localGenreSim: jac,
+            combinedArtistSim: Math.max(pair.combinedArtistSim, jac * 0.8),
+          };
+        }
+      }
+      pairScoreCache.set(candArtistKey, pair);
+    }
+
     let hopLevel: 0 | 1 | 2 = 0;
-    let graphScore = 0.18; // local fallback baseline
+    let graphScore = Math.max(0.18, pair.combinedArtistSim);
     if (candArtistKey === seedArtistKey) {
       hopLevel = 1;
       graphScore = 0.85;
     } else if (directTrackMatch > 0 || h1ArtistMatch > 0) {
       hopLevel = 1;
-      graphScore = Math.max(directTrackMatch, h1ArtistMatch);
+      graphScore = Math.max(directTrackMatch, h1ArtistMatch, pair.combinedArtistSim);
       hop1Count++;
-    } else if (h2ArtistMatch > 0) {
+    } else if (h2ArtistMatch > 0 || pair.combinedArtistSim >= sceneThreshold) {
       hopLevel = 2;
-      graphScore = h2ArtistMatch;
+      graphScore = Math.max(h2ArtistMatch, pair.combinedArtistSim);
       hop2Count++;
     }
 
-    let matrixSim = artistSceneScoreCache.get(candArtistKey);
-    if (matrixSim === undefined) {
-      matrixSim = computeArtistSceneSimilarity(
-        seedTrack.artist,
-        cand.artist,
-        seedTrack.genre,
-        cand.genre,
-        matrixLookup
-      );
-      if (matrixSim <= 0) {
-        const candAff = readCachedArtistAffinity(cand.artist);
-        const candTagMap = buildTagMap(candAff?.topTags || [], cand.genre);
-        matrixSim = computeWeightedJaccard(seedTagMap, candTagMap);
-      }
-      artistSceneScoreCache.set(candArtistKey, matrixSim);
-    }
-    const tagScore = matrixSim;
+    const tagScore = pair.localGenreSim;
 
     // Scene Crossover Threshold enforcement: penalize or gate out-of-scene cross-genre drift
     const minGate = Math.max(0.1, sceneThreshold * 0.65);

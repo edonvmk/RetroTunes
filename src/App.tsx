@@ -2898,7 +2898,7 @@ export const App: React.FC = () => {
                                           title={canEditPos ? 'Click to edit playlist position' : undefined}
                                           style={{
                                             textAlign: 'right',
-                                            color: isCurrent ? '#fff' : '#64748b',
+                                            color: isCurrent || isSelectedRow ? '#fff' : '#64748b',
                                             cursor: canEditPos ? 'pointer' : undefined,
                                           }}
                                           onClick={(e) => {
@@ -2968,7 +2968,17 @@ export const App: React.FC = () => {
                                               gap: 6,
                                             }}
                                           >
-                                            <span>{track.title}</span>
+                                            <span
+                                              style={{
+                                                flex: 1,
+                                                minWidth: 0,
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                              }}
+                                            >
+                                              {track.title}
+                                            </span>
                                             {activePlaylist &&
                                               !activePlaylist.is_smart &&
                                               hoveredTrackId === track.id && (
@@ -3004,6 +3014,7 @@ export const App: React.FC = () => {
                                                     fontWeight: 700,
                                                     cursor: 'pointer',
                                                     lineHeight: 1.3,
+                                                    flexShrink: 0,
                                                   }}
                                                 >
                                                   ×

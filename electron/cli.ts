@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { initDatabase, getDb, getDatabaseDiagnostics } from './db';
+import { initDatabase, getDb, getDatabaseDiagnostics, rebuildMediaDatabase } from './db';
 import { getSettings } from './settings';
 import { platformDriver } from './platform';
 import {
@@ -344,6 +344,15 @@ async function main() {
     }
     if (group === 'db' && sub === 'scan') {
       process.exitCode = await cmdDbScan(flags, asJson);
+      return;
+    }
+    if (group === 'db' && sub === 'rebuild') {
+      initDatabase();
+      rebuildMediaDatabase();
+      await runLibraryScan();
+      const diag = getDatabaseDiagnostics();
+      out({ ok: true, rebuilt: true, ...diag }, asJson);
+      process.exitCode = 0;
       return;
     }
     if (group === 'db' && sub === 'update-popularity') {

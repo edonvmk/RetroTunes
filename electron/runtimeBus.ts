@@ -61,14 +61,6 @@ export function getAppDataPath(): string {
   if (process.env.RTUNES_DATA_DIR && process.env.RTUNES_DATA_DIR.trim()) {
     return path.resolve(process.env.RTUNES_DATA_DIR.trim());
   }
-  const electron = getElectronModule();
-  if (electron?.app?.getPath) {
-    try {
-      return electron.app.getPath('userData');
-    } catch {
-      // fall through to OS default
-    }
-  }
   if (process.platform === 'win32') {
     return path.join(
       process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'),

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'path';
 import http from 'http';
 import fs from 'fs';
-import { emitRendererEvent, onRendererEvent } from './runtimeBus';
+import { emitRendererEvent, getAppDataPath, onRendererEvent } from './runtimeBus';
 import {
   initDatabase,
   getDb,
@@ -10,6 +10,7 @@ import {
   searchVideosFts,
   recalculateArtistPopularityScores,
   getDatabaseDiagnostics,
+  rebuildMediaDatabase,
   TrackRow,
   PlaylistRow,
 } from './db';
@@ -134,7 +135,7 @@ import { logger, LogLevel, LogSubsystem } from './logger';
 import { platformDriver } from './platform';
 
 try {
-  app.setPath('userData', platformDriver.getFallbackUserDataDir());
+  app.setPath('userData', getAppDataPath());
 } catch {
   // ignore if running outside Electron app context
 }
@@ -321,6 +322,11 @@ function registerAllHandlers() {
 
   // --- Indexer & ListenBrainz Popularity ---
   registerChannel('indexer:scan', (customPaths?: string[]) => runLibraryScan(customPaths));
+  registerChannel('db:rebuild', () => {
+    rebuildMediaDatabase();
+    void runLibraryScan().then(() => scanExtendedMediaSections());
+    return { ok: true, started: true };
+  });
   registerChannel('indexer:cancel', () => {
     cancelLibraryScan();
     return { ok: true };

@@ -21,10 +21,6 @@ export const win32Driver: PlatformDriver = {
   isMacOsStyleMenu: false,
   quitOnAllWindowsClosed: true,
 
-  getFallbackUserDataDir() {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'RetroTunes');
-  },
-
   getDefaultCacheDir() {
     return path.join(
       process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),

@@ -1,11 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { spawn, execFileSync } from 'child_process';
+import { spawn } from 'child_process';
 import { emitRendererEvent } from './runtimeBus';
 import { getDb, CacheJobRow, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { resolveReachableTrackPath } from './trackSources';
+import { detectHardwareEncoder } from './transcoder/binaryManager';
 
 let workerRunning = false;
 
@@ -268,25 +269,6 @@ export function queueVideoTranscode(videoId: number, keepCached = true): void {
   });
   broadcastCacheStatus();
   void processNextCacheJob();
-}
-
-export function detectHardwareEncoder(ffmpegPath: string, mode: string): string {
-  if (mode === 'software') return 'libx264';
-  try {
-    const out = execFileSync(ffmpegPath, ['-encoders'], { encoding: 'utf8' });
-    if ((mode === 'auto' || mode === 'vt_h264') && out.includes('h264_videotoolbox')) {
-      return 'h264_videotoolbox';
-    }
-    if ((mode === 'auto' || mode === 'nvenc') && out.includes('h264_nvenc')) {
-      return 'h264_nvenc';
-    }
-    if ((mode === 'auto' || mode === 'qsv') && out.includes('h264_qsv')) {
-      return 'h264_qsv';
-    }
-  } catch {
-    // ignore
-  }
-  return 'libx264';
 }
 
 async function processNextCacheJob(): Promise<void> {

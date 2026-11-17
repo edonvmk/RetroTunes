@@ -1484,35 +1484,11 @@ export const App: React.FC = () => {
           </div>
 
           <button
-            className="aqua-btn primary"
-            onClick={() => setShowUploadWizard(true)}
-            title="Launch Smart Media Upload Wizard & *arr Auto-Import"
-          >
-            <Upload size={13} /> Upload Media
-          </button>
-
-          <button
             className="aqua-btn"
             onClick={() => setShowPreferences(true)}
             title="Open Aqua Preferences & API Connection Testers"
           >
             <Settings size={13} /> Prefs
-          </button>
-
-          <button
-            className="aqua-btn"
-            onClick={() => setShowAbout(true)}
-            title="About RetroTunes (rTunes) & FOSS Credits"
-          >
-            About
-          </button>
-
-          <button
-            className="aqua-btn"
-            onClick={() => setShowDiagnostics(true)}
-            title="Open Troubleshooting & Diagnostic Console"
-          >
-            <Terminal size={13} /> Logs
           </button>
 
           <div className="aqua-pill-search">

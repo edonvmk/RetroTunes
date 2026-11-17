@@ -21,10 +21,6 @@ export const darwinDriver: PlatformDriver = {
   isMacOsStyleMenu: true,
   quitOnAllWindowsClosed: false,
 
-  getFallbackUserDataDir() {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'RetroTunes');
-  },
-
   getDefaultCacheDir() {
     return path.join(os.homedir(), 'Library', 'Caches', 'RetroTunes');
   },

@@ -3,6 +3,8 @@
 > **Notice to all AI coding assistants:** Read this document completely before modifying any file in this repository. Both `AGENTS.md` and `AIreadme.txt` are authoritative and must remain identical.
 >
 > **Module Map Rule:** Before creating any new file, helper, or IPC channel, consult [`MODULE_MAP.md`](MODULE_MAP.md) to reuse existing modules and avoid duplicate code. Whenever you add, delete, or wire new connections between modules, **you MUST update [`MODULE_MAP.md`](MODULE_MAP.md)** in the same change.
+>
+> **Electron Isolation Rule (Node / Docker / CLI Safety):** Never import `electron` (`app`, `BrowserWindow`, `ipcMain`, `dialog`, `Menu`, `shell`, `safeStorage`) inside shared backend modules (`db.ts`, `indexer.ts`, `logger.ts`, `cacheTranscoder.ts`, `deviceSync.ts`, `shareManager.ts`, `smartPlaylists.ts`, `storeArr.ts`, `uploadWizard.ts`, `mediaServer.ts`, `egenius/*`, `ai/llamaService.ts`, `transcoder/*`, `platform/*`, `cli.ts`). Those modules must run in plain Node.js / Docker (`rTunes-Server`) and `ELECTRON_RUN_AS_NODE=1` CLI. Always use `electron/runtimeBus.ts` (`emitRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage`) instead, keeping direct `electron` imports confined to `electron/main.ts`, `electron/preload.ts`, and `electron/authOidc.ts`.
 
 ---
 

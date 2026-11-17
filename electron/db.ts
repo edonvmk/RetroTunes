@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { logger } from './logger';
-import { platformDriver } from './platform';
+import { getAppDataPath } from './runtimeBus';
 import { classifyVariant, isInterludeOrSkit } from './egenius/variantFilter';
 
 export interface TrackRow {
@@ -211,10 +211,7 @@ export function getDbPath(): string {
     dbFilePath = customFile;
     return dbFilePath;
   }
-  const dataDir =
-    process.env.RTUNES_DATA_DIR && process.env.RTUNES_DATA_DIR.trim()
-      ? path.resolve(process.env.RTUNES_DATA_DIR.trim())
-      : platformDriver.getFallbackUserDataDir();
+  const dataDir = getAppDataPath();
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     dbFilePath = path.join(dataDir, 'rtunes.sqlite');
@@ -1125,4 +1122,30 @@ export function getDatabaseDiagnostics() {
     devicesCount,
     pendingJobsCount,
   };
+}
+
+export function rebuildMediaDatabase(): { ok: boolean } {
+  const db = getDb();
+  logger.info('DB', 'Rebuilding media database (preserving settings, shares, devices, and playlists)...');
+  const tx = db.transaction(() => {
+    db.exec(`
+      DELETE FROM playlist_tracks;
+      DELETE FROM playlist_videos;
+      DELETE FROM tracks;
+      DELETE FROM videos;
+      DELETE FROM books;
+      DELETE FROM audiobooks;
+      DELETE FROM photos;
+      DELETE FROM cache_jobs;
+      DELETE FROM artist_affinity_cache;
+      DELETE FROM track_affinity_cache;
+      DELETE FROM artist_genre_weights;
+      DELETE FROM subgenre_affinity_matrix;
+      INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');
+      INSERT INTO videos_fts(videos_fts) VALUES('rebuild');
+    `);
+  });
+  tx();
+  logger.info('DB', 'Media database cleared and FTS5 indexes rebuilt.');
+  return { ok: true };
 }

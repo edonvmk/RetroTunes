@@ -5,13 +5,13 @@ import { emitRendererEvent, getAppDataPath } from '../runtimeBus';
 import { getDb, searchTracksFts, TrackRow } from '../db';
 import { getSettings } from '../settings';
 import { logger } from '../logger';
-import { platformDriver } from '../platform';
 import { evaluateSmartPlaylist, SmartRule, SmartRuleGroup } from '../smartPlaylists';
 import {
   listAllMatrixGenres,
   normalizeGenreTag,
   testArtistsAgainstGenre,
 } from '../egenius/genreMatrix';
+import { resolveArtistAffinity, resolveTrackAffinity } from '../egenius/affinityCache';
 
 export interface AiPrepareProgress {
   modelId: string;
@@ -134,13 +134,7 @@ let activeModelId: string | null = null;
 let sessionCollectedTracks = new Map<number, TrackRow>();
 
 export function getAiModelsDir(): string {
-  let userData = '';
-  try {
-    userData = getAppDataPath();
-  } catch {
-    userData = platformDriver.getFallbackUserDataDir();
-  }
-  const modelsDir = path.join(userData, 'models');
+  const modelsDir = path.join(getAppDataPath(), 'models');
   fs.mkdirSync(modelsDir, { recursive: true });
   return modelsDir;
 }
@@ -613,17 +607,13 @@ async function discoverViaLastfmTool(args: {
   const candidates: { artist: string; title?: string }[] = [];
   try {
     if (args.seed_track) {
-      const url = `https://ws.audioscrobbler.com/2.0/?method=track.getSimilar&artist=${encodeURIComponent(
-        args.seed_artist
-      )}&track=${encodeURIComponent(args.seed_track)}&limit=40&api_key=${encodeURIComponent(apiKey)}&format=json`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = (await res.json()) as any;
-        for (const item of data?.similartracks?.track || []) {
-          if (item?.name && item?.artist?.name) {
-            candidates.push({ artist: String(item.artist.name), title: String(item.name) });
-          }
-        }
+      const trackAff = await resolveTrackAffinity({
+        artist: args.seed_artist,
+        title: args.seed_track,
+        mbid_recording: null,
+      });
+      for (const item of trackAff.similarTracks) {
+        candidates.push({ artist: item.artist, title: item.title });
       }
     } else if (args.tag) {
       const url = `https://ws.audioscrobbler.com/2.0/?method=tag.getTopTracks&tag=${encodeURIComponent(
@@ -639,17 +629,9 @@ async function discoverViaLastfmTool(args: {
         }
       }
     } else {
-      const url = `https://ws.audioscrobbler.com/2.0/?method=artist.getSimilar&artist=${encodeURIComponent(
-        args.seed_artist
-      )}&limit=25&api_key=${encodeURIComponent(apiKey)}&format=json`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = (await res.json()) as any;
-        for (const item of data?.similarartists?.artist || []) {
-          if (item?.name) {
-            candidates.push({ artist: String(item.name) });
-          }
-        }
+      const artistAff = await resolveArtistAffinity(args.seed_artist);
+      for (const item of artistAff.similarArtists) {
+        candidates.push({ artist: item.name });
       }
     }
   } catch (err) {

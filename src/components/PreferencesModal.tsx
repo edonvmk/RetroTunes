@@ -1499,6 +1499,23 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   >
                     Rescan Library Now
                   </button>
+                  <button
+                    className="aqua-btn"
+                    style={{ color: '#b91c1c' }}
+                    onClick={async () => {
+                      if (
+                        !window.confirm(
+                          'Rebuild Media Database? This clears all indexed tracks, videos, books, photos, and FTS5 caches, then re-scans your configured folders from scratch. Settings, shares, devices, and playlists are preserved.'
+                        )
+                      ) {
+                        return;
+                      }
+                      await invokeRpc('db:rebuild');
+                      setStatusBanner('Database rebuilt and full background re-scan started.');
+                    }}
+                  >
+                    Rebuild Media Database...
+                  </button>
                   <button className="aqua-btn" onClick={() => onOpenNewPlaylist?.()}>
                     New Playlist...
                   </button>

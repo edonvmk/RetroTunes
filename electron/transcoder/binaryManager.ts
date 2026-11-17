@@ -1,11 +1,10 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { emitRendererEvent, getAppDataPath } from '../runtimeBus';
-import { getSettings, saveSettings } from '../settings';
-import { platformDriver } from '../platform';
+import { AppSettings, getSettings, saveSettings } from '../settings';
 import { logger } from '../logger';
 
 const execFileAsync = promisify(execFile);
@@ -38,16 +37,8 @@ let checkingActive = false;
 let lastCheckedAt: string | null = null;
 let lastMessage: string | null = null;
 
-function getUserDataDir(): string {
-  try {
-    return getAppDataPath();
-  } catch {
-    return platformDriver.getFallbackUserDataDir();
-  }
-}
-
 export function getManagedBinDir(): string {
-  return path.join(getUserDataDir(), 'bin');
+  return path.join(getAppDataPath(), 'bin');
 }
 
 function broadcastBinaryProgress(ev: BinaryProgressEvent) {
@@ -339,4 +330,28 @@ export async function checkAndUpdateTranscoderBinaries(options?: {
   } finally {
     checkingActive = false;
   }
+}
+
+export type H264Encoder = 'h264_videotoolbox' | 'h264_nvenc' | 'h264_qsv' | 'libx264';
+
+export function detectHardwareEncoder(
+  ffmpegPath: string,
+  mode: AppSettings['hardwareAccelMode'] | string = 'auto'
+): H264Encoder {
+  if (mode === 'software') return 'libx264';
+  try {
+    const out = execFileSync(ffmpegPath, ['-encoders'], { encoding: 'utf8' });
+    if ((mode === 'auto' || mode === 'vt_h264') && out.includes('h264_videotoolbox')) {
+      return 'h264_videotoolbox';
+    }
+    if ((mode === 'auto' || mode === 'nvenc') && out.includes('h264_nvenc')) {
+      return 'h264_nvenc';
+    }
+    if ((mode === 'auto' || mode === 'qsv') && out.includes('h264_qsv')) {
+      return 'h264_qsv';
+    }
+  } catch {
+    // ignore
+  }
+  return 'libx264';
 }

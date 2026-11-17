@@ -6,6 +6,7 @@ import { getDb, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { resolveReachableTrackPath } from './trackSources';
+import { detectHardwareEncoder } from './transcoder/binaryManager';
 
 let serverPort = 0;
 let mediaServerInstance: http.Server | null = null;
@@ -132,26 +133,14 @@ export function startMediaServer(): Promise<number> {
               'Access-Control-Allow-Origin': '*',
             });
 
-            const accel = settings.hardwareAccelMode || 'auto';
-            let videoCodecArgs: string[];
-            if (
-              process.platform === 'darwin' &&
-              (accel === 'auto' || accel === 'vt_h264')
-            ) {
-              videoCodecArgs = ['-c:v', 'h264_videotoolbox', '-b:v', '2500k'];
-            } else if (
-              (process.platform === 'win32' || process.platform === 'linux') &&
-              accel === 'nvenc'
-            ) {
-              videoCodecArgs = ['-c:v', 'h264_nvenc', '-b:v', '2500k'];
-            } else if (
-              (process.platform === 'win32' || process.platform === 'linux') &&
-              accel === 'qsv'
-            ) {
-              videoCodecArgs = ['-c:v', 'h264_qsv', '-b:v', '2500k'];
-            } else {
-              videoCodecArgs = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23'];
-            }
+            const encoder = detectHardwareEncoder(
+              settings.ffmpegBinaryPath,
+              settings.hardwareAccelMode
+            );
+            const videoCodecArgs =
+              encoder === 'libx264'
+                ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23']
+                : ['-c:v', encoder, '-b:v', '2500k'];
 
             const ff = spawn(settings.ffmpegBinaryPath, [
               '-i',

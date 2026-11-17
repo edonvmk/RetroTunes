@@ -80,12 +80,12 @@ Shared Core (electron/, Electron-free via runtimeBus.ts)
 | `electron/logger.ts` | `logger` (`debug`, `info`, `warn`, `error`), ring buffer, rotating log files | `runtimeBus.ts` (`log:entry`) |
 | `electron/indexer.ts` | Phased library scanner, ID3/Vorbis/artwork hydration, ListenBrainz/Last.fm/AudioDB popularity, TVMaze/IMDb posters, Plex/Audiobookshelf progress sync | `db.ts`, `settings.ts`, `trackSources.ts`, `egenius/genreMatrix.ts`, `runtimeBus.ts` |
 | `electron/trackSources.ts` | `buildTrackMatchKey`, `extractCanonicalMediaSubpath`, `resolveReachableTrackPath`, `scoreAudioQuality`, `parseAlternateSources`, `serializeAlternateSources` | `indexer.ts`, `mediaServer.ts`, `cacheTranscoder.ts` |
-| `electron/mediaServer.ts` | HTTP byte-range streaming (`/track`, `/video`, `/artwork`), dynamic FFmpeg live `.mkv`/`.avi` remuxing | `db.ts`, `settings.ts`, `trackSources.ts` |
-| `electron/cacheTranscoder.ts` | Local SSD LRU cache, 360p H.264/AAC video transcoder, 500×500 cover art sanitizer | `db.ts`, `settings.ts`, `trackSources.ts`, `runtimeBus.ts` |
-| `electron/transcoder/binaryManager.ts` | Startup check & GitHub Releases auto-updater for `FFmpeg` / `HandBrakeCLI` in `userData/bin` | `runtimeBus.ts`, `settings.ts`, `platform/` |
+| `electron/mediaServer.ts` | HTTP byte-range streaming (`/track`, `/video`, `/artwork`), dynamic FFmpeg live `.mkv`/`.avi` remuxing | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts` |
+| `electron/cacheTranscoder.ts` | Local SSD LRU cache, 360p H.264/AAC video transcoder, 500×500 cover art sanitizer | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts`, `runtimeBus.ts` |
+| `electron/transcoder/binaryManager.ts` | Startup check & GitHub Releases auto-updater for `FFmpeg` / `HandBrakeCLI` in `userData/bin`, `detectHardwareEncoder` | `runtimeBus.ts`, `settings.ts` |
 | `electron/smartPlaylists.ts` | `evaluateSmartPlaylist`, `getPlaylistTracks`, `getPlaylistVideos`, `generateRelativeM3u8`, Smart Playlist exclusion helpers | `db.ts`, `logger.ts` |
 | `electron/egenius/*` | `index.ts`, `types.ts`, `affinityCache.ts`, `genreMatrix.ts`, `variantFilter.ts`, `scorer.ts`, `sequencer.ts` | `db.ts`, `settings.ts`, `logger.ts` |
-| `electron/ai/llamaService.ts` | `node-llama-cpp` GGUF downloader/loader (`0–50%` / `50–100%`), `models-manifest.json` cache, 5-tool agent loop | `runtimeBus.ts`, `db.ts`, `settings.ts`, `platform/` |
+| `electron/ai/llamaService.ts` | `node-llama-cpp` GGUF downloader/loader (`0–50%` / `50–100%`), `models-manifest.json` cache, 5-tool agent loop | `runtimeBus.ts`, `db.ts`, `settings.ts`, `egenius/affinityCache.ts`, `egenius/genreMatrix.ts` |
 | `electron/deviceSync.ts` | Unified MTP (`rtunes-mtp`) & UMS sync, dynamic multi-drive placement, `.retrotunes_catalog.json` manifest & reconciliation, `.scrobbler.log` delta sync, `deleteRegisteredDevice`, `reexportSyncedPlaylistM3u8` | `db.ts`, `smartPlaylists.ts`, `platform/`, `runtimeBus.ts` |
 | `electron/shareManager.ts` | Direct NFS/SMB share persistence, mount/unmount, auto-detect | `db.ts`, `settings.ts`, `platform/`, `authOidc.ts` |
 | `electron/storeArr.ts` | rTunes Storefront catalog, multi-source Top Charts, Lidarr/Radarr/Sonarr queue & requests | `settings.ts`, `db.ts`, `logger.ts` |

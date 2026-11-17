@@ -1,10 +1,4 @@
-import {
-  getDatabaseDiagnostics,
-  searchTracksFts,
-  searchVideosFts,
-  TrackRow,
-  VideoRow,
-} from '../db';
+import { getDatabaseDiagnostics } from '../db';
 import { listNetworkShares } from '../shareManager';
 import { getSettings } from '../settings';
 
@@ -28,17 +22,5 @@ export const standaloneLocalProvider = {
       sharesCount: shares.length,
       mountedSharesCount: shares.filter((s) => s.is_mounted === 1).length,
     };
-  },
-
-  searchTracks(query: string, limit = 200000): TrackRow[] {
-    return searchTracksFts(query, limit);
-  },
-
-  searchVideos(query: string, type?: 'movie' | 'tv'): VideoRow[] {
-    return searchVideosFts(query, type);
-  },
-
-  getShares() {
-    return listNetworkShares();
   },
 };

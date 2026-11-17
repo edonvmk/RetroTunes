@@ -4,6 +4,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { getDb, NetworkShareRow, TrackRow, VideoRow } from './db';
+import { getAppDataPath } from './runtimeBus';
 import { getSettings, saveSettings, getKeychainSecret, setKeychainSecret } from './settings';
 import { getAuthState } from './authOidc';
 import { logger } from './logger';
@@ -80,8 +81,7 @@ function updateShareSubpaths(db: ReturnType<typeof getDb>, id: number, fm: Share
 // ============================================================================
 
 export function getMountsRootDir(): string {
-  const userData = platformDriver.getFallbackUserDataDir();
-  const dir = path.join(userData, 'mounts');
+  const dir = path.join(getAppDataPath(), 'mounts');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

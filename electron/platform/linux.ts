@@ -21,10 +21,6 @@ export const linuxDriver: PlatformDriver = {
   isMacOsStyleMenu: false,
   quitOnAllWindowsClosed: true,
 
-  getFallbackUserDataDir() {
-    return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'RetroTunes');
-  },
-
   getDefaultCacheDir() {
     return path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'RetroTunes');
   },

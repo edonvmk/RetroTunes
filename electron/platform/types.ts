@@ -15,7 +15,6 @@ export interface PlatformDriver {
   quitOnAllWindowsClosed: boolean;
 
   // Directories & Sidecars
-  getFallbackUserDataDir(): string;
   getDefaultCacheDir(): string;
   getMtpBinaryName(): string;
 

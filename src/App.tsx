@@ -202,6 +202,22 @@ export const App: React.FC = () => {
   const [photos, setPhotos] = useState<PhotoRow[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRow[]>([]);
   const [playlistTracks, setPlaylistTracks] = useState<TrackRow[]>([]);
+  const [draggedPlaylistIdx, setDraggedPlaylistIdx] = useState<number | null>(null);
+  const [dragOverPlaylistIdx, setDragOverPlaylistIdx] = useState<number | null>(null);
+
+  const reorderPlaylistTrack = async (fromIdx: number, toIdx: number) => {
+    if (nav.kind !== 'playlist' || fromIdx === toIdx || fromIdx < 0 || toIdx < 0) return;
+    if (fromIdx >= playlistTracks.length || toIdx >= playlistTracks.length) return;
+    const next = [...playlistTracks];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    setPlaylistTracks(next);
+    await invokeRpc(
+      'playlists:reorderTracks',
+      nav.id,
+      next.map((t) => t.id)
+    );
+  };
   const [playlistVideos, setPlaylistVideos] = useState<VideoRow[]>([]);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [cacheStats, setCacheStats] = useState<CacheStats | null>(null);
@@ -2715,6 +2731,13 @@ export const App: React.FC = () => {
                               <tr
                                 key={track.id}
                                 className={isCurrent || isSelectedRow ? 'active-row' : ''}
+                                style={
+                                  dragOverPlaylistIdx === idx &&
+                                  nav.kind === 'playlist' &&
+                                  !activePlaylist?.is_smart
+                                    ? { boxShadow: 'inset 0 2px 0 #2563eb' }
+                                    : undefined
+                                }
                                 draggable
                                 onMouseEnter={() => setHoveredTrackId(track.id)}
                                 onMouseLeave={() =>
@@ -2748,10 +2771,43 @@ export const App: React.FC = () => {
                                   });
                                 }}
                                 onDragStart={(e) => {
+                                  if (nav.kind === 'playlist' && !activePlaylist?.is_smart) {
+                                    setDraggedPlaylistIdx(idx);
+                                  }
                                   const payload = JSON.stringify({ kind: 'track', id: track.id, title: track.title });
-                                  e.dataTransfer.effectAllowed = 'copy';
+                                  e.dataTransfer.effectAllowed = 'copyMove';
                                   e.dataTransfer.setData('application/x-rtunes-media', payload);
                                   e.dataTransfer.setData('application/json', payload);
+                                }}
+                                onDragOver={(e) => {
+                                  if (
+                                    nav.kind === 'playlist' &&
+                                    !activePlaylist?.is_smart &&
+                                    draggedPlaylistIdx !== null
+                                  ) {
+                                    e.preventDefault();
+                                    e.dataTransfer.dropEffect = 'move';
+                                    if (dragOverPlaylistIdx !== idx) {
+                                      setDragOverPlaylistIdx(idx);
+                                    }
+                                  }
+                                }}
+                                onDrop={(e) => {
+                                  if (
+                                    nav.kind === 'playlist' &&
+                                    !activePlaylist?.is_smart &&
+                                    draggedPlaylistIdx !== null
+                                  ) {
+                                    e.preventDefault();
+                                    const from = draggedPlaylistIdx;
+                                    setDraggedPlaylistIdx(null);
+                                    setDragOverPlaylistIdx(null);
+                                    void reorderPlaylistTrack(from, idx);
+                                  }
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedPlaylistIdx(null);
+                                  setDragOverPlaylistIdx(null);
                                 }}
                                 onDoubleClick={() => void playTrack(track)}
                               >
@@ -4966,6 +5022,54 @@ export const App: React.FC = () => {
               >
                 Open File Location
               </button>
+              {contextMenu.kind === 'playlist_track' && (() => {
+                const curIdx = playlistTracks.findIndex((pt) => pt.id === contextMenu.track?.id);
+                if (curIdx < 0) return null;
+                return (
+                  <>
+                    <button
+                      type="button"
+                      disabled={curIdx === 0}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '6px 14px',
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: curIdx === 0 ? 'default' : 'pointer',
+                        color: curIdx === 0 ? '#94a3b8' : '#0f172a',
+                      }}
+                      onClick={() => {
+                        setContextMenu(null);
+                        void reorderPlaylistTrack(curIdx, curIdx - 1);
+                      }}
+                    >
+                      Move Up in Playlist
+                    </button>
+                    <button
+                      type="button"
+                      disabled={curIdx >= playlistTracks.length - 1}
+                      style={{
+                        display: 'block',
+                        width: '100%',
+                        textAlign: 'left',
+                        padding: '6px 14px',
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: curIdx >= playlistTracks.length - 1 ? 'default' : 'pointer',
+                        color: curIdx >= playlistTracks.length - 1 ? '#94a3b8' : '#0f172a',
+                      }}
+                      onClick={() => {
+                        setContextMenu(null);
+                        void reorderPlaylistTrack(curIdx, curIdx + 1);
+                      }}
+                    >
+                      Move Down in Playlist
+                    </button>
+                  </>
+                );
+              })()}
               <button
                 type="button"
                 style={{

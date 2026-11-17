@@ -591,6 +591,19 @@ function registerAllHandlers() {
     db.prepare('DELETE FROM playlists WHERE id = ?').run(playlistId);
     return { ok: true };
   });
+  registerChannel('playlists:reorderTracks', (playlistId: number, trackIds: number[]) => {
+    const db = getDb();
+    const upd = db.prepare(
+      'UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND track_id = ?'
+    );
+    const tx = db.transaction(() => {
+      trackIds.forEach((tid, idx) => {
+        upd.run(idx + 1, playlistId, tid);
+      });
+    });
+    tx();
+    return { ok: true };
+  });
   registerChannel('playlists:addTrack', (playlistId: number, trackId: number) => {
     const db = getDb();
     const maxPos = (

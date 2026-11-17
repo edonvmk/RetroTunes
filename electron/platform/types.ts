@@ -11,6 +11,7 @@ export interface ShareMountParams {
 
 export interface PlatformDriver {
   platform: SupportedPlatform;
+  credentialStoreLabel: string;
   isMacOsStyleMenu: boolean;
   quitOnAllWindowsClosed: boolean;
 

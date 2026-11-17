@@ -18,6 +18,7 @@ function getFallbackSecretPath(service: string, account: string): string {
 
 export const linuxDriver: PlatformDriver = {
   platform: 'linux',
+  credentialStoreLabel: 'Linux Secret Service',
   isMacOsStyleMenu: false,
   quitOnAllWindowsClosed: true,
 

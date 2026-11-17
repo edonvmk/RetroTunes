@@ -107,11 +107,15 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
 
   const isDev = isDevMode();
   const [autoOpenOnMtp, setAutoOpenOnMtp] = React.useState(false);
+  const [credentialStoreLabel, setCredentialStoreLabel] = React.useState('OS Credential Store');
 
   React.useEffect(() => {
     void loadShares();
     invokeRpc<boolean>('devices:getAutoOpenOnMtp')
       .then((v) => setAutoOpenOnMtp(Boolean(v)))
+      .catch(() => {});
+    invokeRpc<string>('system:credentialStoreLabel')
+      .then((lbl) => { if (lbl) setCredentialStoreLabel(lbl); })
       .catch(() => {});
     invokeRpc<any[]>('devices:list')
       .then((list) => setRegisteredDevices(Array.isArray(list) ? list : []))
@@ -175,7 +179,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     try {
       const updated = await invokeRpc<AppSettings>('settings:save', form);
       onSaved(updated);
-      setStatusBanner('Preferences saved to SQLite & macOS Keychain.');
+      setStatusBanner(`Preferences saved to SQLite & ${credentialStoreLabel}.`);
       setTimeout(() => setStatusBanner(null), 3000);
     } finally {
       setSaving(false);
@@ -1074,7 +1078,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
                   <div>
                     <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
-                      User Token (Saved in macOS Keychain):
+                      User Token (Saved in {credentialStoreLabel}):
                     </label>
                     <input
                       type="password"

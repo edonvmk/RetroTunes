@@ -2888,21 +2888,17 @@ export const App: React.FC = () => {
                                         >
                                           {isEditingThis ? (
                                             <input
-                                              type="number"
-                                              min={1}
-                                              max={playlistTracks.length}
+                                              type="text"
+                                              inputMode="numeric"
                                               autoFocus
-                                              className="aqua-input"
-                                              style={{
-                                                width: 42,
-                                                padding: '0 3px',
-                                                fontSize: 11,
-                                                textAlign: 'right',
-                                              }}
+                                              className="aqua-pos-input"
                                               value={editingPlaylistPos.value}
                                               onClick={(e) => e.stopPropagation()}
                                               onChange={(e) =>
-                                                setEditingPlaylistPos({ idx: playlistIdx, value: e.target.value })
+                                                setEditingPlaylistPos({
+                                                  idx: playlistIdx,
+                                                  value: e.target.value.replace(/[^0-9]/g, ''),
+                                                })
                                               }
                                               onBlur={commitPos}
                                               onKeyDown={(e) => {
@@ -2916,7 +2912,41 @@ export const App: React.FC = () => {
                                               }}
                                             />
                                           ) : isCurrent && isPlaying ? (
-                                            '🔊'
+                                            <span
+                                              className="aqua-playing-speaker"
+                                              title="Now Playing"
+                                              style={{
+                                                filter:
+                                                  isCurrent || isSelectedRow
+                                                    ? 'drop-shadow(0 1px 0 rgba(0,0,0,0.45))'
+                                                    : 'drop-shadow(0 1px 0 rgba(255,255,255,0.8))',
+                                              }}
+                                            >
+                                              <svg
+                                                width="13"
+                                                height="13"
+                                                viewBox="0 0 16 16"
+                                                fill="none"
+                                                aria-label="Playing"
+                                              >
+                                                <path
+                                                  d="M2.5 6.2H5.2L9.2 2.8V13.2L5.2 9.8H2.5V6.2Z"
+                                                  fill={isCurrent || isSelectedRow ? '#ffffff' : '#334155'}
+                                                />
+                                                <path
+                                                  d="M11.2 5.3C12 6.1 12.4 7 12.4 8C12.4 9 12 9.9 11.2 10.7"
+                                                  stroke={isCurrent || isSelectedRow ? '#dbeafe' : '#2563eb'}
+                                                  strokeWidth="1.5"
+                                                  strokeLinecap="round"
+                                                />
+                                                <path
+                                                  d="M13 3.6C14.3 4.8 14.9 6.3 14.9 8C14.9 9.7 14.3 11.2 13 12.4"
+                                                  stroke={isCurrent || isSelectedRow ? '#dbeafe' : '#2563eb'}
+                                                  strokeWidth="1.5"
+                                                  strokeLinecap="round"
+                                                />
+                                              </svg>
+                                            </span>
                                           ) : nav.kind === 'playlist' ? (
                                             playlistPos
                                           ) : (

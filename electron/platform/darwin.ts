@@ -18,6 +18,7 @@ function isDirNonEmpty(dirPath: string): boolean {
 
 export const darwinDriver: PlatformDriver = {
   platform: 'darwin',
+  credentialStoreLabel: 'macOS Keychain',
   isMacOsStyleMenu: true,
   quitOnAllWindowsClosed: false,
 

@@ -18,6 +18,7 @@ function getFallbackSecretPath(service: string, account: string): string {
 
 export const win32Driver: PlatformDriver = {
   platform: 'win32',
+  credentialStoreLabel: 'Windows Credential Vault',
   isMacOsStyleMenu: false,
   quitOnAllWindowsClosed: true,
 

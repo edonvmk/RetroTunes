@@ -71,7 +71,7 @@ export function initAuthFromKeychain(): AuthState {
           ...parsed,
           mode: settings.authMode,
         };
-        logger.info('AUTH_OIDC', `Restored Authentik SSO session from macOS Keychain for ${parsed.user.username}`);
+        logger.info('AUTH_OIDC', `Restored Authentik SSO session from ${platformDriver.credentialStoreLabel} for ${parsed.user.username}`);
       }
     } catch {
       // ignore

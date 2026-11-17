@@ -97,7 +97,60 @@ export function getIndexProgress(): IndexProgress {
 export function cancelLibraryScan(): void {
   cancelRequested = true;
   backgroundHydrationRunning = false;
+  clearIndexCheckpoint();
   logger.info('INDEXER', 'User requested cancellation of active scan / background hydration.');
+}
+
+interface IndexerCheckpoint {
+  inProgress: boolean;
+  isRebuild?: boolean;
+  completedDirs: string[];
+  totalDirs: number;
+  audioAdded: number;
+  videoAdded: number;
+  albumsFound: number;
+  updatedAt: number;
+}
+
+const CHECKPOINT_KEY = 'indexer_scan_checkpoint';
+const CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+function readIndexCheckpoint(): IndexerCheckpoint | null {
+  try {
+    const row = getDb()
+      .prepare('SELECT value FROM settings WHERE key = ?')
+      .get(CHECKPOINT_KEY) as { value: string } | undefined;
+    if (!row) return null;
+    const parsed = JSON.parse(row.value) as IndexerCheckpoint;
+    if (!parsed.inProgress || Date.now() - (parsed.updatedAt || 0) > CHECKPOINT_MAX_AGE_MS) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeIndexCheckpoint(cp: IndexerCheckpoint): void {
+  try {
+    getDb()
+      .prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+      .run(CHECKPOINT_KEY, JSON.stringify(cp));
+  } catch {
+    // ignore checkpoint write failures
+  }
+}
+
+function clearIndexCheckpoint(): void {
+  try {
+    getDb().prepare('DELETE FROM settings WHERE key = ?').run(CHECKPOINT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export function hasPendingIndexCheckpoint(): boolean {
+  return Boolean(readIndexCheckpoint());
 }
 
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -438,7 +491,10 @@ interface DiscoveredAlbumDir {
  * Phase 3: Build Song & Video catalog from filenames/hierarchy in fast SQLite batches
  * Phase 4: Hydrate detailed ID3/Vorbis tags & artwork on-demand or via gentle background trickle
  */
-export async function runLibraryScan(customPaths?: string[]): Promise<{
+export async function runLibraryScan(
+  customPaths?: string[],
+  options?: { resume?: boolean }
+): Promise<{
   audioAdded: number;
   videoAdded: number;
   totalAudioScanned: number;
@@ -819,9 +875,33 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
       }
     };
 
+    const checkpoint = options?.resume ? readIndexCheckpoint() : null;
+    const completedSet = new Set<string>(checkpoint?.completedDirs || []);
+    const completedList = [...completedSet];
+    if (checkpoint) {
+      albumsFound = Math.max(albumsFound, checkpoint.albumsFound || 0);
+      audioAdded = Math.max(audioAdded, checkpoint.audioAdded || 0);
+      videoAdded = Math.max(videoAdded, checkpoint.videoAdded || 0);
+      logger.info('INDEXER', `Resuming interrupted library scan (${completedSet.size}/${artistDirs.length} directories already indexed).`);
+    } else {
+      writeIndexCheckpoint({
+        inProgress: true,
+        isRebuild: false,
+        completedDirs: [],
+        totalDirs: artistDirs.length,
+        audioAdded,
+        videoAdded,
+        albumsFound,
+        updatedAt: Date.now(),
+      });
+    }
+
     for (let i = 0; i < artistDirs.length; i++) {
       if (cancelRequested) break;
       const item = artistDirs[i];
+      if (completedSet.has(item.dirPath)) {
+        continue;
+      }
       broadcastProgress({
         phase: 'albums',
         processed: i + 1,
@@ -829,6 +909,24 @@ export async function runLibraryScan(customPaths?: string[]): Promise<{
         currentFile: `Scanning ${item.artistName}...`,
       });
       await scanAlbumTree(item.rootPath, item.artistName, item.dirPath, 1);
+      completedSet.add(item.dirPath);
+      completedList.push(item.dirPath);
+      if (completedList.length % 5 === 0 || i === artistDirs.length - 1) {
+        writeIndexCheckpoint({
+          inProgress: true,
+          isRebuild: checkpoint?.isRebuild ?? false,
+          completedDirs: completedList,
+          totalDirs: artistDirs.length,
+          audioAdded,
+          videoAdded,
+          albumsFound,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+
+    if (!cancelRequested) {
+      clearIndexCheckpoint();
     }
 
     broadcastProgress(

@@ -1144,6 +1144,19 @@ export function rebuildMediaDatabase(): { ok: boolean } {
       INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');
       INSERT INTO videos_fts(videos_fts) VALUES('rebuild');
     `);
+    const checkpoint = JSON.stringify({
+      inProgress: true,
+      isRebuild: true,
+      completedDirs: [],
+      totalDirs: 0,
+      audioAdded: 0,
+      videoAdded: 0,
+      albumsFound: 0,
+      updatedAt: Date.now(),
+    });
+    db.prepare(
+      "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('indexer_scan_checkpoint', ?, datetime('now'))"
+    ).run(checkpoint);
   });
   tx();
   logger.info('DB', 'Media database cleared and FTS5 indexes rebuilt.');

@@ -235,7 +235,7 @@ export function getSettings(forceReload = false): AppSettings {
     merged.ffprobeBinaryPath = bundledFfprobePath;
   }
 
-  // Pull secrets from macOS Keychain if available
+  // Pull secrets from OS credential store if available
   for (const key of SECRET_KEYS) {
     const keychainVal = getKeychainSecret(key);
     if (keychainVal !== null && keychainVal.length > 0) {

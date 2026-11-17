@@ -24,6 +24,7 @@ import {
   runLibraryScan,
   getIndexProgress,
   cancelLibraryScan,
+  hasPendingIndexCheckpoint,
   hydrateTrackMetadata,
   hydrateAlbumMetadata,
   hydrateVideoArtwork,
@@ -183,6 +184,7 @@ function registerAllHandlers() {
   registerChannel('logs:testEvent', (level: LogLevel, subsystem: LogSubsystem, message: string) => {
     return logger.log(level, subsystem, message, { triggeredBy: 'User Diagnostic Test' });
   });
+  registerChannel('system:credentialStoreLabel', () => platformDriver.credentialStoreLabel);
 
   // --- OS Dialogs ---
   registerChannel('dialog:selectDirectory', async (title?: string) => {
@@ -1073,6 +1075,10 @@ app.whenReady().then(async () => {
   // Resume gentle background metadata & video artwork hydration
   setTimeout(async () => {
     await autoMountPromise;
+    if (hasPendingIndexCheckpoint()) {
+      logger.info('INDEXER', 'Detected interrupted library scan/rebuild checkpoint; resuming automatically...');
+      void runLibraryScan(undefined, { resume: true });
+    }
     void hydrateVideoArtwork();
     void syncPlexAndAudiobookshelfProgress();
     if (getSettings().metadataHydrationMode === 'hybrid') {

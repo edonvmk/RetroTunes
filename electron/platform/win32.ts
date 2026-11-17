@@ -4,7 +4,7 @@ import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { safeStorage } from 'electron';
+import { getSafeStorage } from '../runtimeBus';
 import { PlatformDriver, ShareMountParams } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +43,7 @@ export const win32Driver: PlatformDriver = {
       if (!secret) {
         return this.deleteSecret(service, account);
       }
+      const safeStorage = getSafeStorage();
       if (safeStorage?.isEncryptionAvailable?.()) {
         fs.writeFileSync(secretFile, safeStorage.encryptString(secret));
         return true;
@@ -59,6 +60,7 @@ export const win32Driver: PlatformDriver = {
       const secretFile = getFallbackSecretPath(service, account);
       if (!fs.existsSync(secretFile)) return null;
       const buf = fs.readFileSync(secretFile);
+      const safeStorage = getSafeStorage();
       if (safeStorage?.isEncryptionAvailable?.()) {
         return safeStorage.decryptString(buf);
       }

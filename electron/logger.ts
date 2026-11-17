@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { BrowserWindow } from 'electron';
+import { emitRendererEvent } from './runtimeBus';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -165,17 +165,8 @@ class DiagnosticLogger {
       this.appendToFile(this.logFilePath, formattedLine);
     }
 
-    // Broadcast to renderer windows if available
-    try {
-      const windows = BrowserWindow.getAllWindows();
-      for (const win of windows) {
-        if (!win.isDestroyed() && win.webContents) {
-          win.webContents.send('log:entry', entry);
-        }
-      }
-    } catch {
-      // Electron may not be ready yet during early boot
-    }
+    // Broadcast to renderer windows / SSE listeners if available
+    emitRendererEvent('log:entry', entry);
 
     return entry;
   }

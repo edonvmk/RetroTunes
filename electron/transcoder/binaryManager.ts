@@ -3,7 +3,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { app, BrowserWindow } from 'electron';
+import { emitRendererEvent, getAppDataPath } from '../runtimeBus';
 import { getSettings, saveSettings } from '../settings';
 import { platformDriver } from '../platform';
 import { logger } from '../logger';
@@ -39,7 +39,11 @@ let lastCheckedAt: string | null = null;
 let lastMessage: string | null = null;
 
 function getUserDataDir(): string {
-  return app?.isReady?.() ? app.getPath('userData') : platformDriver.getFallbackUserDataDir();
+  try {
+    return getAppDataPath();
+  } catch {
+    return platformDriver.getFallbackUserDataDir();
+  }
 }
 
 export function getManagedBinDir(): string {
@@ -47,15 +51,7 @@ export function getManagedBinDir(): string {
 }
 
 function broadcastBinaryProgress(ev: BinaryProgressEvent) {
-  try {
-    for (const win of BrowserWindow?.getAllWindows?.() ?? []) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('transcoder:binaryProgress', ev);
-      }
-    }
-  } catch {
-    // ignore in headless CLI mode
-  }
+  emitRendererEvent('transcoder:binaryProgress', ev);
 }
 
 async function readBinaryVersion(binPath: string, flag: string): Promise<string | null> {

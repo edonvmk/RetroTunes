@@ -4,7 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { ChildProcess, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
-import { BrowserWindow } from 'electron';
+import { emitRendererEvent } from './runtimeBus';
 import { resolveReachableTrackPath } from './trackSources';
 import {
   getDb,
@@ -66,9 +66,7 @@ export interface DeviceCatalog {
 }
 
 function broadcastDeviceCatalogUpdated(uuid: string, catalog: DeviceCatalog) {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('devices:catalogUpdated', { uuid, catalog });
-  }
+  emitRendererEvent('devices:catalogUpdated', { uuid, catalog });
 }
 
 export interface DeviceProfile {
@@ -167,39 +165,15 @@ let activeSyncProgress: SyncProgress = {
 
 function broadcastSyncProgress(update: Partial<SyncProgress>) {
   activeSyncProgress = { ...activeSyncProgress, ...update };
-  try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('device:syncProgress', activeSyncProgress);
-      }
-    }
-  } catch {
-    // ignore
-  }
+  emitRendererEvent('device:syncProgress', activeSyncProgress);
 }
 
 function broadcastDevicesChanged() {
-  try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('devices:changed');
-      }
-    }
-  } catch {
-    // ignore
-  }
+  emitRendererEvent('devices:changed');
 }
 
 function broadcastMtpLockWarning(message: string | null) {
-  try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('devices:mtpLockWarning', message);
-      }
-    }
-  } catch {
-    // ignore
-  }
+  emitRendererEvent('devices:mtpLockWarning', message);
 }
 
 export function getSyncProgress(): SyncProgress {

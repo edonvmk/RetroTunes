@@ -58,6 +58,7 @@ import {
 import {
   formatBytes,
   formatDuration,
+  getMediaBaseUrl,
   invokeRpc,
   isDevMode,
   subscribeEvent,
@@ -951,8 +952,9 @@ export const App: React.FC = () => {
   }, [baseTrackList, nav.kind, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc, playlistPositionMap]);
 
   const getArtworkUrl = (coverArtPath?: string | null) => {
-    if (!coverArtPath || !mediaPort) return null;
-    return `http://127.0.0.1:${mediaPort}/artwork?path=${encodeURIComponent(coverArtPath)}`;
+    const base = getMediaBaseUrl(mediaPort);
+    if (!coverArtPath || !base) return null;
+    return `${base}/artwork?path=${encodeURIComponent(coverArtPath)}`;
   };
 
   // Playback handlers
@@ -971,9 +973,10 @@ export const App: React.FC = () => {
         setCoverFlowIndex(albumIdx);
       }
     }
-    if (!audioRef.current || !mediaPort) return;
+    const base = getMediaBaseUrl(mediaPort);
+    if (!audioRef.current || !base) return;
 
-    const srcUrl = `http://127.0.0.1:${mediaPort}/track?id=${track.id}`;
+    const srcUrl = `${base}/track?id=${track.id}`;
     audioRef.current.src = srcUrl;
     audioRef.current.volume = isMuted ? 0 : volume;
 
@@ -4330,7 +4333,7 @@ export const App: React.FC = () => {
                         >
                           {mediaPort > 0 && ph.remote_path ? (
                             <img
-                              src={`http://127.0.0.1:${mediaPort}/artwork?path=${encodeURIComponent(ph.remote_path)}`}
+                              src={`${getMediaBaseUrl(mediaPort)}/artwork?path=${encodeURIComponent(ph.remote_path)}`}
                               alt={ph.title}
                               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                             />
@@ -4796,7 +4799,7 @@ export const App: React.FC = () => {
               controls
               autoPlay
               style={{ width: '100%', maxHeight: '74vh', background: '#000' }}
-              src={`http://127.0.0.1:${mediaPort}/video?id=${activeVideo.id}`}
+              src={`${getMediaBaseUrl(mediaPort)}/video?id=${activeVideo.id}`}
             />
           </div>
         </div>

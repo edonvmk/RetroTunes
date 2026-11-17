@@ -124,7 +124,7 @@ export function startMediaServer(): Promise<number> {
           }
 
           const ext = path.extname(filePath).toLowerCase();
-          // If MKV or AVI and not yet transcoded in cache, live-remux/transcode to fragmented MP4 for hardware-accelerated playback
+          // If MKV or AVI and not yet transcoded in cache, live-remux/transcode to fragmented MP4
           if (ext === '.mkv' || ext === '.avi') {
             const settings = getSettings();
             res.writeHead(200, {
@@ -132,13 +132,31 @@ export function startMediaServer(): Promise<number> {
               'Access-Control-Allow-Origin': '*',
             });
 
+            const accel = settings.hardwareAccelMode || 'auto';
+            let videoCodecArgs: string[];
+            if (
+              process.platform === 'darwin' &&
+              (accel === 'auto' || accel === 'vt_h264')
+            ) {
+              videoCodecArgs = ['-c:v', 'h264_videotoolbox', '-b:v', '2500k'];
+            } else if (
+              (process.platform === 'win32' || process.platform === 'linux') &&
+              accel === 'nvenc'
+            ) {
+              videoCodecArgs = ['-c:v', 'h264_nvenc', '-b:v', '2500k'];
+            } else if (
+              (process.platform === 'win32' || process.platform === 'linux') &&
+              accel === 'qsv'
+            ) {
+              videoCodecArgs = ['-c:v', 'h264_qsv', '-b:v', '2500k'];
+            } else {
+              videoCodecArgs = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23'];
+            }
+
             const ff = spawn(settings.ffmpegBinaryPath, [
               '-i',
               filePath,
-              '-c:v',
-              'h264_videotoolbox',
-              '-b:v',
-              '2500k',
+              ...videoCodecArgs,
               '-c:a',
               'aac',
               '-b:a',

@@ -19,13 +19,57 @@ export function isDevMode(): boolean {
   return Boolean(import.meta.env?.DEV);
 }
 
+export function getRpcBaseUrl(): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const configured = window.localStorage?.getItem('rtunes_server_url')?.trim();
+      if (configured) {
+        return configured.replace(/\/+$/, '');
+      }
+    } catch {
+      // ignore storage errors
+    }
+    const { protocol, origin, port } = window.location || {};
+    if ((protocol === 'http:' || protocol === 'https:') && port !== '5173') {
+      return origin.replace(/\/+$/, '');
+    }
+  }
+  return 'http://127.0.0.1:42815';
+}
+
+export function getMediaBaseUrl(mediaPort?: number): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const configured = window.localStorage?.getItem('rtunes_server_url')?.trim();
+      if (configured) {
+        return configured.replace(/\/+$/, '');
+      }
+    } catch {
+      // ignore storage errors
+    }
+    const { protocol, hostname, origin, port } = window.location || {};
+    if (
+      !window.rtunesElectron &&
+      (protocol === 'http:' || protocol === 'https:') &&
+      port !== '5173'
+    ) {
+      return origin.replace(/\/+$/, '');
+    }
+    if (mediaPort && mediaPort > 0) {
+      const host = hostname && hostname !== '' ? hostname : '127.0.0.1';
+      return `http://${host}:${mediaPort}`;
+    }
+  }
+  return mediaPort && mediaPort > 0 ? `http://127.0.0.1:${mediaPort}` : '';
+}
+
 export async function invokeRpc<T = any>(channel: string, ...args: unknown[]): Promise<T> {
   if (window.rtunesElectron?.invoke) {
     return (await window.rtunesElectron.invoke(channel, ...args)) as T;
   }
 
-  // Fallback to local diagnostic HTTP RPC bridge (port 42815)
-  const res = await fetch('http://127.0.0.1:42815/rpc', {
+  const baseUrl = getRpcBaseUrl();
+  const res = await fetch(`${baseUrl}/rpc`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channel, args }),
@@ -37,6 +81,35 @@ export async function invokeRpc<T = any>(channel: string, ...args: unknown[]): P
   return json.data as T;
 }
 
+let sharedEventSource: EventSource | null = null;
+const sseListeners = new Map<string, Set<(payload: any) => void>>();
+
+function ensureSharedEventSource(): void {
+  if (sharedEventSource || typeof window === 'undefined' || typeof EventSource === 'undefined') {
+    return;
+  }
+  const baseUrl = getRpcBaseUrl();
+  const es = new EventSource(`${baseUrl}/events`);
+  es.onmessage = (ev) => {
+    try {
+      const parsed = JSON.parse(ev.data) as { channel?: string; payload?: unknown };
+      if (!parsed.channel) return;
+      const set = sseListeners.get(parsed.channel);
+      if (set) {
+        for (const fn of set) {
+          fn(parsed.payload);
+        }
+      }
+    } catch {
+      // ignore malformed event
+    }
+  };
+  es.onerror = () => {
+    // EventSource automatically reconnects
+  };
+  sharedEventSource = es;
+}
+
 export function subscribeEvent<T = any>(
   channel: string,
   listener: (payload: T) => void
@@ -44,7 +117,24 @@ export function subscribeEvent<T = any>(
   if (window.rtunesElectron?.on) {
     return window.rtunesElectron.on(channel, (data) => listener(data as T));
   }
-  return () => {};
+
+  ensureSharedEventSource();
+  let set = sseListeners.get(channel);
+  if (!set) {
+    set = new Set();
+    sseListeners.set(channel, set);
+  }
+  set.add(listener);
+
+  return () => {
+    const currentSet = sseListeners.get(channel);
+    if (currentSet) {
+      currentSet.delete(listener);
+      if (currentSet.size === 0) {
+        sseListeners.delete(channel);
+      }
+    }
+  };
 }
 
 export function formatDuration(seconds: number): string {

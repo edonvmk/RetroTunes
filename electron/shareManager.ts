@@ -3,7 +3,6 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { app } from 'electron';
 import { getDb, NetworkShareRow, TrackRow, VideoRow } from './db';
 import { getSettings, saveSettings, getKeychainSecret, setKeychainSecret } from './settings';
 import { getAuthState } from './authOidc';

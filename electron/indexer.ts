@@ -4,7 +4,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { BrowserWindow } from 'electron';
+import { emitRendererEvent } from './runtimeBus';
 import { getDb, recalculateArtistPopularityScores, TrackRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
@@ -83,27 +83,11 @@ function broadcastProgress(update: Partial<IndexProgress>, force = false) {
   if (!force && now - lastBroadcastTime < 120) return;
   lastBroadcastTime = now;
 
-  try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('indexer:progress', currentProgress);
-      }
-    }
-  } catch {
-    // ignore
-  }
+  emitRendererEvent('indexer:progress', currentProgress);
 }
 
 function broadcastBatchCommitted() {
-  try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('indexer:batchCommitted', currentProgress);
-      }
-    }
-  } catch {
-    // ignore
-  }
+  emitRendererEvent('indexer:batchCommitted', currentProgress);
 }
 
 export function getIndexProgress(): IndexProgress {

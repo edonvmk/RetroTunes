@@ -1,7 +1,6 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import { app } from 'electron';
 import { logger } from './logger';
 import { platformDriver } from './platform';
 import { classifyVariant, isInterludeOrSkit } from './egenius/variantFilter';
@@ -206,7 +205,16 @@ let dbFilePath = '';
 
 export function getDbPath(): string {
   if (dbFilePath) return dbFilePath;
-  const dataDir = platformDriver.getFallbackUserDataDir();
+  if (process.env.RTUNES_DB_PATH && process.env.RTUNES_DB_PATH.trim()) {
+    const customFile = path.resolve(process.env.RTUNES_DB_PATH.trim());
+    fs.mkdirSync(path.dirname(customFile), { recursive: true });
+    dbFilePath = customFile;
+    return dbFilePath;
+  }
+  const dataDir =
+    process.env.RTUNES_DATA_DIR && process.env.RTUNES_DATA_DIR.trim()
+      ? path.resolve(process.env.RTUNES_DATA_DIR.trim())
+      : platformDriver.getFallbackUserDataDir();
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     dbFilePath = path.join(dataDir, 'rtunes.sqlite');
@@ -228,6 +236,7 @@ export function initDatabase(customPath?: string): Database.Database {
   const db = new Database(targetPath);
 
   db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
   db.pragma('temp_store = MEMORY');

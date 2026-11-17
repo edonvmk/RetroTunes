@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'path';
 import http from 'http';
 import fs from 'fs';
+import { emitRendererEvent, onRendererEvent } from './runtimeBus';
 import {
   initDatabase,
   getDb,
@@ -849,11 +850,42 @@ function registerAllHandlers() {
 function startHttpRpcFallbackServer(port = 42815) {
   const srv = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/events')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.write(': connected\n\n');
+
+      const unsubscribe = onRendererEvent((channel, payload) => {
+        try {
+          res.write(`data: ${JSON.stringify({ channel, payload })}\n\n`);
+        } catch {
+          // ignore closed socket
+        }
+      });
+
+      const keepAlive = setInterval(() => {
+        try {
+          res.write(': ping\n\n');
+        } catch {
+          clearInterval(keepAlive);
+        }
+      }, 25000);
+
+      req.on('close', () => {
+        clearInterval(keepAlive);
+        unsubscribe();
+      });
       return;
     }
     if (req.method === 'POST' && req.url === '/rpc') {
@@ -896,11 +928,7 @@ function startHttpRpcFallbackServer(port = 42815) {
 }
 
 function sendUiEvent(channel: string) {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) {
-      win.webContents.send(channel);
-    }
-  }
+  emitRendererEvent(channel);
 }
 
 function setupApplicationMenu() {

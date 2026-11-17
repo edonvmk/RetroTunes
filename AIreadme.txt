@@ -42,6 +42,7 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
   - `electron/providers/standaloneLocal.ts` — Active default provider for local SQLite + direct NFS/SMB access (never modify for SSO or Docker server changes).
   - `electron/providers/remoteServer.ts` — Isolated stub/preview provider for future `rTunes-Server` Docker HTTPS/WebSocket API (gated behind `isDev === true`).
   - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>`).
+  - `electron/runtimeBus.ts` — Electron-free event bus & path/keychain runtime abstraction for shared backend modules.
   - `electron/transcoder/binaryManager.ts` — Startup auto-check & updater for managed `FFmpeg` and `HandBrakeCLI` binaries.
   - `electron/mediaServer.ts` — Local HTTP range-streaming server for audio/video playback.
   - `electron/platform/` — Cross-platform OS drivers: `darwin.ts`, `win32.ts`, `linux.ts`.

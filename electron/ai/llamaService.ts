@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
-import { app, BrowserWindow } from 'electron';
+import { emitRendererEvent, getAppDataPath } from '../runtimeBus';
 import { getDb, searchTracksFts, TrackRow } from '../db';
 import { getSettings } from '../settings';
 import { logger } from '../logger';
@@ -136,7 +136,7 @@ let sessionCollectedTracks = new Map<number, TrackRow>();
 export function getAiModelsDir(): string {
   let userData = '';
   try {
-    userData = app?.getPath ? app.getPath('userData') : platformDriver.getFallbackUserDataDir();
+    userData = getAppDataPath();
   } catch {
     userData = platformDriver.getFallbackUserDataDir();
   }
@@ -165,9 +165,7 @@ export function getAiModelCacheStatus(
 }
 
 function broadcastPrepareProgress(progress: AiPrepareProgress) {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('ai:prepare-progress', progress);
-  }
+  emitRendererEvent('ai:prepare-progress', progress);
 }
 
 export async function disposeAiModel(): Promise<{ ok: boolean }> {

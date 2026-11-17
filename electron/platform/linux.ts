@@ -4,7 +4,7 @@ import path from 'path';
 import os from 'os';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
-import { safeStorage } from 'electron';
+import { getSafeStorage } from '../runtimeBus';
 import { PlatformDriver, ShareMountParams } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -47,6 +47,7 @@ export const linuxDriver: PlatformDriver = {
     } catch {
       try {
         const secretFile = getFallbackSecretPath(service, account);
+        const safeStorage = getSafeStorage();
         if (safeStorage?.isEncryptionAvailable?.()) {
           fs.writeFileSync(secretFile, safeStorage.encryptString(secret));
         } else {
@@ -73,6 +74,7 @@ export const linuxDriver: PlatformDriver = {
       const secretFile = getFallbackSecretPath(service, account);
       if (!fs.existsSync(secretFile)) return null;
       const buf = fs.readFileSync(secretFile);
+      const safeStorage = getSafeStorage();
       if (safeStorage?.isEncryptionAvailable?.()) {
         return safeStorage.decryptString(buf);
       }

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { spawn, execFileSync } from 'child_process';
-import { BrowserWindow } from 'electron';
+import { emitRendererEvent } from './runtimeBus';
 import { getDb, CacheJobRow, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
@@ -23,11 +23,7 @@ export interface CacheStats {
 function broadcastCacheStatus() {
   try {
     const stats = getCacheStats();
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('cache:status', stats);
-      }
-    }
+    emitRendererEvent('cache:status', stats);
   } catch {
     // ignore
   }

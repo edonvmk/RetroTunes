@@ -202,6 +202,11 @@ export const App: React.FC = () => {
   const [photos, setPhotos] = useState<PhotoRow[]>([]);
   const [playlists, setPlaylists] = useState<PlaylistRow[]>([]);
   const [playlistTracks, setPlaylistTracks] = useState<TrackRow[]>([]);
+  const playlistPositionMap = useMemo(() => {
+    const map = new Map<number, number>();
+    playlistTracks.forEach((t, i) => map.set(t.id, i + 1));
+    return map;
+  }, [playlistTracks]);
   const [draggedPlaylistIdx, setDraggedPlaylistIdx] = useState<number | null>(null);
   const [dragOverPlaylistIdx, setDragOverPlaylistIdx] = useState<number | null>(null);
   const [editingPlaylistPos, setEditingPlaylistPos] = useState<{ idx: number; value: string } | null>(null);
@@ -2827,8 +2832,10 @@ export const App: React.FC = () => {
                                     case 'track_num': {
                                       const canEditPos =
                                         nav.kind === 'playlist' && !activePlaylist?.is_smart;
+                                      const playlistPos = playlistPositionMap.get(track.id) ?? idx + 1;
+                                      const playlistIdx = playlistPos - 1;
                                       const isEditingThis =
-                                        canEditPos && editingPlaylistPos?.idx === idx;
+                                        canEditPos && editingPlaylistPos?.idx === playlistIdx;
                                       const commitPos = () => {
                                         if (!editingPlaylistPos) return;
                                         const parsed = Number(editingPlaylistPos.value);
@@ -2838,7 +2845,7 @@ export const App: React.FC = () => {
                                             0,
                                             Math.min(playlistTracks.length - 1, Math.round(parsed) - 1)
                                           );
-                                          void reorderPlaylistTrack(idx, targetIdx);
+                                          void reorderPlaylistTrack(playlistIdx, targetIdx);
                                         }
                                       };
                                       return (
@@ -2853,7 +2860,7 @@ export const App: React.FC = () => {
                                           onClick={(e) => {
                                             if (!canEditPos) return;
                                             e.stopPropagation();
-                                            setEditingPlaylistPos({ idx, value: String(idx + 1) });
+                                            setEditingPlaylistPos({ idx: playlistIdx, value: String(playlistPos) });
                                           }}
                                         >
                                           {isEditingThis ? (
@@ -2872,7 +2879,7 @@ export const App: React.FC = () => {
                                               value={editingPlaylistPos.value}
                                               onClick={(e) => e.stopPropagation()}
                                               onChange={(e) =>
-                                                setEditingPlaylistPos({ idx, value: e.target.value })
+                                                setEditingPlaylistPos({ idx: playlistIdx, value: e.target.value })
                                               }
                                               onBlur={commitPos}
                                               onKeyDown={(e) => {
@@ -2888,7 +2895,7 @@ export const App: React.FC = () => {
                                           ) : isCurrent && isPlaying ? (
                                             '🔊'
                                           ) : nav.kind === 'playlist' ? (
-                                            idx + 1
+                                            playlistPos
                                           ) : (
                                             track.track_num || idx + 1
                                           )}

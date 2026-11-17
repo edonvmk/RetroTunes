@@ -888,6 +888,11 @@ export const App: React.FC = () => {
       // Highlight or filter if desired; in Cover Flow, all tracks are shown or filtered by selected album
     }
 
+    // Preserve playlist added/position order by default when viewing a playlist
+    if (nav.kind === 'playlist' && sortCol === 'artist' && sortAsc) {
+      return list;
+    }
+
     list.sort((a, b) => {
       const va = a[sortCol];
       const vb = b[sortCol];
@@ -902,7 +907,7 @@ export const App: React.FC = () => {
     });
 
     return list;
-  }, [baseTrackList, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc]);
+  }, [baseTrackList, nav.kind, viewMode, selectedGenre, selectedArtist, selectedAlbum, sortCol, sortAsc]);
 
   const getArtworkUrl = (coverArtPath?: string | null) => {
     if (!coverArtPath || !mediaPort) return null;
@@ -2758,7 +2763,11 @@ export const App: React.FC = () => {
                                           key={col.id}
                                           style={{ textAlign: 'right', color: isCurrent ? '#fff' : '#64748b' }}
                                         >
-                                          {isCurrent && isPlaying ? '🔊' : track.track_num || idx + 1}
+                                          {isCurrent && isPlaying
+                                            ? '🔊'
+                                            : nav.kind === 'playlist'
+                                            ? idx + 1
+                                            : track.track_num || idx + 1}
                                         </td>
                                       );
                                     case 'cache':

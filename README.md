@@ -1,35 +1,101 @@
-# RetroTunes (rTunes)
+# RetroTunes (`rTunes`) — ePod Suite
 
-**RetroTunes (`rTunes` — Client Code: `ePod Suite`)** is a cross-platform desktop media player, homelab media gateway, and universal portable-device (**ePod / MTP / UMS**) sync engine built with **Electron**, **React 19**, **TypeScript**, and **SQLite (FTS5)**.
+**A nostalgic, late-2000s iTunes 9-inspired desktop media manager, self-hosted `*arr` storefront, and automated Digital Audio Player (DAP) sync suite.**
 
-Designed around a late-2000s **Aqua & Brushed Metal** aesthetic, RetroTunes pairs classic desktop ergonomics with modern homelab and portable hardware workflows.
+RetroTunes brings back tactile Cover Flow browsing, smart playlists, and one-click portable device syncing—re-engineered for modern self-hosted NAS libraries (NFS/SMB), lossless collections, and dedicated offline players like the **Innioasis Y2 (Stock & Y2 Reborn)** and **Rockbox** click-wheel DAPs.
+
+> **Current Build Status:** RetroTunes currently operates exclusively in **Standalone Mode** (`Mode: Standalone` in the bottom-right status bar). **Authentik and SSO authentication are visible in the UI/configuration but are not yet functional.**
 
 ---
 
-## Features
+## Core Features
 
-- **Classic Aqua & Brushed Metal UI**: Unified brushed-metal transport header, inset backlit LCD playback display with scrubbing, **3D Cover Flow** browser, glossy Aqua pill controls, and segmented device capacity bars.
-- **High-Scale Media Library (100,000+ Tracks)**: Virtualized/windowed tables backed by synchronous `better-sqlite3` + FTS5 full-text search for instant filtering across Music, Videos, Books, Audiobooks, and Photos.
-- **Universal ePod / MTP / UMS Sync Engine**:
-  - Persistent device identity tracking via `uuid` and USB serial.
-  - Unified MTP (`rtunes-mtp`) and USB Mass Storage (`UMS`) sync with `.m3u8` playlist export.
-  - Timestamp-reconciled `.scrobbler.log` / `.retrotunes_plays.json` delta play-count syncing and safe eject.
-- **Homelab & Network Share Integration**:
-  - Direct **NFS / SMB** share mounting and management.
-  - Local SSD LRU pre-cache and **FFmpeg / HandBrakeCLI** 360p H.264/AAC video transcoder.
-  - **rTunes Store**, multi-source Top Charts (Deezer, Last.fm, TheAudioDB, Library Relative), and **Lidarr / Radarr / Sonarr** (`*arr`) queue & upload wizard integration.
-  - **Plex / Audiobookshelf** progress sync and **Authentik OIDC (PKCE)** SSO support.
-- **Cross-Platform OS Drivers**: Platform-specific volume, keychain/`safeStorage`, and share-mount logic isolated in `electron/platform/` (`darwin.ts`, `win32.ts`, `linux.ts`).
-- **Diagnostics & Structured Logging**: Built-in `> Logs` viewer with subsystem filtering and JSON diagnostic export.
+### 1. Classic Desktop Experience & Local SQLite Caching
+* **Authentic Retro UI:** Brushed-metal and aqua interface featuring LCD playback/sync telemetry, `List`, `Grid`, and 3D `Cover Flow` views, and dynamic smart playlists (*Artist Catalog Standouts*, *Loved & 5-Star Favorites*, *Recently Added Lossless*).
+* **Fast Network Library Indexing:** Uses a local SQLite FTS5 cache (`better-sqlite3`) in front of NFS/SMB master shares so libraries with 95,000+ tracks and thousands of TV episodes browse and filter instantaneously without hammering network storage.
+* **Two-Way ListenBrainz & Rating Sync:** Syncs 5-star track ratings, `♥` Loved flags, play counts (`LB Plays`), and artist-relative popularity scores (`Rel. Score`).[unverified for funcitonality for ratings and play sync to your profile]
+* **eGenius Playlst generator:** Create playlists the old fashioned way, by letting a program do it for you! (eGenius is code & database driven playlist generator)
+* **Playlists:** IDK Man, its a playlist, put movies on it, songs, TV Shows. Pictures might even work?
+* **AI Playlist Generator:** Use a LOCAL AI agent to generate a playlist matching the sound you want. AI has full access to your DB For finding the perfect recommendations OR use it to create a smart playlist with rules!
+* **Smart Playlist Generator:** Set filters and rules to automatically filter out unwanted songs from your playlist
+
+### 2. Universal ePod Provisioning & DAP Sync Engine
+* **Hardware Preset Profiles:** Writes a `.retrotunes_device.json` manifest to USB Mass Storage volumes (`/Volumes` or custom mount paths) and supports MTP device workflows.
+* **DAP-Safe Sanitization:**
+  * Downscales and converts embedded/folder cover art to **`500×500` baseline JPEG** to prevent portable DAC/DAP UI lag or progressive-JPEG decode crashes.
+  * Automatically fetches synchronized karaoke lyrics (`.lrc`) via the **LRCLIB API** during sync.
+  * Generates portable relative `.m3u8` playlists and cleans hidden metadata files (`dot_clean`, `.DS_Store`, `._*`) prior to eject.
+
+### 3. Pre-Transcoding Video Pipeline
+* **One-Click Show & Episode Caching:** Queue entire seasons or individual episodes (`Keep 360p`) for background transcoding via **HandBrakeCLI / FFmpeg** so video libraries are pre-staged for rapid 4:3 DAP transfers.
+
+### 4. Self-Hosted `rTunes Store` & Smart `*arr` Upload Wizard
+* **Request Storefront:** Browse Featured releases, Top Charts, and taste-based recommendations (*"Recommended For You"*) with one-click `Get Album` and `Get Movie` triggers connected to your self-hosted stack.
+* **4-Step Smart Media Upload Wizard:** Ingest local media directly into your server pipeline (`1. Media Type & Files` → `2. *arr / Metadata Match` → `3. Naming & Folder Preview` → `4. Transfer & *arr Check-Off`).
+
+---
+
+## Supported Device Profiles
+
+| Profile | Target Resolution & Video | Audio & Playlists | Cover Art & Extras |
+| :--- | :--- | :--- | :--- |
+| **Innioasis Y2 (`ePod`)** | `480×360` (4:3 Native @ 30fps MP4) | AAC 128k / Pass-through, `.m3u8` | `500×500` baseline JPEG, `.lrc` karaoke lyrics |
+| **Classic Click-Wheel (Rockbox)[untested]** | `320×240` (30fps MP4) | Lossless/MP3/AAC, relative `.m3u8` | `500×500` baseline JPEG, dotfile cleanup |
+| **Custom / Smartphone[untested]** | `720p` / `1080p` / Source | Audio pass-through, custom root paths | Configurable manifest & playlist roots |
+
+---
+
+## Self-Hosted Ecosystem Integrations
+
+Configure endpoints and API keys under **Store → Setup Services** or **Prefs**:
+
+| Media / Service Type | Integrated Backend | Status |
+| :--- | :--- | :--- |
+| **Music** | Lidarr, ListenBrainz, LRCLIB | Active |
+| **Movies** | Radarr [untested] | Active |
+| **TV Shows** | Sonarr | Active |
+| **Books & Audiobooks** | Chaptarr, Audiobookshelf (ABS) [All Untested]| Active |
+| **Photos** | Immich [Untested]| Active |
+| **Authentication** | Standalone Mode | Active |
+| **Authentication** | Authentik SSO | **Not Functional (WIP)** |
+
+---
+
+## Roadmap: `rTunes` Companion Docker Server
+
+Upcoming releases will introduce a dedicated self-hosted **rTunes-server Docker container** designed to turn `rTunes` into a unified, multi-PC ecosystem:
+
+* **Centralized API Key & Service Vault:** Store all Lidarr, Radarr, Sonarr, Chaptarr, Audiobookshelf, Immich, and ListenBrainz credentials once inside the Docker backend—connect any `rTunes` desktop client to the container without configuring secrets per machine.
+* **Direct Share Access & Live Push Updates:** Mount your NAS media shares directly to the container so it automatically detects file additions or metadata changes, updates the master database, and pushes live delta updates to all connected clients.
+* **Server-Side Music Streaming & Offloaded Transcoding:** Stream music directly from the container to desktop clients and offload heavy FFmpeg / HandBrakeCLI DAP video and audio transcoding from client PCs to the server.
+* **Cross-PC Playlist & Library Sync:** Keep standard playlists, smart playlists, ratings, and playback state continuously synchronized across multiple computers—delivering a seamless, multi-device iTunes-style workflow.
+* **Functional Authentik / OIDC Integration:** Complete SSO login support paired with the companion server backend.
+* **rTunes-server** Not intended to be a full streaming replacement for Plexamp or subsonic. subsonic support is being considered.(and maybe plex as well if we can make it work)
+
+---
+
+## Screenshots
+
+| Music Library & Cover Flow | TV Shows & 360p Pre-Transcode |
+| :---: | :---: |
+| ![Music Library Cover Flow](docs/screenshots/music-coverflow.png) | ![TV Shows Library](docs/screenshots/tv-shows-library.png) |
+
+| `rTunes Store` Request Front | Universal ePod Provisioning |
+| :---: | :---: |
+| ![rTunes Store](docs/screenshots/rtunes-store.png) | ![ePod Provisioning Wizard](docs/screenshots/epod-provisioning.png) |
+
+| Smart `*arr` Upload Wizard | |
+| :---: | :---: |
+| ![Smart Media Upload Wizard](docs/screenshots/smart-upload-wizard.png) | |
 
 ---
 
 ## Getting Started
 
 ### Prerequisites
-
-- **Node.js** (LTS / current) and **npm**
-- *(macOS optional)* `clang` / Xcode Command Line Tools if compiling the native `native/rtunes_mtp.c` helper
+* **Node.js** (v20+ LTS) & `npm`
+* **FFmpeg** and **HandBrakeCLI** (managed automatically or available on `PATH` for 360p/240p DAP video transcoding)
+* *(macOS optional)* `clang` / Xcode Command Line Tools if compiling the native `native/rtunes_mtp.c` helper
 
 ### Install & Run (Windows, macOS, Linux)
 
@@ -63,7 +129,7 @@ On macOS/Linux, you can also use the convenience wrapper:
 
 - `src/` — React 19 + TypeScript + Vite renderer UI and Aqua stylesheet (`src/styles/rtunes.css`)
 - `electron/` — Electron main process, SQLite database (`db.ts`), indexer, transcoder, device sync, share manager, store/`*arr`, and OS drivers (`electron/platform/`)
-- `native/` — Native C helper (`rtunes_mtp.c`)
+- `native/` — Native MTP helpers (`rtunes_mtp.c` on macOS, `rtunes_wpd.cs` on Windows)
 - `scripts/` — Cross-platform build, native prebuild, and launch helpers (`electron-tasks.mjs`)
 
 ---
@@ -71,4 +137,4 @@ On macOS/Linux, you can also use the convenience wrapper:
 ## Credits & Architecture Docs
 
 - See [`CREDITS.md`](CREDITS.md) for full open-source software, binary, and API attributions.
-- See [`AGENTS.md`](AGENTS.md) for architecture details and development guidelines.
+- See [`AGENTS.md`](AGENTS.md) and [`MODULE_MAP.md`](MODULE_MAP.md) for architecture details and development guidelines.

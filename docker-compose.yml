@@ -4,7 +4,6 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: rtunes-server
-    user: "${PUID:-1000}:${PGID:-1000}"
     restart: unless-stopped
     ports:
       - "${RTUNES_PORT:-3000}:3000"

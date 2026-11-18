@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { emitRendererEvent } from './runtimeBus';
+import { emitRendererEvent, getAppDataPath } from './runtimeBus';
 
 export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -57,7 +57,10 @@ class DiagnosticLogger {
       now.getHours()
     )}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
 
-    const homeLogDir = path.join(os.homedir(), 'Library', 'Logs', 'RetroTunes');
+    const homeLogDir =
+      process.platform === 'darwin' && !process.env.RTUNES_DATA_DIR
+        ? path.join(os.homedir(), 'Library', 'Logs', 'RetroTunes')
+        : path.join(getAppDataPath(), 'logs');
     const workspaceLogDir = path.join(process.cwd(), 'logs');
 
     try {

@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { logger } from './logger';
 import { getAppDataPath } from './runtimeBus';
 import { classifyVariant, isInterludeOrSkit } from './egenius/variantFilter';
@@ -211,15 +212,22 @@ export function getDbPath(): string {
     dbFilePath = customFile;
     return dbFilePath;
   }
-  const dataDir = getAppDataPath();
-  try {
-    fs.mkdirSync(dataDir, { recursive: true });
-    dbFilePath = path.join(dataDir, 'rtunes.sqlite');
-  } catch {
-    const localDataDir = path.join(process.cwd(), '.data');
-    fs.mkdirSync(localDataDir, { recursive: true });
-    dbFilePath = path.join(localDataDir, 'rtunes.sqlite');
+  const candidates = [
+    getAppDataPath(),
+    path.join(process.cwd(), '.data'),
+    path.join(os.tmpdir(), 'retrotunes-data'),
+  ];
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.accessSync(dir, fs.constants.W_OK);
+      dbFilePath = path.join(dir, 'rtunes.sqlite');
+      return dbFilePath;
+    } catch {
+      // try next writable candidate
+    }
   }
+  dbFilePath = path.join(os.tmpdir(), 'rtunes.sqlite');
   return dbFilePath;
 }
 
@@ -230,9 +238,26 @@ export function initDatabase(customPath?: string): Database.Database {
   dbFilePath = targetPath;
 
   logger.info('DB', `Initializing SQLite + FTS5 database at ${targetPath}`);
-  const db = new Database(targetPath);
+  let db: Database.Database;
+  try {
+    db = new Database(targetPath);
+  } catch (err) {
+    const fallbackDir = path.join(os.tmpdir(), 'retrotunes-data');
+    fs.mkdirSync(fallbackDir, { recursive: true });
+    const fallbackPath = path.join(fallbackDir, 'rtunes.sqlite');
+    logger.warn(
+      'DB',
+      `Primary DB path ${targetPath} was not writable (${String(err)}); using fallback ${fallbackPath}`
+    );
+    dbFilePath = fallbackPath;
+    db = new Database(fallbackPath);
+  }
 
-  db.pragma('journal_mode = WAL');
+  try {
+    db.pragma('journal_mode = WAL');
+  } catch {
+    db.pragma('journal_mode = DELETE');
+  }
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');

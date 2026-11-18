@@ -44,7 +44,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/dist-electron ./dist-electron
 
-RUN mkdir -p /config /media && chmod 0777 /config
+RUN mkdir -p /config /media /app/.data && chmod 0777 /config /app/.data
 
 EXPOSE 3000
 

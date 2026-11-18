@@ -104,3 +104,12 @@ export function getSafeStorage(): {
   const electron = getElectronModule();
   return electron?.safeStorage || null;
 }
+
+export function openExternalUrl(url: string): boolean {
+  const electron = getElectronModule();
+  if (electron?.shell?.openExternal) {
+    void electron.shell.openExternal(url);
+    return true;
+  }
+  return false;
+}

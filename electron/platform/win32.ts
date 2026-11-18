@@ -4,13 +4,13 @@ import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { getSafeStorage } from '../runtimeBus';
+import { getAppDataPath, getSafeStorage } from '../runtimeBus';
 import { PlatformDriver, ShareMountParams } from './types';
 
 const execFileAsync = promisify(execFile);
 
 function getFallbackSecretPath(service: string, account: string): string {
-  const dir = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'RetroTunes', 'secrets');
+  const dir = path.join(getAppDataPath(), 'secrets');
   fs.mkdirSync(dir, { recursive: true });
   const safeName = `${service}_${account}`.replace(/[^a-zA-Z0-9._-]/g, '_');
   return path.join(dir, `${safeName}.bin`);
@@ -23,6 +23,9 @@ export const win32Driver: PlatformDriver = {
   quitOnAllWindowsClosed: true,
 
   getDefaultCacheDir() {
+    if (process.env.RTUNES_DATA_DIR && process.env.RTUNES_DATA_DIR.trim()) {
+      return path.join(path.resolve(process.env.RTUNES_DATA_DIR.trim()), 'cache');
+    }
     return path.join(
       process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'),
       'RetroTunes',

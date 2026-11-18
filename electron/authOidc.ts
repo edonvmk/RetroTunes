@@ -1,7 +1,7 @@
 import http from 'http';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
-import { BrowserWindow, shell } from 'electron';
+import { emitRendererEvent, openExternalUrl } from './runtimeBus';
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { platformDriver } from './platform';
@@ -48,15 +48,7 @@ function deleteOidcSessionFromKeychain() {
 }
 
 function broadcastAuthState() {
-  try {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) {
-        win.webContents.send('auth:state', getPublicAuthState());
-      }
-    }
-  } catch {
-    // ignore
-  }
+  emitRendererEvent('auth:state', getPublicAuthState());
 }
 
 export function initAuthFromKeychain(): AuthState {
@@ -293,7 +285,7 @@ export async function startAuthentikPkceLogin(): Promise<AuthState> {
       logger.info('AUTH_OIDC', `Opening Authentik authorization URL on loopback port ${listenPort}`, {
         url: authUrl.toString(),
       });
-      void shell.openExternal(authUrl.toString());
+      openExternalUrl(authUrl.toString());
     });
   });
 }

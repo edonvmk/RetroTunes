@@ -63,8 +63,6 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 | `electron/rpcHandlers.ts` | Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) & headless server stubs | All shared backend services, `main.ts`, `server.ts` |
 | `electron/server.ts` | Headless `rTunes-Server` HTTP/SSE/Media/Static Web UI/Upload entrypoint (`PORT=3000`) & optional desktop LAN listener | `rpcHandlers.ts`, `mediaServer.ts`, `runtimeBus.ts`, `db.ts`, `dist/` |
 | `electron/cli.ts` | Headless CLI (`npm run cli -- <command>` via `ELECTRON_RUN_AS_NODE=1`) | `db.ts`, `deviceSync.ts`, `indexer.ts`, `storeArr.ts`, `egenius/`, `platform/` |
-| `electron/authOidc.ts` | Underlying Authentik OIDC / OAuth2 PKCE flow & token refresh | `electron/auth/authentik.ts`, `settings.ts` |
-| `electron/auth/authentik.ts` | Dev-mode SSO boundary (returns standalone guest context when `isDev === false`) | `authOidc.ts`, `main.ts` |
 | `electron/providers/standaloneLocal.ts` | Active local SQLite + direct NFS/SMB provider | `main.ts` |
 | `electron/providers/remoteServer.ts` | Isolated `rTunes-Server` Docker stub (gated behind `isDev`) | `main.ts` |
 
@@ -72,11 +70,13 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 
 ## 4. Shared Core Backend (`electron/` — Electron-Free)
 
-> **Rule:** None of these modules may import `electron` directly. Always use `electron/runtimeBus.ts` for renderer events, paths, or `safeStorage`.
+> **Rule:** None of these modules may import `electron` directly. Always use `electron/runtimeBus.ts` for renderer events, paths, `openExternalUrl`, or `safeStorage`.
 
 | Module | Owns / Exports | Connects To |
 |---|---|---|
-| `electron/runtimeBus.ts` | `isElectronGuiRuntime`, `emitRendererEvent`, `onRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage` | Used by all shared backend modules & `main.ts` |
+| `electron/runtimeBus.ts` | `isElectronGuiRuntime`, `emitRendererEvent`, `onRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage`, `openExternalUrl` | Used by all shared backend modules & `main.ts` |
+| `electron/authOidc.ts` | Electron-free Authentik OIDC / OAuth2 PKCE flow & token refresh (uses `runtimeBus`) | `runtimeBus.ts`, `auth/authentik.ts`, `settings.ts`, `platform/` |
+| `electron/auth/authentik.ts` | Dev-mode SSO boundary (returns standalone guest context when `isDev === false`) | `authOidc.ts`, `main.ts` |
 | `electron/db.ts` | `initDatabase`, `getDb`, `getDbPath` (`RTUNES_DB_PATH` / `RTUNES_DATA_DIR`), WAL + `busy_timeout = 5000`, FTS5 (`searchTracksFts`, `searchVideosFts`), `recalculateArtistPopularityScores` | `better-sqlite3`, `platform/`, `logger.ts` |
 | `electron/settings.ts` | `getSettings`, `saveSettings`, `testIntegrationConnection`, `getKeychainSecret`, `setKeychainSecret` | `db.ts`, `platform/`, `logger.ts` |
 | `electron/logger.ts` | `logger` (`debug`, `info`, `warn`, `error`), ring buffer, rotating log files | `runtimeBus.ts` (`log:entry`) |

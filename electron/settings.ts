@@ -142,9 +142,30 @@ export function getDefaultSettings(): AppSettings {
     audiobooksRootPath: '',
     photosRootPath: '',
     localCachePath: defaultCacheDir,
-    ffmpegBinaryPath: bundledFfmpegPath || '/opt/homebrew/bin/ffmpeg',
-    ffprobeBinaryPath: bundledFfprobePath || '/opt/homebrew/bin/ffprobe',
-    handbrakeBinaryPath: '/opt/homebrew/bin/HandBrakeCLI',
+    ffmpegBinaryPath:
+      bundledFfmpegPath ||
+      (process.platform === 'darwin'
+        ? '/opt/homebrew/bin/ffmpeg'
+        : process.platform === 'win32'
+        ? 'ffmpeg.exe'
+        : fs.existsSync('/usr/bin/ffmpeg')
+        ? '/usr/bin/ffmpeg'
+        : 'ffmpeg'),
+    ffprobeBinaryPath:
+      bundledFfprobePath ||
+      (process.platform === 'darwin'
+        ? '/opt/homebrew/bin/ffprobe'
+        : process.platform === 'win32'
+        ? 'ffprobe.exe'
+        : fs.existsSync('/usr/bin/ffprobe')
+        ? '/usr/bin/ffprobe'
+        : 'ffprobe'),
+    handbrakeBinaryPath:
+      process.platform === 'darwin'
+        ? '/opt/homebrew/bin/HandBrakeCLI'
+        : process.platform === 'win32'
+        ? 'HandBrakeCLI.exe'
+        : 'HandBrakeCLI',
 
     cacheMaxSizeGb: 50,
     autoEvictLru: true,

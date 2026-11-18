@@ -23,6 +23,9 @@ export const darwinDriver: PlatformDriver = {
   quitOnAllWindowsClosed: false,
 
   getDefaultCacheDir() {
+    if (process.env.RTUNES_DATA_DIR && process.env.RTUNES_DATA_DIR.trim()) {
+      return path.join(path.resolve(process.env.RTUNES_DATA_DIR.trim()), 'cache');
+    }
     return path.join(os.homedir(), 'Library', 'Caches', 'RetroTunes');
   },
 

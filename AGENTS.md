@@ -4,7 +4,7 @@
 >
 > **Module Map Rule:** Before creating any new file, helper, or IPC channel, consult [`MODULE_MAP.md`](MODULE_MAP.md) to reuse existing modules and avoid duplicate code. Whenever you add, delete, or wire new connections between modules, **you MUST update [`MODULE_MAP.md`](MODULE_MAP.md)** in the same change.
 >
-> **Electron Isolation Rule (Node / Docker / CLI Safety):** Never import `electron` (`app`, `BrowserWindow`, `ipcMain`, `dialog`, `Menu`, `shell`, `safeStorage`) inside shared backend modules (`db.ts`, `indexer.ts`, `logger.ts`, `cacheTranscoder.ts`, `deviceSync.ts`, `shareManager.ts`, `smartPlaylists.ts`, `storeArr.ts`, `uploadWizard.ts`, `mediaServer.ts`, `egenius/*`, `ai/llamaService.ts`, `transcoder/*`, `platform/*`, `cli.ts`). Those modules must run in plain Node.js / Docker (`rTunes-Server`) and `ELECTRON_RUN_AS_NODE=1` CLI. Always use `electron/runtimeBus.ts` (`emitRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage`) instead, keeping direct `electron` imports confined to `electron/main.ts`, `electron/preload.ts`, and `electron/authOidc.ts`.
+> **Electron Isolation Rule (Node / Docker / CLI Safety):** Never import `electron` (`app`, `BrowserWindow`, `ipcMain`, `dialog`, `Menu`, `shell`, `safeStorage`) inside shared backend modules (`db.ts`, `indexer.ts`, `logger.ts`, `cacheTranscoder.ts`, `deviceSync.ts`, `shareManager.ts`, `smartPlaylists.ts`, `storeArr.ts`, `uploadWizard.ts`, `mediaServer.ts`, `rpcHandlers.ts`, `server.ts`, `egenius/*`, `ai/llamaService.ts`, `transcoder/*`, `platform/*`, `cli.ts`). Those modules must run in plain Node.js / Docker (`rTunes-Server`) and `ELECTRON_RUN_AS_NODE=1` CLI. Always use `electron/runtimeBus.ts` (`emitRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage`) instead, keeping direct `electron` imports confined to `electron/main.ts`, `electron/preload.ts`, and `electron/authOidc.ts`.
 
 ---
 
@@ -28,9 +28,11 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
     - `GenreMapTab.tsx` — ECU-style 2D Subgenre Adjacency Matrix heatmap editor, cell trim/lock controls, and Live Artist Scene Tester (hosted inside **Prefs -> Genre Map**).
     - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import.
     - `DiagnosticsModal.tsx` — Live `> Logs` viewer and JSON diagnostic export.
-- `electron/` (compiles to `dist-electron/`) — **Electron Main Process (TypeScript)**
-  - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, HTTP RPC fallback (`127.0.0.1:42815`), and all `registerChannel(...)` IPC handlers.
+- `electron/` (compiles to `dist-electron/`) — **Electron Main Process & Headless Server (TypeScript)**
+  - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, desktop GUI/USB IPC overrides, HTTP RPC fallback (`127.0.0.1:42815`), and optional LAN HTTP server (`enableLanServerMode`).
   - `electron/preload.ts` — Context-isolated `rtunesElectron` bridge (`invoke`, `on`).
+  - `electron/rpcHandlers.ts` — Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) used by both Electron `main.ts` and headless `server.ts` (with graceful `{ supported: false, mode: 'server' }` stubs for desktop hardware/dialogs).
+  - `electron/server.ts` — Headless `rTunes-Server` unified HTTP + SSE (`/events`) + JSON-RPC (`/rpc`) + multipart browser upload (`/api/upload-files`) + range media streaming (`/track`, `/video`, `/artwork`) + static `dist/` SPA server (`PORT=3000`, `HOST=0.0.0.0`, `RTUNES_DATA_DIR=/config`, `RTUNES_MEDIA_DIR=/media`; build/run via `npm run build:server` & `npm run server` or `Dockerfile` / `docker-compose.yml`).
   - `electron/db.ts` — Synchronous `better-sqlite3` + FTS5 initialization, migrations, and `recalculateArtistPopularityScores`.
   - `electron/settings.ts` — Settings persistence in SQLite + OS Keychain / `safeStorage` secret storage.
   - `electron/logger.ts` — Ring-buffered, date/time-stamped structured logger + file rotation.

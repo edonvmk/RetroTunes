@@ -9,11 +9,11 @@
 ```
 Renderer (src/)
   └── src/bridge.ts (invokeRpc, subscribeEvent, getMediaBaseUrl)
-        ├── Electron IPC ──▶ electron/preload.ts ──▶ electron/main.ts
-        └── HTTP Fallback ─▶ http://127.0.0.1:42815 (/rpc, /events SSE)
-                                   │
-                                   ▼
-Shared Core (electron/, Electron-free via runtimeBus.ts)
+        ├── Electron IPC ──▶ electron/preload.ts ──▶ electron/main.ts ──▶ electron/rpcHandlers.ts
+        └── HTTP / Web ────▶ electron/server.ts (/rpc, /events SSE, /api/upload-files, /api/health, dist/)
+                                   │                                        ▲
+                                   ▼                                        │
+Shared Core (electron/, Electron-free via runtimeBus.ts) ───────────────────┘
   ├── electron/runtimeBus.ts (emitRendererEvent, onRendererEvent, getAppDataPath, getSafeStorage)
   ├── electron/db.ts (SQLite + FTS5 + WAL + busy_timeout)
   ├── electron/settings.ts (AppSettings + OS Keychain / safeStorage)
@@ -48,7 +48,7 @@ Shared Core (electron/, Electron-free via runtimeBus.ts)
 | `src/components/SmartPlaylistModal.tsx` | Nested Smart Playlist rule builder + live SQL preview | `playlists:previewSmart`, `playlists:save` |
 | `src/components/AiPlaylistModal.tsx` | Pre-Alpha AI Playlist Generator (model selector, `0–50%` / `50–100%` loader, chat, track preview) | `modelRegistry.ts`, `PlaylistAgent.ts`, `ai:*` IPC |
 | `src/components/StorefrontView.tsx` | rTunes Storefront, multi-source Top Charts, `*arr` Downloads Queue | `store:*`, `arr:queue` IPC |
-| `src/components/UploadMediaWizardModal.tsx` | 4-step Smart Media Upload Wizard & `*arr` scan trigger | `upload:*` IPC, `dialog:selectFiles` |
+| `src/components/UploadMediaWizardModal.tsx` | 4-step Smart Media Upload Wizard, browser `POST /api/upload-files` staging & `*arr` scan trigger | `upload:*` IPC, `dialog:selectFiles`, `POST /api/upload-files` |
 | `src/components/DiagnosticsModal.tsx` | Live `> Logs` viewer & diagnostic JSON export | `logs:get`, `logs:clear`, `logs:testEvent` |
 | `src/components/AboutCreditsModal.tsx` | FOSS & community attribution modal (`FossCreditsContent`) | `CREDITS.md` (must stay in sync) |
 
@@ -58,8 +58,10 @@ Shared Core (electron/, Electron-free via runtimeBus.ts)
 
 | Module | Owns / Exports | Connects To |
 |---|---|---|
-| `electron/main.ts` | `BrowserWindow`, app menu, `registerChannel(...)` IPC registry, HTTP `:42815` (`POST /rpc`, `GET /events` SSE) | All `electron/` services, `runtimeBus.ts`, `preload.ts` |
+| `electron/main.ts` | `BrowserWindow`, app menu, desktop-only GUI/USB IPC overrides, HTTP `:42815` & optional LAN `server.ts` listener | `rpcHandlers.ts`, `server.ts`, `runtimeBus.ts`, `preload.ts` |
 | `electron/preload.ts` | `contextBridge` exposing `window.rtunesElectron` & `window.electronAPI` | `electron/main.ts`, `src/bridge.ts` |
+| `electron/rpcHandlers.ts` | Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) & headless server stubs | All shared backend services, `main.ts`, `server.ts` |
+| `electron/server.ts` | Headless `rTunes-Server` HTTP/SSE/Media/Static Web UI/Upload entrypoint (`PORT=3000`) & optional desktop LAN listener | `rpcHandlers.ts`, `mediaServer.ts`, `runtimeBus.ts`, `db.ts`, `dist/` |
 | `electron/cli.ts` | Headless CLI (`npm run cli -- <command>` via `ELECTRON_RUN_AS_NODE=1`) | `db.ts`, `deviceSync.ts`, `indexer.ts`, `storeArr.ts`, `egenius/`, `platform/` |
 | `electron/authOidc.ts` | Underlying Authentik OIDC / OAuth2 PKCE flow & token refresh | `electron/auth/authentik.ts`, `settings.ts` |
 | `electron/auth/authentik.ts` | Dev-mode SSO boundary (returns standalone guest context when `isDev === false`) | `authOidc.ts`, `main.ts` |
@@ -80,7 +82,7 @@ Shared Core (electron/, Electron-free via runtimeBus.ts)
 | `electron/logger.ts` | `logger` (`debug`, `info`, `warn`, `error`), ring buffer, rotating log files | `runtimeBus.ts` (`log:entry`) |
 | `electron/indexer.ts` | Phased library scanner, ID3/Vorbis/artwork hydration, ListenBrainz/Last.fm/AudioDB popularity, TVMaze/IMDb posters, Plex/Audiobookshelf progress sync | `db.ts`, `settings.ts`, `trackSources.ts`, `egenius/genreMatrix.ts`, `runtimeBus.ts` |
 | `electron/trackSources.ts` | `buildTrackMatchKey`, `extractCanonicalMediaSubpath`, `resolveReachableTrackPath`, `scoreAudioQuality`, `parseAlternateSources`, `serializeAlternateSources` | `indexer.ts`, `mediaServer.ts`, `cacheTranscoder.ts` |
-| `electron/mediaServer.ts` | HTTP byte-range streaming (`/track`, `/video`, `/artwork`), dynamic FFmpeg live `.mkv`/`.avi` remuxing | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts` |
+| `electron/mediaServer.ts` | `handleMediaHttpRequest` & HTTP byte-range streaming (`/track`, `/video`, `/artwork`), dynamic FFmpeg live `.mkv`/`.avi` remuxing | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts`, `server.ts` |
 | `electron/cacheTranscoder.ts` | Local SSD LRU cache, 360p H.264/AAC video transcoder, 500×500 cover art sanitizer | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts`, `runtimeBus.ts` |
 | `electron/transcoder/binaryManager.ts` | Startup check & GitHub Releases auto-updater for `FFmpeg` / `HandBrakeCLI` in `userData/bin`, `detectHardwareEncoder` | `runtimeBus.ts`, `settings.ts` |
 | `electron/smartPlaylists.ts` | `evaluateSmartPlaylist`, `getPlaylistTracks`, `getPlaylistVideos`, `generateRelativeM3u8`, Smart Playlist exclusion helpers | `db.ts`, `logger.ts` |

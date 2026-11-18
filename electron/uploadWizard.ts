@@ -277,7 +277,12 @@ export async function buildUploadPreviewPlan(params: {
   let targetRootDir = '';
   let namingSchemeSummary = 'Standard Plex / *arr Hierarchy';
 
-  const baseMusicOrNfs = settings.musicRootPath || settings.nfsSharePath || settings.localCachePath;
+  const envMediaDir = process.env.RTUNES_MEDIA_DIR?.trim();
+  const baseMusicOrNfs =
+    settings.musicRootPath ||
+    settings.nfsSharePath ||
+    (envMediaDir ? path.join(envMediaDir, 'Music') : '') ||
+    settings.localCachePath;
 
   if (mediaType === 'movie') {
     targetRootDir = settings.videoRootPath || path.join(baseMusicOrNfs, '..', 'Movies');
@@ -441,11 +446,50 @@ export async function executeUploadAndArrImport(params: {
   const db = getDb();
   let copiedCount = 0;
 
+  let targetOwnership: { uid: number; gid: number } | null = null;
+  if (process.platform !== 'win32' && plan.targetRootDir) {
+    let probeDir = path.resolve(plan.targetRootDir);
+    while (probeDir && !fs.existsSync(probeDir)) {
+      const parent = path.dirname(probeDir);
+      if (parent === probeDir) break;
+      probeDir = parent;
+    }
+    if (probeDir && fs.existsSync(probeDir)) {
+      const st = fs.statSync(probeDir);
+      targetOwnership = { uid: st.uid, gid: st.gid };
+    }
+  }
+
+  const alignPosixPerms = async (targetPath: string, mode: number) => {
+    if (process.platform === 'win32') return;
+    await fsp.chmod(targetPath, mode).catch(() => {});
+    if (targetOwnership) {
+      await fsp.chown(targetPath, targetOwnership.uid, targetOwnership.gid).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== 'EPERM') throw err;
+      });
+    }
+  };
+
   for (let i = 0; i < plan.items.length; i++) {
     const item = plan.items[i];
     if (!fs.existsSync(item.sourcePath)) continue;
-    await fsp.mkdir(path.dirname(item.destinationPath), { recursive: true });
+    const destDir = path.dirname(item.destinationPath);
+    const rootResolved = path.resolve(plan.targetRootDir || destDir);
+    const missingDirs: string[] = [];
+    let cursor = path.resolve(destDir);
+    while (cursor && !fs.existsSync(cursor)) {
+      missingDirs.unshift(cursor);
+      if (cursor === rootResolved) break;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+    await fsp.mkdir(destDir, { recursive: true, mode: 0o775 });
+    for (const createdDir of missingDirs) {
+      await alignPosixPerms(createdDir, 0o775);
+    }
     await fsp.copyFile(item.sourcePath, item.destinationPath);
+    await alignPosixPerms(item.destinationPath, 0o664);
     copiedCount++;
 
     const ext = path.extname(item.destinationPath).replace('.', '').toUpperCase();

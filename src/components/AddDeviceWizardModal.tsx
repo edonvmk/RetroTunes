@@ -24,7 +24,8 @@ export const AddDeviceWizardModal: React.FC<AddDeviceWizardModalProps> = ({
   const [provisioning, setProvisioning] = useState(false);
 
   const loadVolumes = async () => {
-    const vols = await invokeRpc<MountedVolume[]>('devices:volumes');
+    const res = await invokeRpc<MountedVolume[]>('devices:volumes');
+    const vols = Array.isArray(res) ? res : [];
     setVolumes(vols);
     if (vols.length > 0 && !mountPath) {
       setMountPath(vols[0].mountPath);

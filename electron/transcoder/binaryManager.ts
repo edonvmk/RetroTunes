@@ -332,7 +332,7 @@ export async function checkAndUpdateTranscoderBinaries(options?: {
   }
 }
 
-export type H264Encoder = 'h264_videotoolbox' | 'h264_nvenc' | 'h264_qsv' | 'libx264';
+export type H264Encoder = 'h264_videotoolbox' | 'h264_nvenc' | 'h264_qsv' | 'h264_vaapi' | 'libx264';
 
 export function detectHardwareEncoder(
   ffmpegPath: string,
@@ -349,6 +349,9 @@ export function detectHardwareEncoder(
     }
     if ((mode === 'auto' || mode === 'qsv') && out.includes('h264_qsv')) {
       return 'h264_qsv';
+    }
+    if ((mode === 'auto' || mode === 'vaapi') && process.platform === 'linux' && out.includes('h264_vaapi')) {
+      return 'h264_vaapi';
     }
   } catch {
     // ignore

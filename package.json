@@ -8,6 +8,8 @@
     "dev:vite": "vite --port 5173",
     "build:mtp": "node scripts/electron-tasks.mjs build-mtp",
     "build:electron": "tsc -p tsconfig.electron.json",
+    "build:server": "tsc -p tsconfig.electron.json",
+    "server": "node dist-electron/server.js",
     "dev:electron": "wait-on tcp:5173 && npm run build:electron && node scripts/electron-tasks.mjs launch dev",
     "dev": "concurrently -k \"npm run dev:vite\" \"npm run dev:electron\"",
     "build": "npm run build:mtp && npm run build:electron && vite build",

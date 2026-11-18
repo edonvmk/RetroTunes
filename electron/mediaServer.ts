@@ -71,6 +71,106 @@ function serveByteRangeFile(filePath: string, req: http.IncomingMessage, res: ht
   }
 }
 
+export function handleMediaHttpRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse
+): boolean {
+  const url = new URL(req.url || '/', 'http://127.0.0.1');
+  if (
+    url.pathname !== '/track' &&
+    url.pathname !== '/video' &&
+    url.pathname !== '/artwork'
+  ) {
+    return false;
+  }
+
+  const db = getDb();
+
+  if (url.pathname === '/track') {
+    const id = Number(url.searchParams.get('id'));
+    const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id) as TrackRow | undefined;
+    if (!track) {
+      res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+      res.end('Track not found');
+      return true;
+    }
+    const filePath = resolveReachableTrackPath(track);
+    if (track.local_cache_path) {
+      db.prepare(
+        "UPDATE cache_jobs SET last_accessed = datetime('now') WHERE item_type = 'audio' AND item_id = ?"
+      ).run(track.id);
+    }
+    serveByteRangeFile(filePath, req, res);
+    return true;
+  }
+
+  if (url.pathname === '/video') {
+    const id = Number(url.searchParams.get('id'));
+    const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(id) as VideoRow | undefined;
+    if (!video) {
+      res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+      res.end('Video not found');
+      return true;
+    }
+
+    const filePath =
+      video.local_cache_path && fs.existsSync(video.local_cache_path)
+        ? video.local_cache_path
+        : video.remote_nfs_path;
+
+    if (!filePath || !fs.existsSync(filePath)) {
+      res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+      res.end('Video file not found on disk');
+      return true;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.mkv' || ext === '.avi') {
+      const settings = getSettings();
+      res.writeHead(200, {
+        'Content-Type': 'video/mp4',
+        'Access-Control-Allow-Origin': '*',
+      });
+
+      const encoder = detectHardwareEncoder(settings.ffmpegBinaryPath, settings.hardwareAccelMode);
+      const videoCodecArgs =
+        encoder === 'libx264'
+          ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23']
+          : ['-c:v', encoder, '-b:v', '2500k'];
+
+      const ff = spawn(settings.ffmpegBinaryPath, [
+        '-i',
+        filePath,
+        ...videoCodecArgs,
+        '-c:a',
+        'aac',
+        '-b:a',
+        '160k',
+        '-ac',
+        '2',
+        '-f',
+        'mp4',
+        '-movflags',
+        'frag_keyframe+empty_moov+default_base_moof',
+        'pipe:1',
+      ]);
+
+      ff.stdout.pipe(res);
+      req.on('close', () => {
+        ff.kill('SIGKILL');
+      });
+      return true;
+    }
+
+    serveByteRangeFile(filePath, req, res);
+    return true;
+  }
+
+  const filePath = url.searchParams.get('path') || '';
+  serveByteRangeFile(filePath, req, res);
+  return true;
+}
+
 export function startMediaServer(): Promise<number> {
   if (mediaServerInstance && serverPort > 0) {
     return Promise.resolve(serverPort);
@@ -79,103 +179,7 @@ export function startMediaServer(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       try {
-        const url = new URL(req.url || '/', 'http://127.0.0.1');
-        const db = getDb();
-
-        if (url.pathname === '/track') {
-          const id = Number(url.searchParams.get('id'));
-          const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id) as TrackRow | undefined;
-          if (!track) {
-            res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
-            res.end('Track not found');
-            return;
-          }
-          // Prioritize local cache path, then primary remote path, then reachable alternate paths
-          const filePath = resolveReachableTrackPath(track);
-
-          // Update cache_jobs last_accessed for LRU tracking
-          if (track.local_cache_path) {
-            db.prepare(
-              "UPDATE cache_jobs SET last_accessed = datetime('now') WHERE item_type = 'audio' AND item_id = ?"
-            ).run(track.id);
-          }
-
-          serveByteRangeFile(filePath, req, res);
-          return;
-        }
-
-        if (url.pathname === '/video') {
-          const id = Number(url.searchParams.get('id'));
-          const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(id) as VideoRow | undefined;
-          if (!video) {
-            res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
-            res.end('Video not found');
-            return;
-          }
-
-          const filePath =
-            video.local_cache_path && fs.existsSync(video.local_cache_path)
-              ? video.local_cache_path
-              : video.remote_nfs_path;
-
-          if (!filePath || !fs.existsSync(filePath)) {
-            res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
-            res.end('Video file not found on disk');
-            return;
-          }
-
-          const ext = path.extname(filePath).toLowerCase();
-          // If MKV or AVI and not yet transcoded in cache, live-remux/transcode to fragmented MP4
-          if (ext === '.mkv' || ext === '.avi') {
-            const settings = getSettings();
-            res.writeHead(200, {
-              'Content-Type': 'video/mp4',
-              'Access-Control-Allow-Origin': '*',
-            });
-
-            const encoder = detectHardwareEncoder(
-              settings.ffmpegBinaryPath,
-              settings.hardwareAccelMode
-            );
-            const videoCodecArgs =
-              encoder === 'libx264'
-                ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23']
-                : ['-c:v', encoder, '-b:v', '2500k'];
-
-            const ff = spawn(settings.ffmpegBinaryPath, [
-              '-i',
-              filePath,
-              ...videoCodecArgs,
-              '-c:a',
-              'aac',
-              '-b:a',
-              '160k',
-              '-ac',
-              '2',
-              '-f',
-              'mp4',
-              '-movflags',
-              'frag_keyframe+empty_moov+default_base_moof',
-              'pipe:1',
-            ]);
-
-            ff.stdout.pipe(res);
-            req.on('close', () => {
-              ff.kill('SIGKILL');
-            });
-            return;
-          }
-
-          serveByteRangeFile(filePath, req, res);
-          return;
-        }
-
-        if (url.pathname === '/artwork') {
-          const filePath = url.searchParams.get('path') || '';
-          serveByteRangeFile(filePath, req, res);
-          return;
-        }
-
+        if (handleMediaHttpRequest(req, res)) return;
         res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
         res.end('Not found');
       } catch (err) {

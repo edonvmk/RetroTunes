@@ -365,8 +365,8 @@ export const App: React.FC = () => {
         }
       }
       setAuthState(auth);
-      setPlaylists(pls);
-      setDevices(devs);
+      setPlaylists(Array.isArray(pls) ? pls : []);
+      setDevices(Array.isArray(devs) ? devs : []);
       setCacheStats(cStats);
 
       const [trks, vids, bks, abs, phs] = await Promise.all([
@@ -432,7 +432,9 @@ export const App: React.FC = () => {
       setAuthState(a);
     });
     const unsubDevChanged = subscribeEvent('devices:changed', () => {
-      void invokeRpc<DeviceInfo[]>('devices:list').then(setDevices);
+      void invokeRpc<DeviceInfo[]>('devices:list').then((devs) =>
+        setDevices(Array.isArray(devs) ? devs : [])
+      );
     });
     const unsubCatalogUpdated = subscribeEvent<{ uuid: string; catalog: DeviceCatalog }>(
       'devices:catalogUpdated',

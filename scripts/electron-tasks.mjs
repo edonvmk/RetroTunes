@@ -71,6 +71,9 @@ if (task === 'build-mtp') {
 }
 
 if (task === 'rebuild-native') {
+  if (process.env.ELECTRON_SKIP_BINARY_DOWNLOAD === '1') {
+    process.exit(0);
+  }
   const electronPkgPath = path.join(rootDir, 'node_modules', 'electron', 'package.json');
   const sqliteDir = path.join(rootDir, 'node_modules', 'better-sqlite3');
   const prebuildBin = path.join(rootDir, 'node_modules', 'prebuild-install', 'bin.js');

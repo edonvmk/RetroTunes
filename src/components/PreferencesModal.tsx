@@ -311,16 +311,30 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                     <select
                       className="aqua-input"
                       style={{ width: '100%' }}
-                      value={isDev ? form.backendMode || 'standalone' : 'standalone'}
-                      onChange={(e) => updateField('backendMode', e.target.value as any)}
+                      value={
+                        form.backendMode === 'docker_server' && !isDev
+                          ? 'standalone'
+                          : form.backendMode || (form.enableLanServerMode ? 'host_server' : 'standalone')
+                      }
+                      onChange={(e) => {
+                        const mode = e.target.value as 'standalone' | 'host_server' | 'docker_server';
+                        setForm((prev) => ({
+                          ...prev,
+                          backendMode: mode,
+                          enableLanServerMode: mode === 'host_server',
+                        }));
+                      }}
                     >
                       <option value="standalone">
                         Standalone / Direct Share Mode (Local SQLite + Mounted NFS/SMB)
                       </option>
+                      <option value="host_server">
+                        Desktop Host / LAN Server Mode (Local + Serve Web UI &amp; Media over HTTP)
+                      </option>
                       <option value="docker_server" disabled={!isDev}>
                         {isDev
                           ? 'Remote Docker Server Mode (rTunes-Server + Authentik OIDC JWT) [DEV PREVIEW]'
-                          : 'Remote Docker Server Mode (rTunes-Server) — Coming Soon'}
+                          : 'Remote Docker Server Mode (rTunes-Server Client) — Coming Soon'}
                       </option>
                     </select>
                   </div>
@@ -336,6 +350,52 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                       placeholder="https://rtunes-server.yourdomain.com"
                       value={form.dockerServerUrl || ''}
                       onChange={(e) => updateField('dockerServerUrl', e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div
+                  style={{
+                    marginTop: 10,
+                    paddingTop: 10,
+                    borderTop: '1px solid #d5dce6',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                  }}
+                >
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.enableLanServerMode || form.backendMode === 'host_server')}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        setForm((prev) => ({
+                          ...prev,
+                          enableLanServerMode: enabled,
+                          backendMode: enabled
+                            ? 'host_server'
+                            : prev.backendMode === 'host_server'
+                            ? 'standalone'
+                            : prev.backendMode,
+                        }));
+                      }}
+                    />
+                    <span>
+                      Host Web UI, RPC &amp; Media Streaming on LAN (http://localhost:{form.lanServerPort ?? 3000})
+                    </span>
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <label style={{ fontSize: 11, fontWeight: 600 }}>Port:</label>
+                    <input
+                      type="number"
+                      min={1024}
+                      max={65535}
+                      className="aqua-input"
+                      style={{ width: 84 }}
+                      disabled={!(form.enableLanServerMode || form.backendMode === 'host_server')}
+                      value={form.lanServerPort ?? 3000}
+                      onChange={(e) => updateField('lanServerPort', Number(e.target.value) || 3000)}
                     />
                   </div>
                 </div>

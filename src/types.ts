@@ -478,7 +478,7 @@ export interface ChartTrackItem {
 }
 
 export interface AppSettings {
-  backendMode?: 'standalone' | 'docker_server';
+  backendMode?: 'standalone' | 'host_server' | 'docker_server';
   dockerServerUrl?: string;
 
   nfsSharePath: string;
@@ -504,6 +504,8 @@ export interface AppSettings {
   lcdArtistClickBehavior?: 'jump' | 'filter';
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
+  enableLanServerMode?: boolean;
+  lanServerPort?: number;
 
   authMode: 'standalone' | 'authentik';
   authentikIssuerUrl: string;

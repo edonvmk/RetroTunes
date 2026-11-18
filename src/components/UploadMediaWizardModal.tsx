@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   Upload,
   Search,
@@ -8,7 +8,7 @@ import {
   FilePlus,
   RefreshCw,
 } from 'lucide-react';
-import { invokeRpc } from '../bridge';
+import { getRpcBaseUrl, invokeRpc } from '../bridge';
 
 type UploadMediaType =
   | 'music'
@@ -69,17 +69,68 @@ export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
     arrTriggered: boolean;
     arrMessage: string;
   } | null>(null);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isBrowserMode = typeof window !== 'undefined' && !window.rtunesElectron?.invoke;
+
+  const applySelectedPaths = (selected: string[]) => {
+    if (!selected || selected.length === 0) return;
+    setFilePaths(selected);
+    if (!searchQuery) {
+      const firstBase = selected[0].split(/[\\/]/).pop() || '';
+      const guess = firstBase.replace(/\.[^/.]+$/, '').replace(/[._-]+/g, ' ');
+      setSearchQuery(guess);
+    }
+  };
 
   const handleSelectFiles = async () => {
-    const selected = await invokeRpc<string[]>('dialog:selectFiles', 'Select Media Files to Upload');
-    if (selected && selected.length > 0) {
-      setFilePaths(selected);
-      if (!searchQuery) {
-        const firstBase = selected[0].split('/').pop() || '';
-        const guess = firstBase.replace(/\.[^/.]+$/, '').replace(/[._-]+/g, ' ');
-        setSearchQuery(guess);
-      }
+    if (isBrowserMode) {
+      fileInputRef.current?.click();
+      return;
     }
+    const selected = await invokeRpc<string[]>('dialog:selectFiles', 'Select Media Files to Upload');
+    if (Array.isArray(selected) && selected.length > 0) {
+      applySelectedPaths(selected);
+    }
+  };
+
+  const handleBrowserFileUpload = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploadingFiles(true);
+    setUploadPercent(0);
+    setUploadError(null);
+
+    const formData = new FormData();
+    Array.from(files).forEach((file) => formData.append('files', file, file.name));
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${getRpcBaseUrl()}/api/upload-files`);
+    xhr.upload.onprogress = (evt) => {
+      if (evt.lengthComputable && evt.total > 0) {
+        setUploadPercent(Math.round((evt.loaded / evt.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      setUploadingFiles(false);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const parsed = JSON.parse(xhr.responseText) as { filePaths?: string[] };
+          applySelectedPaths(parsed.filePaths || []);
+          setUploadPercent(100);
+        } catch {
+          setUploadError('Invalid upload response from server.');
+        }
+      } else {
+        setUploadError(`Upload failed (HTTP ${xhr.status}).`);
+      }
+    };
+    xhr.onerror = () => {
+      setUploadingFiles(false);
+      setUploadError('Network error while uploading files to server.');
+    };
+    xhr.send(formData);
   };
 
   const handleSearchMetadata = async () => {
@@ -211,16 +262,78 @@ export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
                 </div>
               </div>
 
-              <div className="epod-capacity-card">
+              <div
+                className="epod-capacity-card"
+                onDragOver={(e) => {
+                  if (isBrowserMode) e.preventDefault();
+                }}
+                onDrop={(e) => {
+                  if (!isBrowserMode) return;
+                  e.preventDefault();
+                  handleBrowserFileUpload(e.dataTransfer.files);
+                }}
+              >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <strong>Selected Local Source Files ({filePaths.length})</strong>
-                  <button className="aqua-btn primary" onClick={handleSelectFiles}>
-                    <FilePlus size={13} /> Browse Local Files...
+                  <strong>
+                    {isBrowserMode
+                      ? `Staged Server Media Files (${filePaths.length})`
+                      : `Selected Local Source Files (${filePaths.length})`}
+                  </strong>
+                  <button
+                    className="aqua-btn primary"
+                    disabled={uploadingFiles}
+                    onClick={handleSelectFiles}
+                  >
+                    <FilePlus size={13} />{' '}
+                    {uploadingFiles
+                      ? `Uploading (${uploadPercent}%)...`
+                      : isBrowserMode
+                      ? 'Choose Files to Upload...'
+                      : 'Browse Local Files...'}
                   </button>
                 </div>
+                {isBrowserMode && (
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept="audio/*,video/*,image/*,.epub,.pdf,.cbz,.m4b,.mkv,.flac,.m4a,.mp3"
+                    style={{ display: 'none' }}
+                    onChange={(e) => handleBrowserFileUpload(e.target.files)}
+                  />
+                )}
+                {uploadingFiles && (
+                  <div style={{ marginBottom: 8 }}>
+                    <div
+                      style={{
+                        height: 8,
+                        background: '#e2e8f0',
+                        borderRadius: 4,
+                        overflow: 'hidden',
+                        border: '1px solid #cbd5e1',
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: `${uploadPercent}%`,
+                          height: '100%',
+                          background: 'linear-gradient(180deg, #56a8ff 0%, #1d6fe2 100%)',
+                          transition: 'width 120ms linear',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {uploadError && (
+                  <div style={{ color: '#b91c1c', fontSize: 11, marginBottom: 8 }}>
+                    {uploadError}
+                  </div>
+                )}
                 {filePaths.length === 0 ? (
                   <div style={{ padding: 18, textAlign: 'center', color: '#64748b', fontSize: 11.5 }}>
-                    Click &ldquo;Browse Local Files...&rdquo; to select audio tracks, movies, episodes, books, or photos from your Mac.
+                    {isBrowserMode
+                      ? 'Drop audio, video, book, or photo files here, or click “Choose Files to Upload...” to stage them on the rTunes server.'
+                      : 'Click “Browse Local Files...” to select audio tracks, movies, episodes, books, or photos.'}
                   </div>
                 ) : (
                   <div

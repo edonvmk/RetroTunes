@@ -1,0 +1,19 @@
+services:
+  rtunes:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rtunes-server
+    user: "${PUID:-1000}:${PGID:-1000}"
+    restart: unless-stopped
+    ports:
+      - "${RTUNES_PORT:-3000}:3000"
+    environment:
+      - TZ=${TZ:-America/New_York}
+      - PORT=3000
+      - HOST=0.0.0.0
+      - RTUNES_DATA_DIR=/config
+      - RTUNES_MEDIA_DIR=/media
+    volumes:
+      - ${RTUNES_CONFIG_DIR:-./rtunes-config}:/config:rw
+      - ${RTUNES_MEDIA_ROOT:-/mnt/media}:/media:rw

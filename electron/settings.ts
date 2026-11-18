@@ -23,7 +23,7 @@ try {
 }
 
 export interface AppSettings {
-  backendMode?: 'standalone' | 'docker_server';
+  backendMode?: 'standalone' | 'host_server' | 'docker_server';
   dockerServerUrl?: string;
 
   // Paths
@@ -51,6 +51,8 @@ export interface AppSettings {
   lcdArtistClickBehavior?: 'jump' | 'filter';
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
+  enableLanServerMode?: boolean;
+  lanServerPort?: number;
 
   // Authentication (Authentik SSO / OIDC + Homelab Gateway)
   authMode: 'standalone' | 'authentik';
@@ -154,6 +156,8 @@ export function getDefaultSettings(): AppSettings {
     lcdArtistClickBehavior: 'jump',
     genreMapUseLastfm: false,
     genreMapLastfmWeight: 20,
+    enableLanServerMode: false,
+    lanServerPort: 3000,
 
     authMode: 'standalone',
     authentikIssuerUrl: '',

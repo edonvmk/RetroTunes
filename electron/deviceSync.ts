@@ -8,6 +8,7 @@ import { emitRendererEvent } from './runtimeBus';
 import { resolveReachableTrackPath } from './trackSources';
 import {
   getDb,
+  getVideoDb,
   DeviceRow,
   PlaylistRow,
   TrackRow,
@@ -1983,14 +1984,15 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
       }
     }
 
+    const videoDb = getVideoDb();
     const explicitVideos =
       profile.syncVideoIds.length > 0
-        ? (db
+        ? (videoDb
             .prepare(
               `SELECT * FROM videos WHERE id IN (${profile.syncVideoIds.map(() => '?').join(',')})`
             )
             .all(...profile.syncVideoIds) as VideoRow[])
-        : (db
+        : (videoDb
             .prepare('SELECT * FROM videos WHERE keep_cached = 1 OR is_transcoded = 1')
             .all() as VideoRow[]);
 
@@ -2001,7 +2003,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
     // Priority 6.3: Auto-Sync Plex On Deck (Next N Unwatched Episodes)
     if (profile.syncPlexOnDeck) {
       const limit = Math.max(1, Math.min(50, profile.plexOnDeckLimit || 5));
-      const unwatchedEpisodes = db
+      const unwatchedEpisodes = videoDb
         .prepare(
           `SELECT * FROM videos WHERE type = 'tv' AND COALESCE(play_count, 0) = 0 ORDER BY show_name ASC, season ASC, episode ASC LIMIT ?`
         )
@@ -2013,7 +2015,7 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
 
     // Priority 7.3: Include Music Videos if enabled
     if (profile.syncMusicVideos) {
-      const mvs = db
+      const mvs = videoDb
         .prepare(`SELECT * FROM videos WHERE type = 'music_video'`)
         .all() as VideoRow[];
       for (const mv of mvs) {
@@ -2023,10 +2025,10 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
 
     const videosToSync = Array.from(playlistVideosMap.values());
     const photosToSync = profile.syncPhotos
-      ? (db.prepare('SELECT * FROM photos LIMIT 500').all() as PhotoRow[])
+      ? (videoDb.prepare('SELECT * FROM photos LIMIT 500').all() as PhotoRow[])
       : [];
-    const booksToSync = db.prepare('SELECT * FROM books LIMIT 200').all() as BookRow[];
-    const audiobooksToSync = db
+    const booksToSync = videoDb.prepare('SELECT * FROM books LIMIT 200').all() as BookRow[];
+    const audiobooksToSync = videoDb
       .prepare('SELECT * FROM audiobooks LIMIT 200')
       .all() as AudiobookRow[];
 

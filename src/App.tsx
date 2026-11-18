@@ -58,9 +58,11 @@ import {
 import {
   formatBytes,
   formatDuration,
+  getConfiguredRemoteServerUrl,
   getMediaBaseUrl,
   invokeRpc,
   isDevMode,
+  postPlaybackSync,
   subscribeEvent,
 } from './bridge';
 import { PreferencesModal } from './components/PreferencesModal';
@@ -246,6 +248,9 @@ export const App: React.FC = () => {
 
   // Audio / Video Playback Engine
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const preloadAudioRef = useRef<HTMLAudioElement | null>(null);
+  const preloadedTrackKeyRef = useRef<string | null>(null);
+  const preloadedSrcUrlRef = useRef<string | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const [currentTrack, setCurrentTrack] = useState<TrackRow | null>(null);
@@ -462,11 +467,34 @@ export const App: React.FC = () => {
         }
       }
     );
+    const unsubLibraryUpdated = subscribeEvent<{ current_rev?: number }>(
+      'library:updated',
+      () => {
+        const remoteUrl = getConfiguredRemoteServerUrl();
+        if (remoteUrl && window.rtunesElectron) {
+          void invokeRpc('sync:remoteDelta', remoteUrl)
+            .catch(() => {})
+            .finally(() => {
+              void refreshAllData();
+            });
+        } else {
+          void refreshAllData();
+        }
+      }
+    );
+
+    const initialRemoteUrl = getConfiguredRemoteServerUrl();
+    if (initialRemoteUrl && window.rtunesElectron) {
+      void invokeRpc('sync:remoteDelta', initialRemoteUrl)
+        .then(() => refreshAllData())
+        .catch(() => {});
+    }
 
     return () => {
       unsubOpenAbout();
       unsubOpenPrefs();
       unsubBinaryProgress();
+      unsubLibraryUpdated();
       unsubIdx();
       unsubBatch();
       unsubCache();
@@ -1022,6 +1050,23 @@ export const App: React.FC = () => {
     }
   };
 
+  // Dual-buffer next-track preloader helpers
+  const buildTrackStreamUrl = (track: TrackRow, base: string) =>
+    `${base}/track?id=${track.id}${track.track_uid ? `&uid=${encodeURIComponent(track.track_uid)}` : ''}`;
+
+  const resetPreloader = () => {
+    preloadedTrackKeyRef.current = null;
+    preloadedSrcUrlRef.current = null;
+    if (preloadAudioRef.current) {
+      preloadAudioRef.current.removeAttribute('src');
+      preloadAudioRef.current.load();
+    }
+  };
+
+  useEffect(() => {
+    resetPreloader();
+  }, [filteredTracks, mediaPort]);
+
   // Playback handlers
   const playTrack = async (track: TrackRow) => {
     setCurrentTrack(track);
@@ -1041,7 +1086,9 @@ export const App: React.FC = () => {
     const base = getMediaBaseUrl(mediaPort);
     if (!audioRef.current || !base) return;
 
-    const srcUrl = `${base}/track?id=${track.id}`;
+    const targetUrl = buildTrackStreamUrl(track, base);
+    const srcUrl = preloadedSrcUrlRef.current === targetUrl ? preloadedSrcUrlRef.current : targetUrl;
+    resetPreloader();
     audioRef.current.src = srcUrl;
     audioRef.current.volume = isMuted ? 0 : volume;
 
@@ -1121,6 +1168,16 @@ export const App: React.FC = () => {
         const plTracks = await invokeRpc<TrackRow[]>('playlists:getTracks', nav.id);
         setPlaylistTracks(plTracks);
       }
+      if (updated.track_uid && getConfiguredRemoteServerUrl() && window.rtunesElectron) {
+        void postPlaybackSync([
+          {
+            track_uid: updated.track_uid,
+            play_count_delta: 0,
+            rating: updated.local_star_rating,
+            loved: Boolean(updated.is_loved),
+          },
+        ]).catch(() => {});
+      }
     }
   };
 
@@ -1174,7 +1231,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="rtunes-app">
-      {/* Hidden Native Audio Engine */}
+      {/* Hidden Native Audio Engine + Dual-Buffer Standby Preloader */}
       <audio
         ref={audioRef}
         crossOrigin="anonymous"
@@ -1192,12 +1249,51 @@ export const App: React.FC = () => {
               if (updated) {
                 setTracks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
                 setCurrentTrack(updated);
+                if (updated.track_uid && getConfiguredRemoteServerUrl() && window.rtunesElectron) {
+                  void postPlaybackSync([
+                    {
+                      track_uid: updated.track_uid,
+                      play_count_delta: 1,
+                      last_played_at: new Date().toISOString(),
+                    },
+                  ]).catch(() => {});
+                }
               }
             });
+          }
+
+          // Preload next queued track into standby buffer at 75% progress or 15s remaining
+          if (
+            currentTrack &&
+            filteredTracks.length > 1 &&
+            dur > 0 &&
+            (ct >= dur * 0.75 || dur - ct <= 15) &&
+            preloadAudioRef.current
+          ) {
+            const idx = filteredTracks.findIndex((t) => t.id === currentTrack.id);
+            const nextTrack = idx >= 0 ? filteredTracks[(idx + 1) % filteredTracks.length] : null;
+            if (nextTrack && nextTrack.id !== currentTrack.id) {
+              const nextKey = String(nextTrack.track_uid || nextTrack.id);
+              const base = getMediaBaseUrl(mediaPort);
+              if (base && preloadedTrackKeyRef.current !== nextKey) {
+                const nextUrl = buildTrackStreamUrl(nextTrack, base);
+                preloadedTrackKeyRef.current = nextKey;
+                preloadedSrcUrlRef.current = nextUrl;
+                preloadAudioRef.current.preload = 'auto';
+                preloadAudioRef.current.src = nextUrl;
+                preloadAudioRef.current.load();
+              }
+            }
           }
         }}
         onLoadedMetadata={() => setDuration(audioRef.current?.duration || currentTrack?.duration || 0)}
         onEnded={playNext}
+      />
+      <audio
+        ref={preloadAudioRef}
+        preload="auto"
+        crossOrigin="anonymous"
+        style={{ display: 'none' }}
       />
 
       {/* =====================================================================

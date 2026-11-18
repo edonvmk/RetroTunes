@@ -5,7 +5,15 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { emitRendererEvent } from './runtimeBus';
-import { getDb, recalculateArtistPopularityScores, TrackRow } from './db';
+import {
+  backfillTrackUids,
+  computeTrackUid,
+  getCoreDb,
+  getDb,
+  getVideoDb,
+  recalculateArtistPopularityScores,
+  TrackRow,
+} from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { rebuildGenreMatrix } from './egenius/genreMatrix';
@@ -615,16 +623,18 @@ export async function runLibraryScan(
     // =========================================================================
     // PHASE 2 & 3: BUILD DIRECTORY OF ALBUMS & FAST-INDEX SONGS INCREMENTALLY
     // =========================================================================
-    const db = getDb();
+    const db = getCoreDb();
+    const videoDb = getVideoDb();
     const fastInsertTrack = db.prepare(`
       INSERT INTO tracks (
-        remote_nfs_path, alternate_paths, title, artist, album, year,
+        track_uid, remote_nfs_path, alternate_paths, title, artist, album, year,
         track_num, disc_num, format, cover_art_path, lrc_path, metadata_loaded
       ) VALUES (
-        @remote_nfs_path, '[]', @title, @artist, @album, @year,
+        @track_uid, @remote_nfs_path, '[]', @title, @artist, @album, @year,
         @track_num, @disc_num, @format, @cover_art_path, @lrc_path, 0
       )
       ON CONFLICT(remote_nfs_path) DO UPDATE SET
+        track_uid = COALESCE(tracks.track_uid, excluded.track_uid),
         cover_art_path = COALESCE(tracks.cover_art_path, excluded.cover_art_path),
         lrc_path = COALESCE(tracks.lrc_path, excluded.lrc_path)
     `);
@@ -653,11 +663,13 @@ export async function runLibraryScan(
     const existingByPath = new Map<string, ExistingTrackIndexEntry>();
     const existingBySubpath = new Map<string, ExistingTrackIndexEntry>();
     const existingByMatchKey = new Map<string, ExistingTrackIndexEntry>();
+    const seenTrackUids = new Set<string>();
     for (const row of db
       .prepare(
-        'SELECT id, remote_nfs_path, alternate_paths, artist, album, title, format, bitrate, file_size FROM tracks'
+        'SELECT id, track_uid, remote_nfs_path, alternate_paths, artist, album, title, format, bitrate, file_size FROM tracks'
       )
-      .all() as (ExistingTrackIndexEntry & { artist: string; album: string; title: string })[]) {
+      .all() as (ExistingTrackIndexEntry & { track_uid?: string | null; artist: string; album: string; title: string })[]) {
+      if (row.track_uid) seenTrackUids.add(row.track_uid);
       existingByPath.set(row.remote_nfs_path, row);
       const sub = extractCanonicalMediaSubpath(row.remote_nfs_path);
       if (sub && !existingBySubpath.has(sub)) existingBySubpath.set(sub, row);
@@ -670,7 +682,7 @@ export async function runLibraryScan(
       }
     }
 
-    const fastInsertVideo = db.prepare(`
+    const fastInsertVideo = videoDb.prepare(`
       INSERT INTO videos (
         remote_nfs_path, title, type, show_name, season, episode, year, tvdb_id, tmdb_id, imdb_id, format, poster_path
       ) VALUES (
@@ -744,7 +756,23 @@ export async function runLibraryScan(
           }
         }
 
+        let uid = computeTrackUid({
+          artist: artistName,
+          album: parsed.album,
+          disc_num: parsed.discNum,
+          track_num: parsed.trackNum,
+          title: parsed.title,
+          duration: 0,
+        });
+        if (!existingByPath.has(audioPath)) {
+          if (seenTrackUids.has(uid)) {
+            uid = crypto.createHash('sha256').update(`${uid}|${audioPath}`).digest('hex').slice(0, 32);
+          }
+          seenTrackUids.add(uid);
+        }
+
         const info = fastInsertTrack.run({
+          track_uid: uid,
           remote_nfs_path: audioPath,
           title: parsed.title,
           artist: artistName,
@@ -928,6 +956,7 @@ export async function runLibraryScan(
     if (!cancelRequested) {
       clearIndexCheckpoint();
     }
+    backfillTrackUids();
 
     broadcastProgress(
       {
@@ -1574,7 +1603,7 @@ export async function syncListenBrainzPopularity(options: {
  * TVMaze API (for TV shows), or IMDb suggestion API (for Movies), caching locally.
  */
 export async function hydrateVideoArtwork(): Promise<number> {
-  const db = getDb();
+  const db = getVideoDb();
   const settings = getSettings();
   const artworkDir = path.join(settings.localCachePath, 'artwork');
   await fsp.mkdir(artworkDir, { recursive: true });
@@ -1756,7 +1785,8 @@ export async function cleanAndHydrateAllLibraryTitles(triggerTagSweep = true): P
   }
 
   // 2. Clean all Video rows & reclassify TV Specials/Extras
-  const allVideos = db
+  const videoDb = getVideoDb();
+  const allVideos = videoDb
     .prepare('SELECT id, remote_nfs_path, title, type, show_name, season, episode, year, tvdb_id FROM videos')
     .all() as {
     id: number;
@@ -1770,7 +1800,7 @@ export async function cleanAndHydrateAllLibraryTitles(triggerTagSweep = true): P
     tvdb_id: string | null;
   }[];
 
-  const updateVideoCleanStmt = db.prepare(`
+  const updateVideoCleanStmt = videoDb.prepare(`
     UPDATE videos
     SET title = ?,
         type = ?,
@@ -1785,7 +1815,7 @@ export async function cleanAndHydrateAllLibraryTitles(triggerTagSweep = true): P
   let videosCleaned = 0;
   let tvReclassified = 0;
 
-  const videoTx = db.transaction(() => {
+  const videoTx = videoDb.transaction(() => {
     for (const v of allVideos) {
       const parsed = parseVideoFilename(v.remote_nfs_path, settings.tvRootPath || settings.videoRootPath || '');
       const changed =
@@ -1854,7 +1884,7 @@ export async function scanExtendedMediaSections(): Promise<{
   photosAdded: number;
 }> {
   const settings = getSettings();
-  const db = getDb();
+  const db = getVideoDb();
   let musicVideosAdded = 0;
   let booksAdded = 0;
   let audiobooksAdded = 0;
@@ -1988,7 +2018,7 @@ export async function syncPlexAndAudiobookshelfProgress(): Promise<{
   audiobookshelfSynced: number;
 }> {
   const settings = getSettings();
-  const db = getDb();
+  const db = getVideoDb();
   let plexSynced = 0;
   let audiobookshelfSynced = 0;
 
@@ -2091,10 +2121,20 @@ export async function updateVideoPlaybackProgress(
   viewOffsetMs: number,
   watched: boolean
 ): Promise<void> {
-  const db = getDb();
+  const db = getVideoDb();
+  const safeOffset = Math.max(0, Math.round(viewOffsetMs));
+  const safeWatched = watched ? 1 : 0;
   db.prepare(
     'UPDATE videos SET view_offset_ms = ?, watched = ?, play_count = CASE WHEN ? = 1 AND watched = 0 THEN COALESCE(play_count, 0) + 1 ELSE play_count END WHERE id = ?'
-  ).run(Math.max(0, Math.round(viewOffsetMs)), watched ? 1 : 0, watched ? 1 : 0, videoId);
+  ).run(safeOffset, safeWatched, safeWatched, videoId);
+  db.prepare(
+    `INSERT INTO watch_progress (video_id, view_offset_ms, watched, updated_at)
+     VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(video_id) DO UPDATE SET
+       view_offset_ms = excluded.view_offset_ms,
+       watched = excluded.watched,
+       updated_at = datetime('now')`
+  ).run(videoId, safeOffset, safeWatched);
 }
 
 export async function updateAudiobookPlaybackProgress(
@@ -2102,7 +2142,7 @@ export async function updateAudiobookPlaybackProgress(
   currentTimeSec: number,
   isFinished: boolean
 ): Promise<void> {
-  const db = getDb();
+  const db = getVideoDb();
   db.prepare(
     'UPDATE audiobooks SET current_time_sec = ?, is_finished = ? WHERE id = ?'
   ).run(Math.max(0, currentTimeSec), isFinished ? 1 : 0, audiobookId);

@@ -1,6 +1,13 @@
 import fs from 'fs';
+import { emitRendererEvent } from './runtimeBus';
 import {
   getDb,
+  getCoreDb,
+  getVideoDb,
+  getDeltaSyncBatch,
+  applyPlaybackDeltaSync,
+  getLibraryRevision,
+  PlaybackDeltaUpdate,
   searchTracksFts,
   searchVideosFts,
   recalculateArtistPopularityScores,
@@ -102,6 +109,7 @@ import { getMediaServerPort } from './mediaServer';
 import { logger, LogLevel, LogSubsystem } from './logger';
 import { platformDriver } from './platform';
 import { reexportSyncedPlaylistM3u8 } from './deviceSync';
+import { remoteServerProvider } from './providers/remoteServer';
 
 export type RpcHandlerFn = (...args: any[]) => Promise<any> | any;
 export type RpcRegisterFn = (channel: string, fn: RpcHandlerFn) => void;
@@ -187,6 +195,7 @@ export function registerCoreRpcHandlers(
       }
     }
 
+    emitRendererEvent('library:updated', { current_rev: getLibraryRevision() });
     return db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId);
   });
 
@@ -198,6 +207,7 @@ export function registerCoreRpcHandlers(
     if (getSettings().autoCachePlayback) {
       queueTrackCache(trackId, true);
     }
+    emitRendererEvent('library:updated', { current_rev: getLibraryRevision() });
     return await hydrateTrackMetadata(trackId, true);
   });
 
@@ -218,7 +228,7 @@ export function registerCoreRpcHandlers(
     searchVideosFts(query, typeFilter)
   );
   registerChannel('videos:markWatched', (videoId: number, watched: boolean) => {
-    const db = getDb();
+    const db = getVideoDb();
     db.prepare('UPDATE videos SET watched = ? WHERE id = ?').run(watched ? 1 : 0, videoId);
     if (watched && getSettings().autoCachePlayback) {
       queueVideoTranscode(videoId, true);
@@ -227,7 +237,7 @@ export function registerCoreRpcHandlers(
   });
 
   registerChannel('cache:toggleShow', (showName: string, keepCached: boolean) => {
-    const db = getDb();
+    const db = getVideoDb();
     const eps = db
       .prepare("SELECT id FROM videos WHERE type = 'tv' AND show_name = ?")
       .all(showName) as { id: number }[];
@@ -583,48 +593,50 @@ export function registerCoreRpcHandlers(
       restoreSmartPlaylistExclusion(playlistId, trackId, scope)
   );
   registerChannel('playlists:addVideo', (playlistId: number, videoId: number) => {
-    const db = getDb();
-    const pl = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
+    const coreDb = getCoreDb();
+    const videoDb = getVideoDb();
+    const pl = coreDb.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
       | PlaylistRow
       | undefined;
     if (pl && pl.media_type === 'music') {
-      db.prepare("UPDATE playlists SET media_type = 'mixed' WHERE id = ?").run(playlistId);
+      coreDb.prepare("UPDATE playlists SET media_type = 'mixed' WHERE id = ?").run(playlistId);
     }
     const maxPos = (
-      db
+      videoDb
         .prepare('SELECT COALESCE(MAX(position), 0) as m FROM playlist_videos WHERE playlist_id = ?')
         .get(playlistId) as { m: number }
     ).m;
-    db.prepare(
-      'INSERT OR IGNORE INTO playlist_videos (playlist_id, video_id, position) VALUES (?, ?, ?)'
-    ).run(playlistId, videoId, maxPos + 1);
+    videoDb
+      .prepare('INSERT OR IGNORE INTO playlist_videos (playlist_id, video_id, position) VALUES (?, ?, ?)')
+      .run(playlistId, videoId, maxPos + 1);
     return { ok: true };
   });
   registerChannel('playlists:removeVideo', (playlistId: number, videoId: number) => {
-    getDb()
+    getVideoDb()
       .prepare('DELETE FROM playlist_videos WHERE playlist_id = ? AND video_id = ?')
       .run(playlistId, videoId);
     return { ok: true };
   });
   registerChannel('playlists:addShow', (playlistId: number, showName: string) => {
-    const db = getDb();
-    db.prepare("UPDATE playlists SET media_type = 'mixed' WHERE id = ? AND media_type = 'music'").run(
-      playlistId
-    );
-    const eps = db
+    const coreDb = getCoreDb();
+    const videoDb = getVideoDb();
+    coreDb
+      .prepare("UPDATE playlists SET media_type = 'mixed' WHERE id = ? AND media_type = 'music'")
+      .run(playlistId);
+    const eps = videoDb
       .prepare(
         "SELECT id FROM videos WHERE type = 'tv' AND show_name = ? ORDER BY season ASC, episode ASC"
       )
       .all(showName) as { id: number }[];
     let maxPos = (
-      db
+      videoDb
         .prepare('SELECT COALESCE(MAX(position), 0) as m FROM playlist_videos WHERE playlist_id = ?')
         .get(playlistId) as { m: number }
     ).m;
-    const ins = db.prepare(
+    const ins = videoDb.prepare(
       'INSERT OR IGNORE INTO playlist_videos (playlist_id, video_id, position) VALUES (?, ?, ?)'
     );
-    const tx = db.transaction(() => {
+    const tx = videoDb.transaction(() => {
       for (const ep of eps) {
         maxPos++;
         ins.run(playlistId, ep.id, maxPos);
@@ -725,20 +737,31 @@ export function registerCoreRpcHandlers(
   );
   registerChannel('media:syncPlexAndAbs', () => syncPlexAndAudiobookshelfProgress());
   registerChannel('books:list', () =>
-    getDb().prepare('SELECT * FROM books ORDER BY author ASC, title ASC').all()
+    getVideoDb().prepare('SELECT * FROM books ORDER BY author ASC, title ASC').all()
   );
   registerChannel('audiobooks:list', () =>
-    getDb().prepare('SELECT * FROM audiobooks ORDER BY author ASC, title ASC').all()
+    getVideoDb().prepare('SELECT * FROM audiobooks ORDER BY author ASC, title ASC').all()
   );
   registerChannel('photos:list', () =>
-    getDb().prepare('SELECT * FROM photos ORDER BY album_name ASC, title ASC').all()
+    getVideoDb().prepare('SELECT * FROM photos ORDER BY album_name ASC, title ASC').all()
   );
   registerChannel('musicVideos:list', () =>
-    getDb()
+    getVideoDb()
       .prepare("SELECT * FROM videos WHERE type = 'music_video' ORDER BY artist ASC, title ASC")
       .all()
   );
   registerChannel('indexer:scanExtended', () => scanExtendedMediaSections());
+  registerChannel('sync:delta', (sinceRev = 0, limit = 2000) =>
+    getDeltaSyncBatch(Number(sinceRev) || 0, Number(limit) || 2000)
+  );
+  registerChannel('sync:playback', (updates: PlaybackDeltaUpdate[]) =>
+    applyPlaybackDeltaSync(Array.isArray(updates) ? updates : [])
+  );
+  registerChannel('sync:remoteDelta', (serverUrl?: string) => {
+    const url = (serverUrl || getSettings().dockerServerUrl || process.env.RTUNES_SERVER_URL || '').trim();
+    if (!url) return { ok: false, skipped: true };
+    return remoteServerProvider.syncDeltaFromRemoteServer(url);
+  });
 
   // --- Standalone/Server auth default (overridden by electron/main.ts in GUI) ---
   const serverAuth = () => ({

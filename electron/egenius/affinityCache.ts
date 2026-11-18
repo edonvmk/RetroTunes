@@ -1,4 +1,4 @@
-import { getDb, TrackRow } from '../db';
+import { getCacheDb, TrackRow } from '../db';
 import { getSettings } from '../settings';
 import { logger } from '../logger';
 import {
@@ -40,7 +40,7 @@ async function fetchJsonWithTimeout(url: string): Promise<any | null> {
 export function readCachedArtistAffinity(artistName: string): ArtistAffinityRecord | null {
   const key = normalizeArtistKey(artistName);
   if (!key) return null;
-  const db = getDb();
+  const db = getCacheDb();
   const row = db
     .prepare(
       'SELECT artist_key, artist_name, similar_artists_json, top_tags_json, updated_at FROM artist_affinity_cache WHERE artist_key = ?'
@@ -72,7 +72,7 @@ export function readCachedArtistAffinity(artistName: string): ArtistAffinityReco
 }
 
 export function writeCachedArtistAffinity(record: Omit<ArtistAffinityRecord, 'fromCache'>): void {
-  const db = getDb();
+  const db = getCacheDb();
   db.prepare(
     `INSERT OR REPLACE INTO artist_affinity_cache
        (artist_key, artist_name, similar_artists_json, top_tags_json, updated_at)
@@ -169,7 +169,7 @@ export function readCachedTrackAffinity(
   track: Pick<TrackRow, 'mbid_recording' | 'artist' | 'title'>
 ): TrackAffinityRecord | null {
   const key = normalizeTrackKey(track);
-  const db = getDb();
+  const db = getCacheDb();
   const row = db
     .prepare(
       'SELECT track_mbid_or_key, similar_tracks_json, updated_at FROM track_affinity_cache WHERE track_mbid_or_key = ?'
@@ -228,7 +228,7 @@ export async function resolveTrackAffinity(
 
     if (similarTracks.length > 0) {
       const now = Date.now();
-      const db = getDb();
+      const db = getCacheDb();
       db.prepare(
         `INSERT OR REPLACE INTO track_affinity_cache
            (track_mbid_or_key, similar_tracks_json, updated_at)

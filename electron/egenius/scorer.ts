@@ -1,4 +1,4 @@
-import { getDb, TrackRow } from '../db';
+import { getCoreDb, TrackRow } from '../db';
 import {
   normalizeArtistKey,
   readCachedArtistAffinity,
@@ -112,7 +112,7 @@ export async function gatherAndScoreCandidates(
   offlineOnly = false,
   sceneThreshold = 0.55
 ): Promise<GatherAndScoreResult> {
-  const db = getDb();
+  const db = getCoreDb();
   const seedVariant = classifyVariant(seedTrack);
   const seedArtistKey = normalizeArtistKey(seedTrack.artist);
 

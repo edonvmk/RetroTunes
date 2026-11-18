@@ -37,6 +37,52 @@ export function getRpcBaseUrl(): string {
   return 'http://127.0.0.1:42815';
 }
 
+export function getConfiguredRemoteServerUrl(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage?.getItem('rtunes_server_url')?.trim().replace(/\/+$/, '') || '';
+  } catch {
+    return '';
+  }
+}
+
+export interface SyncDeltaResponse {
+  current_rev: number;
+  upserted: any[];
+  deleted_uids: string[];
+  has_more: boolean;
+}
+
+export async function fetchSyncDelta(sinceRev = 0, limit = 2000): Promise<SyncDeltaResponse> {
+  const base = getConfiguredRemoteServerUrl() || getRpcBaseUrl();
+  const res = await fetch(`${base}/api/sync/delta?since_rev=${sinceRev}&limit=${limit}`);
+  if (!res.ok) {
+    throw new Error(`Delta sync failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as SyncDeltaResponse;
+}
+
+export async function postPlaybackSync(
+  updates: {
+    track_uid: string;
+    play_count_delta?: number;
+    rating?: number;
+    loved?: boolean | number;
+    last_played_at?: string;
+  }[]
+): Promise<{ ok: boolean; current_rev: number; applied: number }> {
+  const base = getConfiguredRemoteServerUrl() || getRpcBaseUrl();
+  const res = await fetch(`${base}/api/sync/playback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ updates }),
+  });
+  if (!res.ok) {
+    throw new Error(`Playback sync failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as { ok: boolean; current_rev: number; applied: number };
+}
+
 export function getMediaBaseUrl(mediaPort?: number): string {
   if (typeof window !== 'undefined') {
     try {

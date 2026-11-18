@@ -1,4 +1,4 @@
-import { getDb } from './db';
+import { getCoreDb, getStoreDb } from './db';
 import { getSettings } from './settings';
 import { getAuthState } from './authOidc';
 import { logger } from './logger';
@@ -46,7 +46,7 @@ export interface ArrQueueItem {
 
 function checkIfAlbumInLocalDb(artist: string, album: string): boolean {
   try {
-    const db = getDb();
+    const db = getCoreDb();
     const row = db
       .prepare('SELECT id FROM tracks WHERE LOWER(artist) = LOWER(?) AND LOWER(album) = LOWER(?) LIMIT 1')
       .get(artist, album);
@@ -223,7 +223,7 @@ async function fetchPopularSeries(limit = 16): Promise<StoreCatalogItem[]> {
  */
 export async function getStorefrontHome(genreFilter?: string): Promise<StoreHomeData> {
   const start = Date.now();
-  const db = getDb();
+  const db = getCoreDb();
   const settings = getSettings();
 
   // 1. Inspect the user's top / favorite artists in their local library
@@ -662,6 +662,11 @@ export async function requestStoreItem(item: StoreCatalogItem): Promise<{
       }
 
       const msg = `"${item.title}" by ${item.subtitle} has been added to your download queue.`;
+      getStoreDb()
+        .prepare(
+          'INSERT INTO store_requests (media_type, title, subtitle, foreign_id, service, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run(item.mediaType, item.title, item.subtitle, item.foreignId || '', 'lidarr', 'requested', JSON.stringify(postBody));
       logger.info('ARR_STORE', msg, { title: item.title }, Date.now() - start);
       return { ok: true, message: msg };
     }
@@ -718,6 +723,11 @@ export async function requestStoreItem(item: StoreCatalogItem): Promise<{
       }
 
       const msg = `"${item.title}" has been added to your movie download queue.`;
+      getStoreDb()
+        .prepare(
+          'INSERT INTO store_requests (media_type, title, subtitle, foreign_id, service, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run(item.mediaType, item.title, item.subtitle, item.foreignId || '', 'radarr', 'requested', JSON.stringify(postBody));
       logger.info('ARR_STORE', msg, { title: item.title }, Date.now() - start);
       return { ok: true, message: msg };
     }
@@ -777,6 +787,11 @@ export async function requestStoreItem(item: StoreCatalogItem): Promise<{
       }
 
       const msg = `"${item.title}" has been added to your TV download queue.`;
+      getStoreDb()
+        .prepare(
+          'INSERT INTO store_requests (media_type, title, subtitle, foreign_id, service, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run(item.mediaType, item.title, item.subtitle, item.foreignId || '', 'sonarr', 'requested', JSON.stringify(postBody));
       logger.info('ARR_STORE', msg, { title: item.title }, Date.now() - start);
       return { ok: true, message: msg };
     }
@@ -850,6 +865,16 @@ export async function getArrLiveQueue(): Promise<ArrQueueItem[]> {
     fetchServiceQueue('sonarr', settings.sonarrUrl, settings.sonarrApiKey, 'v3'),
   ]);
 
+  try {
+    getStoreDb()
+      .prepare(
+        'INSERT OR REPLACE INTO arr_sync_cache (cache_key, service, payload_json, updated_at) VALUES (?, ?, ?, ?)'
+      )
+      .run('arr_live_queue', 'all', JSON.stringify(combined), Date.now());
+  } catch {
+    // ignore store cache error
+  }
+
   return combined;
 }
 
@@ -872,7 +897,7 @@ function checkIfTrackInLocalDb(artist: string, title: string): {
   plays?: number;
 } {
   try {
-    const db = getDb();
+    const db = getCoreDb();
     const row = db
       .prepare(
         'SELECT album, artist_relative_popularity_score, global_listen_count, play_count FROM tracks WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?) LIMIT 1'
@@ -904,7 +929,7 @@ export async function getMultiSourceTopCharts(
   source: 'deezer' | 'lastfm' | 'theaudiodb' | 'library_relative' = 'deezer'
 ): Promise<ChartTrackItem[]> {
   const settings = getSettings();
-  const db = getDb();
+  const db = getCoreDb();
 
   if (source === 'library_relative') {
     const rows = db

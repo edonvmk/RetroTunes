@@ -65,10 +65,14 @@ Do **not** duplicate existing handlers. Always reuse or extend the existing chan
 - **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`, `playlists:getExclusions`, `playlists:ignoreTrack`, `playlists:excludeTrackGlobally`, `playlists:restoreExclusion`, `egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`, `genreMatrix:get`, `genreMatrix:rebuild`, `genreMatrix:setCell`, `genreMatrix:resetCell`, `genreMatrix:testArtists`, `genreMatrix:getArtistSlice`
 - **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`, `devices:getCatalog`, `devices:removeItem`
 - **Shares & Upload:** `shares:list`, `shares:save`, `shares:delete`, `shares:mount`, `shares:unmount`, `shares:autoDetect`, `upload:searchMetadata`, `upload:previewPlan`, `upload:execute`
-- **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `auth:getState`, `auth:login`, `auth:logout`
+- **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `sync:delta`, `sync:playback`, `sync:remoteDelta`, `auth:getState`, `auth:login`, `auth:logout`
 
-### SQLite Schema (`electron/db.ts`)
-Core tables: `tracks`, `tracks_fts` (FTS5), `videos`, `videos_fts` (FTS5), `playlists`, `playlist_tracks`, `playlist_videos`, `smart_playlist_exclusions`, `devices`, `cache_jobs`, `settings`, `network_shares`, `device_play_state`, `books`, `audiobooks`, `photos`, `artist_affinity_cache`, `track_affinity_cache`, `artist_genre_weights`, `subgenre_affinity_matrix`.
+### SQLite Multi-DB Domain Split (`electron/db.ts`)
+Four domain-isolated WAL databases inside `RTUNES_DATA_DIR` (with automatic idempotent migration from legacy `rtunes.sqlite`):
+- **`core.sqlite` (`getCoreDb()` / `getDb()`):** `tracks` (with deterministic `track_uid` + `sync_rev`), `tracks_fts`, `playlists`, `playlist_tracks`, `smart_playlists` view, `smart_playlist_exclusions`, `artist_genre_weights`, `subgenre_affinity_matrix`, `settings`, `network_shares`, `devices`, `device_play_state`, `sync_tombstones`.
+- **`affinity_cache.sqlite` (`getCacheDb()`):** `artist_affinity_cache`, `track_affinity_cache`, `external_metadata_cache`.
+- **`video.sqlite` (`getVideoDb()`):** `videos`, `videos_fts`, `playlist_videos`, `tv_episodes`, `books`, `audiobooks`, `photos`, `cache_jobs` (`transcode_jobs` view), `watch_progress`.
+- **`store.sqlite` (`getStoreDb()`):** `store_requests`, `arr_sync_cache`, `upload_history`.
 
 ---
 

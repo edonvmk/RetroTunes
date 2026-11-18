@@ -14,8 +14,8 @@ Renderer (src/)
                                    │                                        ▲
                                    ▼                                        │
 Shared Core (electron/, Electron-free via runtimeBus.ts) ───────────────────┘
-  ├── electron/runtimeBus.ts (emitRendererEvent, onRendererEvent, getAppDataPath, getSafeStorage)
-  ├── electron/db.ts (SQLite + FTS5 + WAL + busy_timeout)
+  ├── electron/runtimeBus.ts (emitRendererEvent, onRendererEvent, getAppDataPath, getSafeStorage, openExternalUrl)
+  ├── electron/db.ts (4-domain WAL split: core.sqlite, affinity_cache.sqlite, video.sqlite, store.sqlite + track_uid delta sync)
   ├── electron/settings.ts (AppSettings + OS Keychain / safeStorage)
   ├── electron/logger.ts (ring buffer + rotating logs -> log:entry)
   ├── electron/platform/{index,types,darwin,win32,linux}.ts (OS drivers)
@@ -31,8 +31,8 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 | Module | Owns / Exports | Connects To |
 |---|---|---|
 | `src/main.tsx` | React 19 root mount | `src/App.tsx`, `src/styles/rtunes.css` |
-| `src/App.tsx` | Three-pane Aqua shell, Cover Flow, virtualized media tables, LCD transport, context menus, sidebar device sub-tree | `src/bridge.ts`, `src/types.ts`, `src/components/*` |
-| `src/bridge.ts` | `invokeRpc`, `subscribeEvent` (IPC or SSE `/events`), `getRpcBaseUrl`, `getMediaBaseUrl`, `isDevMode`, `formatDuration`, `formatBytes` | `window.rtunesElectron`, `window.electronAPI`, `main.ts` HTTP/SSE |
+| `src/App.tsx` | Three-pane Aqua shell, Cover Flow, virtualized media tables, LCD transport, dual-buffer next-track preloader, context menus, sidebar device sub-tree | `src/bridge.ts`, `src/types.ts`, `src/components/*` |
+| `src/bridge.ts` | `invokeRpc`, `subscribeEvent` (IPC or SSE `/events`), `getRpcBaseUrl`, `getMediaBaseUrl`, `fetchSyncDelta`, `postPlaybackSync`, `isDevMode`, `formatDuration`, `formatBytes` | `window.rtunesElectron`, `window.electronAPI`, `main.ts`, `server.ts` |
 | `src/types.ts` | Shared renderer/IPC interfaces (`TrackRow`, `VideoRow`, `BookRow`, `AudiobookRow`, `PhotoRow`, `DeviceInfo`, `DeviceCatalog`, `AppSettings`, `SmartRuleGroup`, etc.) | Consumed across `src/` |
 | `src/styles/rtunes.css` | Late-2000s Snow Leopard Aqua & Brushed Metal CSS theme | `src/main.tsx` |
 
@@ -61,10 +61,10 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 | `electron/main.ts` | `BrowserWindow`, app menu, desktop-only GUI/USB IPC overrides, HTTP `:42815` & optional LAN `server.ts` listener | `rpcHandlers.ts`, `server.ts`, `runtimeBus.ts`, `preload.ts` |
 | `electron/preload.ts` | `contextBridge` exposing `window.rtunesElectron` & `window.electronAPI` | `electron/main.ts`, `src/bridge.ts` |
 | `electron/rpcHandlers.ts` | Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) & headless server stubs | All shared backend services, `main.ts`, `server.ts` |
-| `electron/server.ts` | Headless `rTunes-Server` HTTP/SSE/Media/Static Web UI/Upload entrypoint (`PORT=3000`) & optional desktop LAN listener | `rpcHandlers.ts`, `mediaServer.ts`, `runtimeBus.ts`, `db.ts`, `dist/` |
+| `electron/server.ts` | Headless `rTunes-Server` HTTP/SSE/Media/Sync (`/api/sync/delta`, `/api/sync/playback`)/Static Web UI/Upload entrypoint (`PORT=3000`) | `rpcHandlers.ts`, `mediaServer.ts`, `runtimeBus.ts`, `db.ts`, `dist/` |
 | `electron/cli.ts` | Headless CLI (`npm run cli -- <command>` via `ELECTRON_RUN_AS_NODE=1`) | `db.ts`, `deviceSync.ts`, `indexer.ts`, `storeArr.ts`, `egenius/`, `platform/` |
 | `electron/providers/standaloneLocal.ts` | Active local SQLite + direct NFS/SMB provider | `main.ts` |
-| `electron/providers/remoteServer.ts` | Isolated `rTunes-Server` Docker stub (gated behind `isDev`) | `main.ts` |
+| `electron/providers/remoteServer.ts` | Remote `rTunes-Server` delta cache sync (`syncDeltaFromRemoteServer`, `pushPlaybackToRemoteServer`) | `db.ts`, `runtimeBus.ts`, `main.ts`, `rpcHandlers.ts` |
 
 ---
 
@@ -77,7 +77,7 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 | `electron/runtimeBus.ts` | `isElectronGuiRuntime`, `emitRendererEvent`, `onRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage`, `openExternalUrl` | Used by all shared backend modules & `main.ts` |
 | `electron/authOidc.ts` | Electron-free Authentik OIDC / OAuth2 PKCE flow & token refresh (uses `runtimeBus`) | `runtimeBus.ts`, `auth/authentik.ts`, `settings.ts`, `platform/` |
 | `electron/auth/authentik.ts` | Dev-mode SSO boundary (returns standalone guest context when `isDev === false`) | `authOidc.ts`, `main.ts` |
-| `electron/db.ts` | `initDatabase`, `getDb`, `getDbPath` (`RTUNES_DB_PATH` / `RTUNES_DATA_DIR`), WAL + `busy_timeout = 5000`, FTS5 (`searchTracksFts`, `searchVideosFts`), `recalculateArtistPopularityScores` | `better-sqlite3`, `platform/`, `logger.ts` |
+| `electron/db.ts` | Multi-DB WAL split (`getCoreDb`, `getCacheDb`, `getVideoDb`, `getStoreDb`), legacy `rtunes.sqlite` migration, `computeTrackUid`, `getDeltaSyncBatch`, `applyPlaybackDeltaSync`, `recalculateArtistPopularityScores` | `better-sqlite3`, `platform/`, `runtimeBus.ts`, `logger.ts` |
 | `electron/settings.ts` | `getSettings`, `saveSettings`, `testIntegrationConnection`, `getKeychainSecret`, `setKeychainSecret` | `db.ts`, `platform/`, `logger.ts` |
 | `electron/logger.ts` | `logger` (`debug`, `info`, `warn`, `error`), ring buffer, rotating log files | `runtimeBus.ts` (`log:entry`) |
 | `electron/indexer.ts` | Phased library scanner, ID3/Vorbis/artwork hydration, ListenBrainz/Last.fm/AudioDB popularity, TVMaze/IMDb posters, Plex/Audiobookshelf progress sync | `db.ts`, `settings.ts`, `trackSources.ts`, `egenius/genreMatrix.ts`, `runtimeBus.ts` |

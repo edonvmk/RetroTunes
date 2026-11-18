@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { initDatabase, getDb, getDatabaseDiagnostics, rebuildMediaDatabase } from './db';
+import { initDatabase, getCoreDb, getVideoDb, getDatabaseDiagnostics, rebuildMediaDatabase } from './db';
 import { getSettings } from './settings';
 import { platformDriver } from './platform';
 import {
@@ -57,7 +57,7 @@ function out(data: unknown, asJson: boolean) {
 async function cmdDoctor(asJson: boolean) {
   initDatabase();
   const dbDiag = getDatabaseDiagnostics();
-  const integrityRow = getDb().prepare('PRAGMA integrity_check').get() as { integrity_check?: string } | undefined;
+  const integrityRow = getCoreDb().prepare('PRAGMA integrity_check').get() as { integrity_check?: string } | undefined;
   const integrity = integrityRow?.integrity_check || 'unknown';
   const settings = getSettings();
   const mtpBin = getRtunesMtpBinaryPath();
@@ -175,9 +175,10 @@ async function cmdDeviceSync(flags: Record<string, string | boolean>, asJson: bo
 
   if (dryRun) {
     const mtp = await refreshMtpState(false);
-    const db = getDb();
+    const db = getCoreDb();
+    const videoDb = getVideoDb();
     const trackCount = (db.prepare('SELECT COUNT(*) as c FROM tracks').get() as { c: number }).c;
-    const videoCount = (db.prepare('SELECT COUNT(*) as c FROM videos').get() as { c: number }).c;
+    const videoCount = (videoDb.prepare('SELECT COUNT(*) as c FROM videos').get() as { c: number }).c;
     const playlistCount = (db.prepare('SELECT COUNT(*) as c FROM playlists').get() as { c: number }).c;
     const expectedDirs = [
       '/Music',
@@ -207,17 +208,17 @@ async function cmdDeviceSync(flags: Record<string, string | boolean>, asJson: bo
 
 async function cmdDbStats(asJson: boolean) {
   initDatabase();
-  const db = getDb();
-  const count = (table: string) => (db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as { c: number }).c;
+  const coreDb = getCoreDb();
+  const videoDb = getVideoDb();
   const cache = getCacheStats();
   const stats = {
-    tracks: count('tracks'),
-    videos: count('videos'),
-    books: count('books'),
-    audiobooks: count('audiobooks'),
-    photos: count('photos'),
-    playlists: count('playlists'),
-    devices: count('devices'),
+    tracks: (coreDb.prepare('SELECT COUNT(*) as c FROM tracks').get() as { c: number }).c,
+    videos: (videoDb.prepare('SELECT COUNT(*) as c FROM videos').get() as { c: number }).c,
+    books: (videoDb.prepare('SELECT COUNT(*) as c FROM books').get() as { c: number }).c,
+    audiobooks: (videoDb.prepare('SELECT COUNT(*) as c FROM audiobooks').get() as { c: number }).c,
+    photos: (videoDb.prepare('SELECT COUNT(*) as c FROM photos').get() as { c: number }).c,
+    playlists: (coreDb.prepare('SELECT COUNT(*) as c FROM playlists').get() as { c: number }).c,
+    devices: (coreDb.prepare('SELECT COUNT(*) as c FROM devices').get() as { c: number }).c,
     cache,
   };
   out(stats, asJson);
@@ -441,7 +442,7 @@ async function main() {
       const targetGenre = normalizeGenreTag(genreRaw) || genreRaw.trim().toLowerCase();
       const minScore = typeof flags.min === 'string' ? Number(flags.min) : 0.55;
       const artistQuery = typeof flags.artist === 'string' ? flags.artist : '';
-      const db = getDb();
+      const db = getCoreDb();
       const matrixCells = db
         .prepare(
           `SELECT genre_x as genreX, genre_y as genreY, similarity, is_user_locked as isUserLocked

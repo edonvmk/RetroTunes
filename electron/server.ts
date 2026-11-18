@@ -3,7 +3,13 @@ import fsp from 'fs/promises';
 import http from 'http';
 import path from 'path';
 import { Readable } from 'stream';
-import { initDatabase, getDb } from './db';
+import {
+  initDatabase,
+  getDb,
+  getDeltaSyncBatch,
+  applyPlaybackDeltaSync,
+  PlaybackDeltaUpdate,
+} from './db';
 import { getAppDataPath, getAppPath, isPackaged, onRendererEvent } from './runtimeBus';
 import { registerCoreRpcHandlers, RpcHandlerFn } from './rpcHandlers';
 import { handleMediaHttpRequest } from './mediaServer';
@@ -111,6 +117,33 @@ export function startUnifiedHttpServer(
       if (req.method === 'GET' && reqPath === '/api/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, mode: 'server', version: '1.0.0' }));
+        return;
+      }
+
+      if (req.method === 'GET' && reqPath === '/api/sync/delta') {
+        const reqUrl = new URL(req.url || '/', `http://${host}:${port}`);
+        const sinceRev = Number(reqUrl.searchParams.get('since_rev')) || 0;
+        const limit = Math.min(5000, Math.max(1, Number(reqUrl.searchParams.get('limit')) || 2000));
+        const payload = getDeltaSyncBatch(sinceRev, limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(payload));
+        return;
+      }
+
+      if (req.method === 'POST' && reqPath === '/api/sync/playback') {
+        let body = '';
+        req.on('data', (chunk) => (body += chunk));
+        req.on('end', () => {
+          try {
+            const parsed = JSON.parse(body || '{}') as { updates?: PlaybackDeltaUpdate[] };
+            const result = applyPlaybackDeltaSync(Array.isArray(parsed.updates) ? parsed.updates : []);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+          }
+        });
         return;
       }
 

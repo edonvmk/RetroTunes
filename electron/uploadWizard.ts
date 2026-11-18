@@ -2,7 +2,7 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import { getSettings } from './settings';
-import { getDb } from './db';
+import { computeTrackUid, getCoreDb, getStoreDb, getVideoDb } from './db';
 import { logger } from './logger';
 
 export type UploadMediaType =
@@ -443,7 +443,8 @@ export async function executeUploadAndArrImport(params: {
 }> {
   const { plan, match } = params;
   const settings = getSettings();
-  const db = getDb();
+  const coreDb = getCoreDb();
+  const videoDb = getVideoDb();
   let copiedCount = 0;
 
   let targetOwnership: { uid: number; gid: number } | null = null;
@@ -498,20 +499,32 @@ export async function executeUploadAndArrImport(params: {
       .replace(/^\d{1,3}\s*[-._)\s]+\s*/, '');
 
     if (plan.mediaType === 'music') {
-      db.prepare(`
+      const artistName = match.artistOrAuthor || 'Unknown Artist';
+      const albumName = match.albumOrShow || match.title;
+      const trackUid = computeTrackUid({
+        artist: artistName,
+        album: albumName,
+        disc_num: 1,
+        track_num: i + 1,
+        title: baseTitle,
+        duration: 0,
+      });
+      coreDb.prepare(`
         INSERT INTO tracks (
-          title, artist, album, album_artist, genre, track_num, disc_num, year, duration,
+          track_uid, title, artist, album, album_artist, genre, track_num, disc_num, year, duration,
           format, bitrate, sample_rate, remote_nfs_path, metadata_parsed
-        ) VALUES (?, ?, ?, ?, '', ?, 1, ?, 0, ?, 0, 0, ?, 0)
+        ) VALUES (?, ?, ?, ?, ?, '', ?, 1, ?, 0, ?, 0, 0, ?, 0)
         ON CONFLICT(remote_nfs_path) DO UPDATE SET
+          track_uid = COALESCE(tracks.track_uid, excluded.track_uid),
           title = excluded.title,
           artist = excluded.artist,
           album = excluded.album
       `).run(
+        trackUid,
         baseTitle,
-        match.artistOrAuthor || 'Unknown Artist',
-        match.albumOrShow || match.title,
-        match.artistOrAuthor || 'Unknown Artist',
+        artistName,
+        albumName,
+        artistName,
         i + 1,
         match.year || 0,
         ext,
@@ -520,7 +533,7 @@ export async function executeUploadAndArrImport(params: {
     } else if (plan.mediaType === 'movie' || plan.mediaType === 'tv' || plan.mediaType === 'music_video') {
       const seasonNum = params.season ?? match.season ?? 1;
       const epNum = (params.episodeStart ?? match.episode ?? 1) + i;
-      db.prepare(`
+      videoDb.prepare(`
         INSERT INTO videos (
           title, type, show_name, artist, season, episode, year, duration,
           format, remote_nfs_path
@@ -540,7 +553,7 @@ export async function executeUploadAndArrImport(params: {
         item.destinationPath
       );
     } else if (plan.mediaType === 'book') {
-      db.prepare(`
+      videoDb.prepare(`
         INSERT INTO books (title, author, year, format, remote_nfs_path)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(remote_nfs_path) DO UPDATE SET title = excluded.title
@@ -552,7 +565,7 @@ export async function executeUploadAndArrImport(params: {
         item.destinationPath
       );
     } else if (plan.mediaType === 'audiobook') {
-      db.prepare(`
+      videoDb.prepare(`
         INSERT INTO audiobooks (title, author, remote_nfs_path)
         VALUES (?, ?, ?)
         ON CONFLICT(remote_nfs_path) DO UPDATE SET title = excluded.title
@@ -562,7 +575,7 @@ export async function executeUploadAndArrImport(params: {
         item.destinationPath
       );
     } else if (plan.mediaType === 'photo') {
-      db.prepare(`
+      videoDb.prepare(`
         INSERT INTO photos (title, album_name, remote_nfs_path)
         VALUES (?, ?, ?)
         ON CONFLICT(remote_nfs_path) DO UPDATE SET title = excluded.title
@@ -649,6 +662,16 @@ export async function executeUploadAndArrImport(params: {
     'ARR_STORE',
     `Completed Smart Upload (${plan.mediaType}): ${copiedCount} files copied, arrTriggered=${arrTriggered}`
   );
+
+  try {
+    getStoreDb()
+      .prepare(
+        'INSERT INTO upload_history (media_type, title, destination_path, file_count, arr_triggered) VALUES (?, ?, ?, ?, ?)'
+      )
+      .run(plan.mediaType, match.title, firstDestDir || plan.targetRootDir, copiedCount, arrTriggered ? 1 : 0);
+  } catch {
+    // ignore upload history error
+  }
 
   return {
     ok: true,

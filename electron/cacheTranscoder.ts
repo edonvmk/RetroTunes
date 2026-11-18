@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { emitRendererEvent } from './runtimeBus';
-import { getDb, CacheJobRow, TrackRow, VideoRow } from './db';
+import { getCoreDb, getVideoDb, CacheJobRow, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { resolveReachableTrackPath } from './trackSources';
@@ -56,7 +56,7 @@ function getDirStats(dirPath: string): { bytes: number; count: number } {
 
 export function getCacheStats(): CacheStats {
   const settings = getSettings();
-  const db = getDb();
+  const videoDb = getVideoDb();
   const audioStats = getDirStats(path.join(settings.localCachePath, 'audio'));
   const videoStats = getDirStats(path.join(settings.localCachePath, 'video'));
   const artworkStats = getDirStats(path.join(settings.localCachePath, 'artwork'));
@@ -65,7 +65,7 @@ export function getCacheStats(): CacheStats {
   const quotaBytes = Math.max(10, settings.cacheMaxSizeGb) * 1024 * 1024 * 1024;
   const usagePercent = Math.min(100, Math.round((usedBytes / quotaBytes) * 1000) / 10);
 
-  const jobs = db
+  const jobs = videoDb
     .prepare('SELECT * FROM cache_jobs ORDER BY id DESC LIMIT 100')
     .all() as CacheJobRow[];
 
@@ -93,13 +93,14 @@ export function enforceCacheQuotaLru(): { evictedFiles: number; freedBytes: numb
     return { evictedFiles: 0, freedBytes: 0 };
   }
 
-  const db = getDb();
+  const coreDb = getCoreDb();
+  const videoDb = getVideoDb();
   const bytesToFree = stats.usedBytes - stats.quotaBytes;
   let freedBytes = 0;
   let evictedFiles = 0;
 
   // Find completed cache_jobs ordered by oldest last_accessed first
-  const candidates = db
+  const candidates = videoDb
     .prepare("SELECT * FROM cache_jobs WHERE status = 'completed' ORDER BY last_accessed ASC")
     .all() as CacheJobRow[];
 
@@ -113,13 +114,13 @@ export function enforceCacheQuotaLru(): { evictedFiles: number; freedBytes: numb
         evictedFiles++;
       }
       if (job.item_type === 'audio') {
-        db.prepare('UPDATE tracks SET local_cache_path = NULL, keep_cached = 0 WHERE id = ?').run(job.item_id);
+        coreDb.prepare('UPDATE tracks SET local_cache_path = NULL, keep_cached = 0 WHERE id = ?').run(job.item_id);
       } else {
-        db.prepare(
+        videoDb.prepare(
           "UPDATE videos SET local_cache_path = NULL, is_transcoded = 0, transcode_status = 'none', keep_cached = 0 WHERE id = ?"
         ).run(job.item_id);
       }
-      db.prepare('DELETE FROM cache_jobs WHERE id = ?').run(job.id);
+      videoDb.prepare('DELETE FROM cache_jobs WHERE id = ?').run(job.id);
     } catch (err) {
       logger.warn('CACHE', `LRU eviction error for ${job.target_path}`, { error: String(err) });
     }
@@ -134,7 +135,8 @@ export function enforceCacheQuotaLru(): { evictedFiles: number; freedBytes: numb
 
 export function clearLocalCache(): { deletedFiles: number; freedBytes: number } {
   const settings = getSettings();
-  const db = getDb();
+  const coreDb = getCoreDb();
+  const videoDb = getVideoDb();
   let deletedFiles = 0;
   let freedBytes = 0;
 
@@ -157,8 +159,8 @@ export function clearLocalCache(): { deletedFiles: number; freedBytes: number } 
     }
   }
 
-  db.exec(`
-    UPDATE tracks SET local_cache_path = NULL, keep_cached = 0;
+  coreDb.exec('UPDATE tracks SET local_cache_path = NULL, keep_cached = 0;');
+  videoDb.exec(`
     UPDATE videos SET local_cache_path = NULL, keep_cached = 0, is_transcoded = 0, transcode_status = 'none', transcode_progress = 0;
     DELETE FROM cache_jobs;
   `);
@@ -169,9 +171,10 @@ export function clearLocalCache(): { deletedFiles: number; freedBytes: number } 
 }
 
 export function queueTrackCache(trackId: number, keepCached = true): void {
-  const db = getDb();
+  const coreDb = getCoreDb();
+  const videoDb = getVideoDb();
   const settings = getSettings();
-  const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId) as TrackRow | undefined;
+  const track = coreDb.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId) as TrackRow | undefined;
   if (!track) return;
 
   if (!keepCached) {
@@ -182,13 +185,13 @@ export function queueTrackCache(trackId: number, keepCached = true): void {
         // ignore
       }
     }
-    db.prepare('UPDATE tracks SET keep_cached = 0, local_cache_path = NULL WHERE id = ?').run(trackId);
-    db.prepare("DELETE FROM cache_jobs WHERE item_type = 'audio' AND item_id = ?").run(trackId);
+    coreDb.prepare('UPDATE tracks SET keep_cached = 0, local_cache_path = NULL WHERE id = ?').run(trackId);
+    videoDb.prepare("DELETE FROM cache_jobs WHERE item_type = 'audio' AND item_id = ?").run(trackId);
     broadcastCacheStatus();
     return;
   }
 
-  db.prepare('UPDATE tracks SET keep_cached = 1 WHERE id = ?').run(trackId);
+  coreDb.prepare('UPDATE tracks SET keep_cached = 1 WHERE id = ?').run(trackId);
 
   // Check if already cached on disk
   if (track.local_cache_path && fs.existsSync(track.local_cache_path)) {
@@ -202,12 +205,12 @@ export function queueTrackCache(trackId: number, keepCached = true): void {
     .slice(0, 80);
   const targetPath = path.join(settings.localCachePath, 'audio', `${safeBase}${ext}`);
 
-  const existingJob = db
+  const existingJob = videoDb
     .prepare("SELECT id FROM cache_jobs WHERE item_type = 'audio' AND item_id = ? AND status IN ('queued', 'running')")
     .get(trackId);
   if (existingJob) return;
 
-  db.prepare(`
+  videoDb.prepare(`
     INSERT INTO cache_jobs (item_type, item_id, title, source_path, target_path, status, progress)
     VALUES ('audio', ?, ?, ?, ?, 'queued', 0)
   `).run(track.id, `${track.artist} - ${track.title}`, sourcePath, targetPath);
@@ -218,9 +221,9 @@ export function queueTrackCache(trackId: number, keepCached = true): void {
 }
 
 export function queueVideoTranscode(videoId: number, keepCached = true): void {
-  const db = getDb();
+  const videoDb = getVideoDb();
   const settings = getSettings();
-  const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(videoId) as VideoRow | undefined;
+  const video = videoDb.prepare('SELECT * FROM videos WHERE id = ?').get(videoId) as VideoRow | undefined;
   if (!video) return;
 
   if (!keepCached) {
@@ -231,16 +234,16 @@ export function queueVideoTranscode(videoId: number, keepCached = true): void {
         // ignore
       }
     }
-    db.prepare(
+    videoDb.prepare(
       "UPDATE videos SET keep_cached = 0, local_cache_path = NULL, is_transcoded = 0, transcode_status = 'none', transcode_progress = 0 WHERE id = ?"
     ).run(videoId);
-    db.prepare("DELETE FROM cache_jobs WHERE item_type = 'video' AND item_id = ?").run(videoId);
+    videoDb.prepare("DELETE FROM cache_jobs WHERE item_type = 'video' AND item_id = ?").run(videoId);
     broadcastCacheStatus();
     return;
   }
 
   if (video.local_cache_path && fs.existsSync(video.local_cache_path) && video.is_transcoded) {
-    db.prepare("UPDATE videos SET keep_cached = 1, transcode_status = 'ready' WHERE id = ?").run(videoId);
+    videoDb.prepare("UPDATE videos SET keep_cached = 1, transcode_status = 'ready' WHERE id = ?").run(videoId);
     return;
   }
 
@@ -249,16 +252,16 @@ export function queueVideoTranscode(videoId: number, keepCached = true): void {
     .slice(0, 80);
   const targetPath = path.join(settings.localCachePath, 'video', `${safeBase}_360p.mp4`);
 
-  db.prepare(
+  videoDb.prepare(
     "UPDATE videos SET keep_cached = 1, transcode_status = 'queued', transcode_progress = 0 WHERE id = ?"
   ).run(videoId);
 
-  const existingJob = db
+  const existingJob = videoDb
     .prepare("SELECT id FROM cache_jobs WHERE item_type = 'video' AND item_id = ? AND status IN ('queued', 'running')")
     .get(videoId);
   if (existingJob) return;
 
-  db.prepare(`
+  videoDb.prepare(`
     INSERT INTO cache_jobs (item_type, item_id, title, source_path, target_path, status, progress)
     VALUES ('video', ?, ?, ?, ?, 'queued', 0)
   `).run(video.id, video.title, video.remote_nfs_path, targetPath);
@@ -273,8 +276,9 @@ export function queueVideoTranscode(videoId: number, keepCached = true): void {
 
 async function processNextCacheJob(): Promise<void> {
   if (workerRunning) return;
-  const db = getDb();
-  const nextJob = db
+  const coreDb = getCoreDb();
+  const videoDb = getVideoDb();
+  const nextJob = videoDb
     .prepare("SELECT * FROM cache_jobs WHERE status = 'queued' ORDER BY id ASC LIMIT 1")
     .get() as CacheJobRow | undefined;
 
@@ -283,7 +287,7 @@ async function processNextCacheJob(): Promise<void> {
 
   try {
     const settings = getSettings();
-    db.prepare("UPDATE cache_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ?").run(
+    videoDb.prepare("UPDATE cache_jobs SET status = 'running', updated_at = datetime('now') WHERE id = ?").run(
       nextJob.id
     );
     broadcastCacheStatus();
@@ -294,13 +298,13 @@ async function processNextCacheJob(): Promise<void> {
       fs.copyFileSync(nextJob.source_path, nextJob.target_path);
       const sz = fs.statSync(nextJob.target_path).size;
 
-      db.prepare(`
+      videoDb.prepare(`
         UPDATE cache_jobs
         SET status = 'completed', progress = 100, encoder_used = 'stream_copy', size_bytes = ?, updated_at = datetime('now')
         WHERE id = ?
       `).run(sz, nextJob.id);
 
-      db.prepare('UPDATE tracks SET local_cache_path = ?, keep_cached = 1 WHERE id = ?').run(
+      coreDb.prepare('UPDATE tracks SET local_cache_path = ?, keep_cached = 1 WHERE id = ?').run(
         nextJob.target_path,
         nextJob.item_id
       );
@@ -318,18 +322,18 @@ async function processNextCacheJob(): Promise<void> {
     enforceCacheQuotaLru();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    db.prepare(
+    videoDb.prepare(
       "UPDATE cache_jobs SET status = 'failed', error_message = ?, updated_at = datetime('now') WHERE id = ?"
     ).run(msg, nextJob.id);
     if (nextJob.item_type === 'video') {
-      db.prepare("UPDATE videos SET transcode_status = 'error' WHERE id = ?").run(nextJob.item_id);
+      videoDb.prepare("UPDATE videos SET transcode_status = 'error' WHERE id = ?").run(nextJob.item_id);
     }
     logger.error('TRANSCODE', `Cache/Transcode job failed for ${nextJob.title}: ${msg}`, err);
   } finally {
     workerRunning = false;
     broadcastCacheStatus();
     // Check if more jobs remain in queue
-    const remaining = db
+    const remaining = videoDb
       .prepare("SELECT COUNT(*) as c FROM cache_jobs WHERE status = 'queued'")
       .get() as { c: number };
     if (remaining.c > 0) {
@@ -341,7 +345,7 @@ async function processNextCacheJob(): Promise<void> {
 function runVideoTranscodeJob(job: CacheJobRow): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
-    const db = getDb();
+    const db = getVideoDb();
     const settings = getSettings();
     fs.mkdirSync(path.dirname(job.target_path), { recursive: true });
 

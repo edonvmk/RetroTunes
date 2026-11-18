@@ -1,4 +1,4 @@
-import { getDb } from '../db';
+import { getCacheDb, getCoreDb } from '../db';
 import { getSettings } from '../settings';
 import { logger } from '../logger';
 import { normalizeArtistKey } from './affinityCache';
@@ -841,7 +841,7 @@ function resolveEffectiveLastfmWeight(options?: {
 }
 
 export function ensureGenreMatrixReady(): void {
-  const db = getDb();
+  const db = getCoreDb();
   const row = db.prepare('SELECT COUNT(*) as c FROM subgenre_affinity_matrix').get() as { c: number };
   if (!row || row.c === 0) {
     rebuildGenreMatrix();
@@ -855,7 +855,7 @@ export function ensureGenreMatrixReady(): void {
  */
 export function rebuildGenreMatrix(options: RebuildGenreMatrixOptions = {}): RebuildGenreMatrixResult {
   const start = Date.now();
-  const db = getDb();
+  const db = getCoreDb();
 
   if (options.resetStuckMetadata) {
     db.prepare('UPDATE tracks SET metadata_loaded = 0 WHERE metadata_loaded = -1').run();
@@ -875,7 +875,7 @@ export function rebuildGenreMatrix(options: RebuildGenreMatrixOptions = {}): Reb
   const lockedKeys = new Set<string>(lockedRows.map((r) => `${r.genre_x}|||${r.genre_y}`));
 
   // 2. Load Last.fm artist folksonomy tags & co-listening similarity edges
-  const affRows = db
+  const affRows = getCacheDb()
     .prepare('SELECT artist_key, artist_name, similar_artists_json, top_tags_json FROM artist_affinity_cache')
     .all() as {
       artist_key: string;
@@ -1169,7 +1169,7 @@ interface GenreComputationContext {
 
 function buildGenreComputationContext(): GenreComputationContext {
   ensureGenreMatrixReady();
-  const db = getDb();
+  const db = getCoreDb();
 
   const artistNameRows = db
     .prepare(
@@ -1210,7 +1210,7 @@ function buildGenreComputationContext(): GenreComputationContext {
   const artistNorms = new Map<string, number>();
 
   const lastfmSimLookup = new Map<string, number>();
-  const affRows = db
+  const affRows = getCacheDb()
     .prepare('SELECT artist_key, similar_artists_json FROM artist_affinity_cache')
     .all() as { artist_key: string; similar_artists_json: string }[];
   for (const r of affRows) {
@@ -1490,7 +1490,7 @@ export function computeArtistSceneSimilarity(artistA: string, artistB: string): 
 
 export function getGenreMatrixData(options: { search?: string; limit?: number } = {}): GenreMatrixPayload {
   ensureGenreMatrixReady();
-  const db = getDb();
+  const db = getCoreDb();
   const settings = getSettings();
   const hasLastfmApiKey = Boolean(settings.lastfmApiKey && settings.lastfmApiKey.trim().length > 0);
   const genreMapUseLastfm = hasLastfmApiKey ? Boolean(settings.genreMapUseLastfm) : false;
@@ -1607,7 +1607,7 @@ export function setGenreMatrixCell(
   isLocked: boolean
 ): MatrixCell {
   ensureGenreMatrixReady();
-  const db = getDb();
+  const db = getCoreDb();
   const gx = normalizeGenreTag(genreXRaw) || genreXRaw.trim().toLowerCase();
   const gy = normalizeGenreTag(genreYRaw) || genreYRaw.trim().toLowerCase();
   const similarity = gx === gy ? 1.0 : round3(similarityRaw);
@@ -1636,7 +1636,7 @@ export function setGenreMatrixCell(
 }
 
 export function resetGenreMatrixCell(genreXRaw: string, genreYRaw: string): RebuildGenreMatrixResult {
-  const db = getDb();
+  const db = getCoreDb();
   const gx = normalizeGenreTag(genreXRaw) || genreXRaw.trim().toLowerCase();
   const gy = normalizeGenreTag(genreYRaw) || genreYRaw.trim().toLowerCase();
   db.prepare(
@@ -1647,7 +1647,7 @@ export function resetGenreMatrixCell(genreXRaw: string, genreYRaw: string): Rebu
 
 export function listAllMatrixGenres(): string[] {
   ensureGenreMatrixReady();
-  const db = getDb();
+  const db = getCoreDb();
   const rows = db
     .prepare(
       `SELECT genre_x as g FROM subgenre_affinity_matrix

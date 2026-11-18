@@ -1,4 +1,4 @@
-import { getDb, TrackRow } from '../db';
+import { getCoreDb, TrackRow } from '../db';
 import { logger } from '../logger';
 import { normalizeArtistKey, resolveArtistAffinity, resolveTrackAffinity } from './affinityCache';
 import { gatherAndScoreCandidates } from './scorer';
@@ -11,7 +11,7 @@ export * from './genreMatrix';
 
 export async function generateMix(req: MixRequest): Promise<MixResult> {
   const start = Date.now();
-  const db = getDb();
+  const db = getCoreDb();
   const seedTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(req.seedTrackId) as
     | TrackRow
     | undefined;
@@ -74,7 +74,7 @@ export async function refreshMix(
   playlistId: number,
   overrides: { limit?: 25 | 50; mode?: MixDepthMode; sceneThreshold?: number } = {}
 ): Promise<MixResult> {
-  const db = getDb();
+  const db = getCoreDb();
   const pl = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
     | {
         id: number;
@@ -126,7 +126,7 @@ export async function explainTrack(
   candidateTrackId: number,
   mode: MixDepthMode = 'balanced'
 ): Promise<TrackExplanation | null> {
-  const db = getDb();
+  const db = getCoreDb();
   const seedTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(seedTrackId) as
     | TrackRow
     | undefined;
@@ -146,7 +146,7 @@ export async function explainTrack(
 }
 
 export async function warmCache(seedTrackId: number): Promise<{ ok: boolean }> {
-  const db = getDb();
+  const db = getCoreDb();
   const seedTrack = db.prepare('SELECT * FROM tracks WHERE id = ?').get(seedTrackId) as
     | TrackRow
     | undefined;

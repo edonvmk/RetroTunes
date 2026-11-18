@@ -41,6 +41,7 @@ import {
 import { startMediaServer } from './mediaServer';
 import { registerCoreRpcHandlers, RpcHandlerFn } from './rpcHandlers';
 import { startUnifiedHttpServer } from './server';
+import { remoteServerProvider } from './providers/remoteServer';
 import { logger } from './logger';
 import { platformDriver } from './platform';
 
@@ -350,13 +351,24 @@ app.whenReady().then(async () => {
   // Resume gentle background metadata & video artwork hydration
   setTimeout(async () => {
     await autoMountPromise;
+    const activeSettings = getSettings();
+    const remoteUrl = (
+      (activeSettings.backendMode === 'docker_server' ? activeSettings.dockerServerUrl : '') ||
+      process.env.RTUNES_SERVER_URL ||
+      ''
+    ).trim();
+    if (remoteUrl) {
+      void remoteServerProvider.syncDeltaFromRemoteServer(remoteUrl).catch((err) => {
+        logger.warn('SYSTEM', 'Initial remote delta sync skipped', { error: String(err) });
+      });
+    }
     if (hasPendingIndexCheckpoint()) {
       logger.info('INDEXER', 'Detected interrupted library scan/rebuild checkpoint; resuming automatically...');
       void runLibraryScan(undefined, { resume: true });
     }
     void hydrateVideoArtwork();
     void syncPlexAndAudiobookshelfProgress();
-    if (getSettings().metadataHydrationMode === 'hybrid') {
+    if (activeSettings.metadataHydrationMode === 'hybrid') {
       void startBackgroundMetadataTrickle();
     }
   }, 2500);

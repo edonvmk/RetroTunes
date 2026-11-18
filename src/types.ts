@@ -1,5 +1,7 @@
 export interface TrackRow {
   id: number;
+  track_uid?: string | null;
+  sync_rev?: number;
   remote_nfs_path: string;
   alternate_paths?: string | null;
   local_cache_path: string | null;

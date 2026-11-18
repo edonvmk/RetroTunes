@@ -2,7 +2,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
-import { getDb, TrackRow, VideoRow } from './db';
+import { getCoreDb, getVideoDb, TrackRow, VideoRow } from './db';
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { resolveReachableTrackPath } from './trackSources';
@@ -84,11 +84,15 @@ export function handleMediaHttpRequest(
     return false;
   }
 
-  const db = getDb();
-
   if (url.pathname === '/track') {
+    const uid = url.searchParams.get('uid')?.trim();
     const id = Number(url.searchParams.get('id'));
-    const track = db.prepare('SELECT * FROM tracks WHERE id = ?').get(id) as TrackRow | undefined;
+    const coreDb = getCoreDb();
+    const track = (
+      uid
+        ? coreDb.prepare('SELECT * FROM tracks WHERE track_uid = ?').get(uid)
+        : coreDb.prepare('SELECT * FROM tracks WHERE id = ?').get(id)
+    ) as TrackRow | undefined;
     if (!track) {
       res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
       res.end('Track not found');
@@ -96,9 +100,9 @@ export function handleMediaHttpRequest(
     }
     const filePath = resolveReachableTrackPath(track);
     if (track.local_cache_path) {
-      db.prepare(
-        "UPDATE cache_jobs SET last_accessed = datetime('now') WHERE item_type = 'audio' AND item_id = ?"
-      ).run(track.id);
+      getVideoDb()
+        .prepare("UPDATE cache_jobs SET last_accessed = datetime('now') WHERE item_type = 'audio' AND item_id = ?")
+        .run(track.id);
     }
     serveByteRangeFile(filePath, req, res);
     return true;
@@ -106,7 +110,7 @@ export function handleMediaHttpRequest(
 
   if (url.pathname === '/video') {
     const id = Number(url.searchParams.get('id'));
-    const video = db.prepare('SELECT * FROM videos WHERE id = ?').get(id) as VideoRow | undefined;
+    const video = getVideoDb().prepare('SELECT * FROM videos WHERE id = ?').get(id) as VideoRow | undefined;
     if (!video) {
       res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
       res.end('Video not found');

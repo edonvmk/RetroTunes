@@ -1,5 +1,5 @@
 import path from 'path';
-import { getDb, PlaylistRow, TrackRow, VideoRow } from './db';
+import { getCoreDb, getVideoDb, PlaylistRow, TrackRow, VideoRow } from './db';
 import { logger } from './logger';
 import { getMatchingArtistsForSceneFilter, listAllMatrixGenres } from './egenius/genreMatrix';
 
@@ -138,7 +138,7 @@ export function getDistinctSmartFieldValues(field: SmartField, search = ''): str
     'year',
   ]);
   if (!allowedCols.has(field)) return [];
-  const db = getDb();
+  const db = getCoreDb();
   const q = search.trim();
   try {
     if (q) {
@@ -415,7 +415,7 @@ export function evaluateSmartPlaylist(
   smartPlaylistId?: number | string | null
 ): { tracks: TrackRow[]; compiledSql: string } {
   const start = Date.now();
-  const db = getDb();
+  const db = getCoreDb();
   const params: unknown[] = [];
   const whereClause = compileCondition(rulesGroup, params);
   const orderBy = getOrderByClause(selectionMethod);
@@ -508,7 +508,7 @@ function getIntervalMs(interval?: RegenerateInterval): number | null {
 }
 
 export function regenerateSmartPlaylist(playlistId: number): TrackRow[] {
-  const db = getDb();
+  const db = getCoreDb();
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
     | PlaylistRow
     | undefined;
@@ -534,7 +534,7 @@ export function regenerateSmartPlaylist(playlistId: number): TrackRow[] {
 }
 
 export function getPlaylistTracks(playlistId: number): TrackRow[] {
-  const db = getDb();
+  const db = getCoreDb();
   const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
     | PlaylistRow
     | undefined;
@@ -596,7 +596,7 @@ export function getPlaylistTracks(playlistId: number): TrackRow[] {
 }
 
 export function getPlaylistVideos(playlistId: number): VideoRow[] {
-  const db = getDb();
+  const db = getVideoDb();
   try {
     return db
       .prepare(
@@ -641,7 +641,7 @@ export function ignoreTrackInSmartPlaylist(
   smartPlaylistId: number | string,
   trackId: number
 ): { ok: boolean } {
-  const db = getDb();
+  const db = getCoreDb();
   db.prepare(
     'INSERT OR IGNORE INTO smart_playlist_exclusions (smart_playlist_id, track_id) VALUES (?, ?)'
   ).run(String(smartPlaylistId), trackId);
@@ -652,7 +652,7 @@ export function excludeTrackFromAllSmartPlaylists(
   trackId: number,
   excluded = true
 ): { ok: boolean } {
-  const db = getDb();
+  const db = getCoreDb();
   db.prepare('UPDATE tracks SET exclude_from_smart_playlists = ? WHERE id = ?').run(
     excluded ? 1 : 0,
     trackId
@@ -663,7 +663,7 @@ export function excludeTrackFromAllSmartPlaylists(
 export function getSmartPlaylistExclusions(
   smartPlaylistId: number | string
 ): SmartPlaylistExcludedItem[] {
-  const db = getDb();
+  const db = getCoreDb();
   const perPlaylist = db
     .prepare(
       `SELECT t.* FROM smart_playlist_exclusions spe
@@ -700,7 +700,7 @@ export function restoreSmartPlaylistExclusion(
   trackId: number,
   scope: 'playlist' | 'global'
 ): { ok: boolean } {
-  const db = getDb();
+  const db = getCoreDb();
   if (scope === 'global') {
     db.prepare('UPDATE tracks SET exclude_from_smart_playlists = 0 WHERE id = ?').run(trackId);
   } else {

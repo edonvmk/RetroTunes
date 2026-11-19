@@ -1,4 +1,4 @@
-import { getCoreDb, getStoreDb } from './db';
+import { emitPendingApprovalsUpdate, getCoreDb, getStoreDb } from './db';
 import { getSettings } from './settings';
 import { getAuthState } from './authOidc';
 import { ForbiddenError, getCallerContext } from './auth/callerContext';
@@ -828,6 +828,7 @@ export async function requestStoreItem(item: StoreCatalogItem): Promise<{
         );
       const requestId = Number(info.lastInsertRowid);
       const msg = `"${item.title}" submitted for Label approval (Request #${requestId}).`;
+      emitPendingApprovalsUpdate();
       logger.info('ARR_STORE', msg, { requester: caller.username }, Date.now() - start);
       return { ok: true, queuedForApproval: true, requestId, message: msg };
     }
@@ -886,6 +887,7 @@ export async function approvePendingStoreRequest(
      WHERE id = ?`
   ).run(dispatched.service, dispatched.payloadJson, reviewer.userId, id);
   logger.info('ARR_STORE', `Approved store request #${id} by ${reviewer.username}`, { title: item.title });
+  emitPendingApprovalsUpdate();
   return { ok: true, message: dispatched.message };
 }
 
@@ -910,6 +912,7 @@ export function rejectPendingStoreRequest(
      WHERE id = ?`
   ).run(reviewer.userId, reason || '', id);
   logger.info('ARR_STORE', `Rejected store request #${id} by ${reviewer.username}`, { reason });
+  emitPendingApprovalsUpdate();
   return { ok: true };
 }
 

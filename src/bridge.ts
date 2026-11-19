@@ -307,11 +307,13 @@ export function getMediaBaseUrl(mediaPort?: number): string {
 }
 
 export async function invokeRpc<T = any>(channel: string, ...args: unknown[]): Promise<T> {
-  if (window.rtunesElectron?.invoke) {
+  const remoteServerUrl = getConfiguredRemoteServerUrl();
+  const routeRemoteUac = Boolean(channel.startsWith('uac:') && remoteServerUrl);
+  if (window.rtunesElectron?.invoke && !routeRemoteUac) {
     return (await window.rtunesElectron.invoke(channel, ...args)) as T;
   }
 
-  const baseUrl = getRpcBaseUrl();
+  const baseUrl = routeRemoteUac ? remoteServerUrl : getRpcBaseUrl();
   const res = await fetch(`${baseUrl}/rpc`, {
     method: 'POST',
     headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -334,12 +336,21 @@ export async function invokeRpc<T = any>(channel: string, ...args: unknown[]): P
 
 let sharedEventSource: EventSource | null = null;
 const sseListeners = new Map<string, Set<(payload: any) => void>>();
+const REMOTE_BRIDGE_SSE_CHANNELS = new Set([
+  'uac:approvals-updated',
+  'uac:permissions-updated',
+  'library:updated',
+]);
 
 function ensureSharedEventSource(): void {
   if (sharedEventSource || typeof window === 'undefined' || typeof EventSource === 'undefined') {
     return;
   }
-  const baseUrl = getRpcBaseUrl();
+  const remoteUrl = getConfiguredRemoteServerUrl();
+  if (window.rtunesElectron && !remoteUrl) {
+    return;
+  }
+  const baseUrl = remoteUrl || getRpcBaseUrl();
   const es = new EventSource(appendAuthTokenParam(`${baseUrl}/events`));
   es.onmessage = (ev) => {
     try {
@@ -375,8 +386,12 @@ export function subscribeEvent<T = any>(
   channel: string,
   listener: (payload: T) => void
 ): () => void {
-  if (window.rtunesElectron?.on) {
-    return window.rtunesElectron.on(channel, (data) => listener(data as T));
+  const unsubElectron = window.rtunesElectron?.on
+    ? window.rtunesElectron.on(channel, (data) => listener(data as T))
+    : null;
+
+  if (unsubElectron && (!REMOTE_BRIDGE_SSE_CHANNELS.has(channel) || !getConfiguredRemoteServerUrl())) {
+    return unsubElectron;
   }
 
   ensureSharedEventSource();
@@ -388,6 +403,7 @@ export function subscribeEvent<T = any>(
   set.add(listener);
 
   return () => {
+    unsubElectron?.();
     const currentSet = sseListeners.get(channel);
     if (currentSet) {
       currentSet.delete(listener);

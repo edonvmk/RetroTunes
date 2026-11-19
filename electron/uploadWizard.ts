@@ -3,7 +3,7 @@ import fsp from 'fs/promises';
 import path from 'path';
 import { getAppDataPath } from './runtimeBus';
 import { getSettings } from './settings';
-import { computeTrackUid, getCoreDb, getStoreDb, getVideoDb } from './db';
+import { computeTrackUid, emitPendingApprovalsUpdate, getCoreDb, getStoreDb, getVideoDb } from './db';
 import { ForbiddenError, getCallerContext } from './auth/callerContext';
 import { logger } from './logger';
 
@@ -727,6 +727,7 @@ export async function executeUploadAndArrImport(params: {
         JSON.stringify(params)
       );
     const approvalId = Number(info.lastInsertRowid);
+    emitPendingApprovalsUpdate();
     logger.info(
       'ARR_STORE',
       `Staged Smart Upload #${approvalId} (${plan.mediaType}) by "${caller.username}" awaiting Label approval.`
@@ -827,6 +828,7 @@ export async function approvePendingUpload(
   logger.info('ARR_STORE', `Approved & imported staged upload #${id} by ${reviewer.username}`, {
     copiedCount: committed.copiedCount,
   });
+  emitPendingApprovalsUpdate();
 
   return {
     ok: true,
@@ -864,5 +866,6 @@ export async function rejectPendingUpload(
      WHERE id = ?`
   ).run(reviewer.userId, reason || '', id);
   logger.info('ARR_STORE', `Rejected staged upload #${id} by ${reviewer.username}`, { reason });
+  emitPendingApprovalsUpdate();
   return { ok: true };
 }

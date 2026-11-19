@@ -20,6 +20,7 @@ import { formatBytes, invokeRpc } from '../bridge';
 
 interface StorefrontViewProps {
   settings: AppSettings | null;
+  approvalRequired?: boolean;
   onSettingsUpdated: (updated: AppSettings) => void;
 }
 
@@ -35,7 +36,11 @@ const STORE_GENRES = [
   'Jazz',
 ];
 
-export const StorefrontView: React.FC<StorefrontViewProps> = ({ settings, onSettingsUpdated }) => {
+export const StorefrontView: React.FC<StorefrontViewProps> = ({
+  settings,
+  approvalRequired = false,
+  onSettingsUpdated,
+}) => {
   const [activeTab, setActiveTab] = useState<'home' | 'charts' | 'album' | 'movie' | 'series'>('home');
   const [chartSource, setChartSource] = useState<'deezer' | 'lastfm' | 'theaudiodb' | 'library_relative'>('deezer');
   const [chartItems, setChartItems] = useState<ChartTrackItem[]>([]);
@@ -160,7 +165,8 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({ settings, onSett
   const getButtonLabel = (item: StoreCatalogItem) => {
     if (item.alreadyInLibrary) return 'In Library';
     if (requestedIds.has(item.id)) return 'Requested';
-    if (requestingId === item.id) return 'Adding...';
+    if (requestingId === item.id) return approvalRequired ? 'Submitting...' : 'Adding...';
+    if (approvalRequired) return 'Request (Needs Approval)';
     if (item.mediaType === 'album') return 'Get Album';
     if (item.mediaType === 'movie') return 'Get Movie';
     return 'Get Series';

@@ -25,7 +25,10 @@ import {
   FolderSearch,
   RefreshCw,
   Activity,
+  Shield,
   ShieldCheck,
+  Users,
+  Clock,
   Disc,
   CheckCircle2,
   X,
@@ -43,17 +46,23 @@ import {
   AuthState,
   BookRow,
   CacheStats,
+  CallerMeResponse,
+  DEFAULT_LOCAL_OWNER_PERMISSIONS,
   DeviceCatalog,
   DeviceCatalogCategory,
   DeviceCatalogItem,
   DeviceInfo,
   IndexProgress,
   LogEntry,
+  PendingApprovalsPayload,
   PhotoRow,
   PlaylistRow,
   RemoteAuthInfo,
+  RolePermissions,
+  RoleRecord,
   SyncProgress,
   TrackRow,
+  UserRecord,
   VideoRow,
 } from './types';
 import {
@@ -82,6 +91,11 @@ import {
   ServerSetupModal,
   UnifiedAuthModal,
 } from './components/OnboardingAuthModals';
+import {
+  UacExternalModalTrigger,
+  UacViewSelection,
+  UacWorkspaceView,
+} from './components/UacWorkspaceView';
 
 const EGeniusAtomIcon: React.FC<{ selected?: boolean; size?: number }> = ({
   selected = false,
@@ -139,7 +153,10 @@ type NavSelection =
   | { kind: 'store' }
   | { kind: 'downloads' }
   | { kind: 'device'; uuid: string; category?: DeviceCatalogCategory }
-  | { kind: 'playlist'; id: number };
+  | { kind: 'playlist'; id: number }
+  | { kind: 'uac_role'; roleId: number }
+  | { kind: 'uac_all_users' }
+  | { kind: 'uac_approvals' };
 
 export interface TableColumnConfig {
   id:
@@ -324,7 +341,17 @@ export const App: React.FC = () => {
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
-    kind: 'track' | 'playlist_track' | 'smart_track' | 'video' | 'device_item' | 'playlist';
+    kind:
+      | 'track'
+      | 'playlist_track'
+      | 'smart_track'
+      | 'video'
+      | 'device_item'
+      | 'playlist'
+      | 'uac_header'
+      | 'uac_role'
+      | 'uac_user'
+      | 'uac_role_member';
     track?: TrackRow;
     video?: VideoRow;
     playlist?: PlaylistRow;
@@ -333,6 +360,9 @@ export const App: React.FC = () => {
     devicePath?: string;
     storageId?: string;
     title?: string;
+    uacRole?: RoleRecord;
+    uacUser?: UserRecord;
+    uacRoleId?: number;
   } | null>(null);
   const [initialLoading, setInitialLoading] = useState<boolean>(true);
   const [detailItem, setDetailItem] = useState<
@@ -347,6 +377,25 @@ export const App: React.FC = () => {
   const [showClientOnboardingModal, setShowClientOnboardingModal] = useState(false);
   const [activeAuthInfo, setActiveAuthInfo] = useState<RemoteAuthInfo | null>(null);
   const [onboardingServerUrl, setOnboardingServerUrl] = useState<string | undefined>(undefined);
+  const [callerMe, setCallerMe] = useState<CallerMeResponse>(() => ({
+    user: null,
+    username: 'local-owner',
+    displayName: 'Local Owner',
+    roles: ['Label'],
+    isGuest: false,
+    isSuperAdmin: true,
+    authSource: 'local-owner',
+    permissions: DEFAULT_LOCAL_OWNER_PERMISSIONS,
+  }));
+  const [uacRoles, setUacRoles] = useState<RoleRecord[]>([]);
+  const [uacUsers, setUacUsers] = useState<UserRecord[]>([]);
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalsPayload>({
+    uploads: [],
+    storeRequests: [],
+  });
+  const [pendingApprovalCount, setPendingApprovalCount] = useState<number>(0);
+  const [dragOverUacRoleId, setDragOverUacRoleId] = useState<number | null>(null);
+  const [uacModalTrigger, setUacModalTrigger] = useState<UacExternalModalTrigger | null>(null);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const hasRecordedPlayRef = useRef<number | null>(null);
 
@@ -356,6 +405,86 @@ export const App: React.FC = () => {
   const [showColumnPopover, setShowColumnPopover] = useState<boolean>(false);
   const [selectedTvShow, setSelectedTvShow] = useState<string | null>(null);
   const [selectedTvSeason, setSelectedTvSeason] = useState<number | 'All'>('All');
+
+  const isServerContext = useMemo(() => {
+    if (!window.rtunesElectron) return true;
+    const mode = settings?.appMode || 'client';
+    return (
+      mode === 'desktop-server' ||
+      mode === 'headless-server' ||
+      (mode === 'client' && settings?.clientSource === 'remote')
+    );
+  }, [settings?.appMode, settings?.clientSource]);
+
+  const effectivePerms: RolePermissions = useMemo(() => {
+    if (!isServerContext) return DEFAULT_LOCAL_OWNER_PERMISSIONS;
+    if (callerMe.isSuperAdmin) return DEFAULT_LOCAL_OWNER_PERMISSIONS;
+    return callerMe.permissions || DEFAULT_LOCAL_OWNER_PERMISSIONS;
+  }, [isServerContext, callerMe]);
+
+  const visibleTrackColumns = useMemo(
+    () =>
+      tableColumns.filter(
+        (c) => c.visible && (effectivePerms.localCacheTier > 0 || c.id !== 'cache')
+      ),
+    [tableColumns, effectivePerms.localCacheTier]
+  );
+
+  const refreshUacState = async (cfgOverride?: AppSettings | null) => {
+    const cfg = cfgOverride ?? settings;
+    const inServerCtx =
+      !window.rtunesElectron ||
+      cfg?.appMode === 'desktop-server' ||
+      cfg?.appMode === 'headless-server' ||
+      (cfg?.appMode === 'client' && cfg?.clientSource === 'remote');
+    if (!inServerCtx) {
+      setCallerMe({
+        user: null,
+        username: 'local-owner',
+        displayName: 'Local Owner',
+        roles: ['Label'],
+        isGuest: false,
+        isSuperAdmin: true,
+        authSource: 'local-owner',
+        permissions: DEFAULT_LOCAL_OWNER_PERMISSIONS,
+      });
+      setUacRoles([]);
+      setUacUsers([]);
+      setPendingApprovals({ uploads: [], storeRequests: [] });
+      setPendingApprovalCount(0);
+      return;
+    }
+    try {
+      const me = await invokeRpc<CallerMeResponse>('uac:getMe');
+      setCallerMe(me);
+      const canManage = me.isSuperAdmin || me.permissions.manageUac >= 1;
+      const canModerate =
+        canManage || me.permissions.approveUploads >= 1 || me.permissions.approveStore >= 1;
+      if (canManage) {
+        const [rolesList, usersList] = await Promise.all([
+          invokeRpc<RoleRecord[]>('uac:listRoles').catch(() => [] as RoleRecord[]),
+          invokeRpc<UserRecord[]>('uac:listUsers').catch(() => [] as UserRecord[]),
+        ]);
+        setUacRoles(Array.isArray(rolesList) ? rolesList : []);
+        setUacUsers(Array.isArray(usersList) ? usersList : []);
+      } else {
+        setUacRoles([]);
+        setUacUsers([]);
+      }
+      if (canModerate) {
+        const pending = await invokeRpc<PendingApprovalsPayload>('uac:listPendingApprovals').catch(
+          () => ({ uploads: [], storeRequests: [] })
+        );
+        setPendingApprovals(pending);
+        setPendingApprovalCount(pending.uploads.length + pending.storeRequests.length);
+      } else {
+        setPendingApprovals({ uploads: [], storeRequests: [] });
+        setPendingApprovalCount(0);
+      }
+    } catch {
+      // Unauthenticated before setup/login completes
+    }
+  };
 
   // Initial load & IPC event subscriptions
   const refreshAllData = async (q = searchQuery) => {
@@ -370,6 +499,7 @@ export const App: React.FC = () => {
       ]);
       setMediaPort(port);
       setSettings(cfg);
+      void refreshUacState(cfg);
       if (window.rtunesElectron && cfg.hasCompletedOnboarding === false && cfg.appMode === 'client') {
         setShowClientOnboardingModal(true);
       }
@@ -406,6 +536,53 @@ export const App: React.FC = () => {
       setInitialLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!isServerContext || callerMe.isSuperAdmin) return;
+    const p = effectivePerms;
+    const vis =
+      settings?.appMode === 'desktop-server' || settings?.appMode === 'headless-server'
+        ? settings?.serverSidebarVisibility
+        : undefined;
+    const allowed: Record<string, boolean> = {
+      music: (!vis || vis.music !== false) && p.libMusic > 0,
+      movies: (!vis || vis.movies !== false) && p.libMovies > 0,
+      tv: (!vis || vis.tvShows !== false) && p.libTvShows > 0,
+      music_videos: (!vis || vis.musicVideos !== false) && p.libMusicVideos > 0,
+      audiobooks: (!vis || vis.audiobooks !== false) && p.libAudiobooks > 0,
+      books: (!vis || vis.books !== false) && p.libBooks > 0,
+      photos: (!vis || vis.photos !== false) && p.libPhotos > 0,
+      cache: p.localCacheTier > 0,
+      store: (!vis || vis.store !== false) && p.storeRequest > 0,
+      downloads: (!vis || vis.store !== false) && p.storeRequest > 0,
+      device: (!vis || vis.devices !== false) && p.featDevicesSync > 0,
+      playlist: true,
+      uac_role: p.manageUac > 0,
+      uac_all_users: p.manageUac > 0,
+      uac_approvals: p.manageUac > 0 || p.approveUploads > 0 || p.approveStore > 0,
+    };
+    if (allowed[nav.kind] === false) {
+      const order: NavSelection[] = [
+        { kind: 'music' },
+        { kind: 'movies' },
+        { kind: 'tv' },
+        { kind: 'music_videos' },
+        { kind: 'audiobooks' },
+        { kind: 'books' },
+        { kind: 'photos' },
+        { kind: 'cache' },
+      ];
+      const nextNav = order.find((candidate) => allowed[candidate.kind]);
+      if (nextNav) setNav(nextNav);
+    }
+  }, [
+    isServerContext,
+    callerMe.isSuperAdmin,
+    effectivePerms,
+    settings?.appMode,
+    settings?.serverSidebarVisibility,
+    nav.kind,
+  ]);
 
   useEffect(() => {
     if (nav.kind !== 'device' || settings?.showOfflineDevices) return;
@@ -467,6 +644,7 @@ export const App: React.FC = () => {
     });
     const unsubAuth = subscribeEvent<AuthState>('auth:state', (a) => {
       setAuthState(a);
+      void refreshUacState();
     });
     const unsubDevChanged = subscribeEvent('devices:changed', () => {
       void invokeRpc<DeviceInfo[]>('devices:list').then((devs) =>
@@ -514,6 +692,18 @@ export const App: React.FC = () => {
         }
       }
     );
+    const unsubUacPerms = subscribeEvent('uac:permissions-updated', () => {
+      void refreshUacState();
+    });
+    const unsubUacApprovals = subscribeEvent<{ pendingCount?: number }>(
+      'uac:approvals-updated',
+      (payload) => {
+        if (typeof payload?.pendingCount === 'number') {
+          setPendingApprovalCount(payload.pendingCount);
+        }
+        void refreshUacState();
+      }
+    );
 
     const initialRemoteUrl = getConfiguredRemoteServerUrl();
     if (initialRemoteUrl && window.rtunesElectron) {
@@ -546,6 +736,8 @@ export const App: React.FC = () => {
       unsubOpenPrefs();
       unsubBinaryProgress();
       unsubLibraryUpdated();
+      unsubUacPerms();
+      unsubUacApprovals();
       unsubIdx();
       unsubBatch();
       unsubCache();
@@ -1234,8 +1426,47 @@ export const App: React.FC = () => {
     }
   };
 
+  const checkLocalCacheQuotaBeforePin = (nextKeep: boolean): boolean => {
+    if (!nextKeep || effectivePerms.localCacheTier === 2) return true;
+    if (effectivePerms.localCacheTier === 0) {
+      showToast('Local pre-cache is disabled for your role.');
+      return false;
+    }
+    const limitMb = effectivePerms.localCacheLimitMb || 0;
+    const usedMb = (cacheStats?.usedBytes || 0) / (1024 * 1024);
+    if (limitMb > 0 && usedMb >= limitMb) {
+      showToast(`Local cache quota reached (${usedMb.toFixed(1)} / ${limitMb} MB).`);
+      return false;
+    }
+    return true;
+  };
+
+  const handleDropUserOnRole = async (role: RoleRecord, e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOverUacRoleId(null);
+    const rawUserId = e.dataTransfer.getData('application/x-rtunes-uac-user');
+    const uid = Number(rawUserId);
+    if (!Number.isFinite(uid) || uid <= 0) return;
+    const targetUser = uacUsers.find((u) => u.id === uid);
+    if (!targetUser) return;
+    if (targetUser.roles.some((r) => r.id === role.id)) {
+      showToast(`${targetUser.username} is already in "${role.name}".`);
+      return;
+    }
+    try {
+      const nextRoleIds = Array.from(new Set([...targetUser.roles.map((r) => r.id), role.id]));
+      await invokeRpc('uac:setUserRoles', uid, nextRoleIds);
+      await refreshUacState();
+      showToast(`Assigned @${targetUser.username} to "${role.name}".`);
+    } catch (err) {
+      showToast(`Role assignment failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const handleToggleTrackCache = async (track: TrackRow) => {
     const nextKeep = !track.keep_cached;
+    if (!checkLocalCacheQuotaBeforePin(nextKeep)) return;
     await invokeRpc('cache:toggleTrack', track.id, nextKeep);
     const refreshed = await invokeRpc<TrackRow[]>('tracks:search', searchQuery, 200000);
     setTracks(refreshed);
@@ -1765,15 +1996,22 @@ export const App: React.FC = () => {
               const isServerMode =
                 settings?.appMode === 'desktop-server' || settings?.appMode === 'headless-server';
               const vis = isServerMode ? settings?.serverSidebarVisibility : undefined;
-              const showMusic = !vis || vis.music !== false;
-              const showMovies = !vis || vis.movies !== false;
-              const showTvShows = !vis || vis.tvShows !== false;
-              const showMusicVideos = !vis || vis.musicVideos !== false;
-              const showAudiobooks = !vis || vis.audiobooks !== false;
-              const showBooks = !vis || vis.books !== false;
-              const showPhotos = !vis || vis.photos !== false;
-              const showStore = !vis || vis.store !== false;
-              const showDevices = !vis || vis.devices !== false;
+              const showMusic = (!vis || vis.music !== false) && effectivePerms.libMusic > 0;
+              const showMovies = (!vis || vis.movies !== false) && effectivePerms.libMovies > 0;
+              const showTvShows = (!vis || vis.tvShows !== false) && effectivePerms.libTvShows > 0;
+              const showMusicVideos =
+                (!vis || vis.musicVideos !== false) && effectivePerms.libMusicVideos > 0;
+              const showAudiobooks =
+                (!vis || vis.audiobooks !== false) && effectivePerms.libAudiobooks > 0;
+              const showBooks = (!vis || vis.books !== false) && effectivePerms.libBooks > 0;
+              const showPhotos = (!vis || vis.photos !== false) && effectivePerms.libPhotos > 0;
+              const showLocalCache = effectivePerms.localCacheTier > 0;
+              const showStoreBrowse =
+                (!vis || vis.store !== false) && effectivePerms.storeRequest > 0;
+              const showUploadMenuItem = effectivePerms.mediaUpload > 0;
+              const showStoreSection = showStoreBrowse || showUploadMenuItem;
+              const showDevices =
+                (!vis || vis.devices !== false) && effectivePerms.featDevicesSync > 0;
 
               const isDevConnected = (dev: DeviceInfo) =>
                 dev.transport_mode === 'mtp' || dev.mount_path.startsWith('mtp://')
@@ -1881,53 +2119,61 @@ export const App: React.FC = () => {
                     </div>
                   )}
 
-                  <div
-                    className={`source-item ${nav.kind === 'cache' ? 'selected' : ''}`}
-                    onClick={() => setNav({ kind: 'cache' })}
-                  >
-                    <div className="source-item-left">
-                      <HardDrive size={14} color={nav.kind === 'cache' ? '#fff' : '#d97706'} />
-                      <span className="source-item-label">Local Cache</span>
+                  {showLocalCache && (
+                    <div
+                      className={`source-item ${nav.kind === 'cache' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'cache' })}
+                    >
+                      <div className="source-item-left">
+                        <HardDrive size={14} color={nav.kind === 'cache' ? '#fff' : '#d97706'} />
+                        <span className="source-item-label">Local Cache</span>
+                      </div>
+                      <span className="source-badge">
+                        {cacheStats ? `${cacheStats.audioCount + cacheStats.videoCount}` : 0}
+                      </span>
                     </div>
-                    <span className="source-badge">
-                      {cacheStats ? `${cacheStats.audioCount + cacheStats.videoCount}` : 0}
-                    </span>
-                  </div>
+                  )}
 
                   {/* STORE */}
-                  {showStore && (
+                  {showStoreSection && (
                     <>
                       <div className="source-section-header">STORE</div>
-                      <div
-                        className={`source-item ${nav.kind === 'store' ? 'selected' : ''}`}
-                        onClick={() => setNav({ kind: 'store' })}
-                      >
-                        <div className="source-item-left">
-                          <ShoppingBag size={14} color={nav.kind === 'store' ? '#fff' : '#16a34a'} />
-                          <span className="source-item-label">rTunes Store</span>
+                      {showStoreBrowse && (
+                        <div
+                          className={`source-item ${nav.kind === 'store' ? 'selected' : ''}`}
+                          onClick={() => setNav({ kind: 'store' })}
+                        >
+                          <div className="source-item-left">
+                            <ShoppingBag size={14} color={nav.kind === 'store' ? '#fff' : '#16a34a'} />
+                            <span className="source-item-label">rTunes Store</span>
+                          </div>
                         </div>
-                      </div>
+                      )}
 
-                      <div
-                        className="source-item"
-                        onClick={() => setShowUploadWizard(true)}
-                      >
-                        <div className="source-item-left">
-                          <Upload size={14} color="#2563eb" />
-                          <span className="source-item-label">Upload Media...</span>
+                      {showUploadMenuItem && (
+                        <div
+                          className="source-item"
+                          onClick={() => setShowUploadWizard(true)}
+                        >
+                          <div className="source-item-left">
+                            <Upload size={14} color="#2563eb" />
+                            <span className="source-item-label">Upload Media...</span>
+                          </div>
                         </div>
-                      </div>
+                      )}
 
-                      <div
-                        className={`source-item ${nav.kind === 'downloads' ? 'selected' : ''}`}
-                        onClick={() => setNav({ kind: 'downloads' })}
-                      >
-                        <div className="source-item-left">
-                          <Download size={14} color={nav.kind === 'downloads' ? '#fff' : '#2563eb'} />
-                          <span className="source-item-label">Downloads</span>
+                      {showStoreBrowse && (
+                        <div
+                          className={`source-item ${nav.kind === 'downloads' ? 'selected' : ''}`}
+                          onClick={() => setNav({ kind: 'downloads' })}
+                        >
+                          <div className="source-item-left">
+                            <Download size={14} color={nav.kind === 'downloads' ? '#fff' : '#2563eb'} />
+                            <span className="source-item-label">Downloads</span>
+                          </div>
+                          {arrQueue.length > 0 && <span className="source-badge">{arrQueue.length}</span>}
                         </div>
-                        {arrQueue.length > 0 && <span className="source-badge">{arrQueue.length}</span>}
-                      </div>
+                      )}
                     </>
                   )}
 
@@ -2138,38 +2384,42 @@ export const App: React.FC = () => {
             <div className="source-section-header">
               <span>PLAYLISTS</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <button
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: '#6d28d9',
-                    fontWeight: 700,
-                    fontSize: 10,
-                  }}
-                  onClick={() => setShowAiPlaylistModal(true)}
-                  title="Open AI Playlist Generator (Pre-Alpha)"
-                >
-                  ✦ AI
-                </button>
-                <button
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    cursor: 'pointer',
-                    color: '#2563eb',
-                    fontWeight: 700,
-                    fontSize: 10,
-                  }}
-                  onClick={() => {
-                    setNewPlaylistName('New Playlist');
-                    setNewPlaylistMediaType('mixed');
-                    setShowNewPlaylistModal(true);
-                  }}
-                  title="Create a new Music, Video, or Mixed Playlist"
-                >
-                  + New
-                </button>
+                {effectivePerms.featEgenius > 0 && (
+                  <button
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: '#6d28d9',
+                      fontWeight: 700,
+                      fontSize: 10,
+                    }}
+                    onClick={() => setShowAiPlaylistModal(true)}
+                    title="Open AI Playlist Generator (Pre-Alpha)"
+                  >
+                    ✦ AI
+                  </button>
+                )}
+                {effectivePerms.playlists > 0 && (
+                  <button
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: '#2563eb',
+                      fontWeight: 700,
+                      fontSize: 10,
+                    }}
+                    onClick={() => {
+                      setNewPlaylistName('New Playlist');
+                      setNewPlaylistMediaType('mixed');
+                      setShowNewPlaylistModal(true);
+                    }}
+                    title="Create a new Music, Video, or Mixed Playlist"
+                  >
+                    + New
+                  </button>
+                )}
               </div>
             </div>
             {playlists.map((pl) => {
@@ -2266,6 +2516,171 @@ export const App: React.FC = () => {
                 </div>
               );
             })}
+
+            {/* ACCESS CONTROL */}
+            {isServerContext &&
+              (effectivePerms.manageUac > 0 ||
+                effectivePerms.approveUploads > 0 ||
+                effectivePerms.approveStore > 0) && (
+                <>
+                  <div
+                    className="source-section-header"
+                    onContextMenu={(e) => {
+                      if (effectivePerms.manageUac > 0) {
+                        e.preventDefault();
+                        setContextMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          kind: 'uac_header',
+                        });
+                      }
+                    }}
+                  >
+                    <span>ACCESS CONTROL</span>
+                    {effectivePerms.manageUac > 0 && (
+                      <button
+                        type="button"
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          cursor: 'pointer',
+                          color: '#2563eb',
+                          fontWeight: 700,
+                          fontSize: 10,
+                        }}
+                        onClick={() => {
+                          if (!nav.kind.startsWith('uac_')) {
+                            setNav({ kind: 'uac_all_users' });
+                          }
+                          setUacModalTrigger({ kind: 'new_role', nonce: Date.now() });
+                        }}
+                        title="Create Custom RBAC Role"
+                      >
+                        + Role
+                      </button>
+                    )}
+                  </div>
+
+                  {effectivePerms.manageUac > 0 &&
+                    uacRoles.map((role) => {
+                      const isSelected = nav.kind === 'uac_role' && nav.roleId === role.id;
+                      const isDragTarget = dragOverUacRoleId === role.id;
+                      const memberCount = uacUsers.filter((u) =>
+                        u.roles.some((ur) => ur.id === role.id)
+                      ).length;
+                      return (
+                        <div
+                          key={role.id}
+                          className={`source-item ${isSelected ? 'selected' : ''}`}
+                          style={
+                            isDragTarget
+                              ? {
+                                  outline: '2px solid #2563eb',
+                                  background: isSelected ? undefined : '#dbeafe',
+                                }
+                              : undefined
+                          }
+                          onClick={() => setNav({ kind: 'uac_role', roleId: role.id })}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setContextMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              kind: 'uac_role',
+                              uacRole: role,
+                            });
+                          }}
+                          onDragEnter={(e) => {
+                            if (e.dataTransfer.types.includes('application/x-rtunes-uac-user')) {
+                              e.preventDefault();
+                              setDragOverUacRoleId(role.id);
+                            }
+                          }}
+                          onDragOver={(e) => {
+                            if (e.dataTransfer.types.includes('application/x-rtunes-uac-user')) {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'copy';
+                              if (dragOverUacRoleId !== role.id) setDragOverUacRoleId(role.id);
+                            }
+                          }}
+                          onDragLeave={(e) => {
+                            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                              setDragOverUacRoleId(null);
+                            }
+                          }}
+                          onDrop={(e) => void handleDropUserOnRole(role, e)}
+                        >
+                          <div className="source-item-left">
+                            <span
+                              style={{
+                                width: 9,
+                                height: 9,
+                                borderRadius: '50%',
+                                background: role.color || '#5a8dee',
+                                border: '1px solid rgba(0,0,0,0.28)',
+                                flexShrink: 0,
+                              }}
+                            />
+                            <Shield
+                              size={13}
+                              color={isSelected ? '#fff' : role.isSuperAdmin ? '#b45309' : '#2563eb'}
+                            />
+                            <span className="source-item-label">{role.name}</span>
+                          </div>
+                          <span className="source-badge">{memberCount}</span>
+                        </div>
+                      );
+                    })}
+
+                  {effectivePerms.manageUac > 0 && (
+                    <div
+                      className={`source-item ${nav.kind === 'uac_all_users' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'uac_all_users' })}
+                    >
+                      <div className="source-item-left">
+                        <Users size={14} color={nav.kind === 'uac_all_users' ? '#fff' : '#334155'} />
+                        <span className="source-item-label">All Users</span>
+                      </div>
+                      <span className="source-badge">{uacUsers.length}</span>
+                    </div>
+                  )}
+
+                  {(effectivePerms.manageUac > 0 ||
+                    effectivePerms.approveUploads > 0 ||
+                    effectivePerms.approveStore > 0) && (
+                    <div
+                      className={`source-item ${nav.kind === 'uac_approvals' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'uac_approvals' })}
+                    >
+                      <div className="source-item-left">
+                        <Clock
+                          size={14}
+                          color={
+                            nav.kind === 'uac_approvals'
+                              ? '#fff'
+                              : pendingApprovalCount > 0
+                                ? '#d97706'
+                                : '#475569'
+                          }
+                        />
+                        <span className="source-item-label">Pending Approvals</span>
+                      </div>
+                      {pendingApprovalCount > 0 && (
+                        <span
+                          className="source-badge"
+                          style={
+                            nav.kind === 'uac_approvals'
+                              ? undefined
+                              : { background: '#fef3c7', color: '#92400e', fontWeight: 700 }
+                          }
+                        >
+                          {pendingApprovalCount}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
           </div>
 
           {/* Now Playing Artwork Well */}
@@ -2455,7 +2870,8 @@ export const App: React.FC = () => {
                                 (settings?.appMode === 'desktop-server' ||
                                   settings?.appMode === 'headless-server') &&
                                 settings?.serverSidebarVisibility?.genreMap === false
-                              ) && (
+                              ) &&
+                                effectivePerms.featGenreMap > 0 && (
                                 <button
                                   className="aqua-btn"
                                   style={{ padding: '1px 8px' }}
@@ -2665,86 +3081,97 @@ export const App: React.FC = () => {
                         </div>
                       </div>
                       <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        {tableColumns.map((col, idx) => (
-                          <div
-                            key={col.id}
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              padding: '3px 6px',
-                              background: '#ffffff',
-                              border: '1px solid #e2e8f0',
-                              borderRadius: 4,
-                              fontSize: 11,
-                            }}
-                          >
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', flex: 1 }}>
-                              <input
-                                type="checkbox"
-                                checked={col.visible}
-                                onChange={(e) => {
-                                  const next = tableColumns.map((c, i) =>
-                                    i === idx ? { ...c, visible: e.target.checked } : c
-                                  );
-                                  void saveColumnConfig(next);
+                        {tableColumns
+                          .filter((col) => effectivePerms.localCacheTier > 0 || col.id !== 'cache')
+                          .map((col) => {
+                            const idx = tableColumns.findIndex((c) => c.id === col.id);
+                            return (
+                              <div
+                                key={col.id}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  padding: '3px 6px',
+                                  background: '#ffffff',
+                                  border: '1px solid #e2e8f0',
+                                  borderRadius: 4,
+                                  fontSize: 11,
                                 }}
-                              />
-                              <span style={{ fontWeight: 600 }}>{col.label}</span>
-                            </label>
-                            <div style={{ display: 'flex', gap: 3 }}>
-                              <button
-                                className="aqua-btn"
-                                style={{ padding: '0 5px', fontSize: 10 }}
-                                disabled={idx === 0}
-                                onClick={() => {
-                                  const next = [...tableColumns];
-                                  [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
-                                  void saveColumnConfig(next);
-                                }}
-                                title="Move Up"
                               >
-                                ↑
-                              </button>
-                              <button
-                                className="aqua-btn"
-                                style={{ padding: '0 5px', fontSize: 10 }}
-                                disabled={idx === tableColumns.length - 1}
-                                onClick={() => {
-                                  const next = [...tableColumns];
-                                  [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-                                  void saveColumnConfig(next);
-                                }}
-                                title="Move Down"
-                              >
-                                ↓
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', flex: 1 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={col.visible}
+                                    onChange={(e) => {
+                                      const next = tableColumns.map((c, i) =>
+                                        i === idx ? { ...c, visible: e.target.checked } : c
+                                      );
+                                      void saveColumnConfig(next);
+                                    }}
+                                  />
+                                  <span style={{ fontWeight: 600 }}>{col.label}</span>
+                                </label>
+                                <div style={{ display: 'flex', gap: 3 }}>
+                                  <button
+                                    className="aqua-btn"
+                                    style={{ padding: '0 5px', fontSize: 10 }}
+                                    disabled={idx === 0}
+                                    onClick={() => {
+                                      const next = [...tableColumns];
+                                      [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                                      void saveColumnConfig(next);
+                                    }}
+                                    title="Move Up"
+                                  >
+                                    ↑
+                                  </button>
+                                  <button
+                                    className="aqua-btn"
+                                    style={{ padding: '0 5px', fontSize: 10 }}
+                                    disabled={idx === tableColumns.length - 1}
+                                    onClick={() => {
+                                      const next = [...tableColumns];
+                                      [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+                                      void saveColumnConfig(next);
+                                    }}
+                                    title="Move Down"
+                                  >
+                                    ↓
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
                       </div>
                     </div>
                   )}
 
-                  <button className="aqua-btn" onClick={handleScanDirectoryQuick}>
-                    <FolderSearch size={12} /> Import Music...
-                  </button>
-                  <button
-                    className="aqua-btn"
-                    onClick={() => void invokeRpc('indexer:scan')}
-                    disabled={indexProgress.running}
-                  >
-                    <RefreshCw size={12} /> Rescan Library
-                  </button>
-                  <button
-                    className="aqua-btn"
-                    onClick={handleSyncListenBrainzPopularity}
-                    disabled={syncingPopularity}
-                    title="Update global listen counts and calculate artist popularity scores"
-                  >
-                    <Activity size={12} />
-                    {syncingPopularity ? 'Updating Popularity...' : 'Update Popularity'}
-                  </button>
+                  {effectivePerms.mediaUpload > 0 && (
+                    <button className="aqua-btn" onClick={handleScanDirectoryQuick}>
+                      <FolderSearch size={12} /> Import Music...
+                    </button>
+                  )}
+                  {effectivePerms.rescanLibrary > 0 && (
+                    <button
+                      className="aqua-btn"
+                      onClick={() => void invokeRpc('indexer:scan')}
+                      disabled={indexProgress.running}
+                    >
+                      <RefreshCw size={12} /> Rescan Library
+                    </button>
+                  )}
+                  {effectivePerms.libMusic >= 2 && (
+                    <button
+                      className="aqua-btn"
+                      onClick={handleSyncListenBrainzPopularity}
+                      disabled={syncingPopularity}
+                      title="Update global listen counts and calculate artist popularity scores"
+                    >
+                      <Activity size={12} />
+                      {syncingPopularity ? 'Updating Popularity...' : 'Update Popularity'}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -3005,28 +3432,26 @@ export const App: React.FC = () => {
                   <table className="rtunes-table">
                     <thead>
                       <tr>
-                        {tableColumns
-                          .filter((c) => c.visible)
-                          .map((col) => (
-                            <th
-                              key={col.id}
-                              style={col.width ? { width: col.width } : undefined}
-                              className={col.sortKey && sortCol === col.sortKey ? 'sorted' : ''}
-                              onClick={() => {
-                                if (col.sortKey) handleSortHeader(col.sortKey);
-                              }}
-                              title={col.label}
-                            >
-                              {col.label}
-                            </th>
-                          ))}
+                        {visibleTrackColumns.map((col) => (
+                          <th
+                            key={col.id}
+                            style={col.width ? { width: col.width } : undefined}
+                            className={col.sortKey && sortCol === col.sortKey ? 'sorted' : ''}
+                            onClick={() => {
+                              if (col.sortKey) handleSortHeader(col.sortKey);
+                            }}
+                            title={col.label}
+                          >
+                            {col.label}
+                          </th>
+                        ))}
                       </tr>
                     </thead>
                     <tbody>
                       {filteredTracks.length === 0 ? (
                         <tr>
                           <td
-                            colSpan={Math.max(1, tableColumns.filter((c) => c.visible).length)}
+                            colSpan={Math.max(1, visibleTrackColumns.length)}
                             style={{ textAlign: 'center', padding: 36, color: '#64748b' }}
                           >
                             No tracks in this view. Configure your NFS/SMB Music Root in Preferences or click{' '}
@@ -3042,7 +3467,7 @@ export const App: React.FC = () => {
                               nav.kind === 'playlist'
                                 ? playlists.find((p) => p.id === nav.id)
                                 : undefined;
-                            const visibleCols = tableColumns.filter((c) => c.visible);
+                            const visibleCols = visibleTrackColumns;
                             return (
                               <tr
                                 key={nav.kind === 'playlist' ? `${track.id}-${idx}` : track.id}
@@ -3475,7 +3900,7 @@ export const App: React.FC = () => {
                           {filteredTracks.length > visibleTrackLimit && (
                             <tr>
                               <td
-                                colSpan={Math.max(1, tableColumns.filter((c) => c.visible).length)}
+                                colSpan={Math.max(1, visibleTrackColumns.length)}
                                 style={{
                                   textAlign: 'center',
                                   padding: '10px 14px',
@@ -3661,20 +4086,24 @@ export const App: React.FC = () => {
                   )}
                 </div>
                 <div style={{ display: 'flex', gap: 6 }}>
-                  <button
-                    className="aqua-btn"
-                    onClick={async () => {
-                      await invokeRpc('videos:hydrateArtwork');
-                      const updated = await invokeRpc<VideoRow[]>('videos:search', searchQuery);
-                      setVideos(updated);
-                    }}
-                    title="Fetch missing TV Show & Movie posters from TVMaze / IMDb"
-                  >
-                    <RefreshCw size={12} /> Fetch Posters
-                  </button>
-                  <button className="aqua-btn" onClick={handleScanDirectoryQuick}>
-                    <FolderSearch size={12} /> Import TV Shows...
-                  </button>
+                  {effectivePerms.libTvShows >= 2 && (
+                    <button
+                      className="aqua-btn"
+                      onClick={async () => {
+                        await invokeRpc('videos:hydrateArtwork');
+                        const updated = await invokeRpc<VideoRow[]>('videos:search', searchQuery);
+                        setVideos(updated);
+                      }}
+                      title="Fetch missing TV Show & Movie posters from TVMaze / IMDb"
+                    >
+                      <RefreshCw size={12} /> Fetch Posters
+                    </button>
+                  )}
+                  {effectivePerms.mediaUpload > 0 && (
+                    <button className="aqua-btn" onClick={handleScanDirectoryQuick}>
+                      <FolderSearch size={12} /> Import TV Shows...
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -3972,20 +4401,28 @@ export const App: React.FC = () => {
                                   </td>
                                   <td style={{ fontWeight: 600 }}>{ep.title}</td>
                                   <td>
-                                    <input
-                                      type="checkbox"
-                                      checked={Boolean(ep.keep_cached || ep.is_transcoded)}
-                                      onChange={async (e) => {
-                                        await invokeRpc('cache:toggleVideo', ep.id, e.target.checked);
-                                        const updated = await invokeRpc<VideoRow[]>(
-                                          'videos:search',
-                                          searchQuery
-                                        );
-                                        setVideos(updated);
-                                      }}
-                                      title="Queue 480x360 30fps H.264 + AAC 128k hardware transcode for instant ePod sync"
-                                    />{' '}
-                                    <span style={{ fontSize: 10.5 }}>Keep 360p</span>
+                                    {effectivePerms.localCacheTier > 0 ? (
+                                      <>
+                                        <input
+                                          type="checkbox"
+                                          checked={Boolean(ep.keep_cached || ep.is_transcoded)}
+                                          onChange={async (e) => {
+                                            const next = e.target.checked;
+                                            if (!checkLocalCacheQuotaBeforePin(next)) return;
+                                            await invokeRpc('cache:toggleVideo', ep.id, next);
+                                            const updated = await invokeRpc<VideoRow[]>(
+                                              'videos:search',
+                                              searchQuery
+                                            );
+                                            setVideos(updated);
+                                          }}
+                                          title="Queue 480x360 30fps H.264 + AAC 128k hardware transcode for instant ePod sync"
+                                        />{' '}
+                                        <span style={{ fontSize: 10.5 }}>Keep 360p</span>
+                                      </>
+                                    ) : (
+                                      <span style={{ fontSize: 10.5, color: '#64748b' }}>Stream Only</span>
+                                    )}
                                   </td>
                                   <td style={{ fontFamily: 'var(--font-mono)' }}>
                                     {formatDuration(ep.duration)}
@@ -4071,19 +4508,23 @@ export const App: React.FC = () => {
                   Movies Library ({videos.filter((v) => v.type === 'movie').length} Movies)
                 </strong>
                 <div style={{ display: 'flex', gap: 6 }}>
-                  <button
-                    className="aqua-btn"
-                    onClick={async () => {
-                      await invokeRpc('videos:hydrateArtwork');
-                      const updated = await invokeRpc<VideoRow[]>('videos:search', searchQuery);
-                      setVideos(updated);
-                    }}
-                  >
-                    <RefreshCw size={12} /> Fetch Posters
-                  </button>
-                  <button className="aqua-btn" onClick={handleScanDirectoryQuick}>
-                    <FolderSearch size={12} /> Import Movies...
-                  </button>
+                  {effectivePerms.libMovies >= 2 && (
+                    <button
+                      className="aqua-btn"
+                      onClick={async () => {
+                        await invokeRpc('videos:hydrateArtwork');
+                        const updated = await invokeRpc<VideoRow[]>('videos:search', searchQuery);
+                        setVideos(updated);
+                      }}
+                    >
+                      <RefreshCw size={12} /> Fetch Posters
+                    </button>
+                  )}
+                  {effectivePerms.mediaUpload > 0 && (
+                    <button className="aqua-btn" onClick={handleScanDirectoryQuick}>
+                      <FolderSearch size={12} /> Import Movies...
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -4166,17 +4607,25 @@ export const App: React.FC = () => {
                                 </button>
                               </td>
                               <td>
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(v.keep_cached || v.is_transcoded)}
-                                  onChange={async (e) => {
-                                    await invokeRpc('cache:toggleVideo', v.id, e.target.checked);
-                                    const updated = await invokeRpc<VideoRow[]>('videos:search', searchQuery);
-                                    setVideos(updated);
-                                  }}
-                                  title="Queue 480x360 30fps H.264 + AAC 128k hardware transcode for instant ePod sync"
-                                />{' '}
-                                <span style={{ fontSize: 10.5 }}>Keep 360p</span>
+                                {effectivePerms.localCacheTier > 0 ? (
+                                  <>
+                                    <input
+                                      type="checkbox"
+                                      checked={Boolean(v.keep_cached || v.is_transcoded)}
+                                      onChange={async (e) => {
+                                        const next = e.target.checked;
+                                        if (!checkLocalCacheQuotaBeforePin(next)) return;
+                                        await invokeRpc('cache:toggleVideo', v.id, next);
+                                        const updated = await invokeRpc<VideoRow[]>('videos:search', searchQuery);
+                                        setVideos(updated);
+                                      }}
+                                      title="Queue 480x360 30fps H.264 + AAC 128k hardware transcode for instant ePod sync"
+                                    />{' '}
+                                    <span style={{ fontSize: 10.5 }}>Keep 360p</span>
+                                  </>
+                                ) : (
+                                  <span style={{ fontSize: 10.5, color: '#64748b' }}>Stream Only</span>
+                                )}
                               </td>
                               <td style={{ fontWeight: 600 }}>{v.title}</td>
                               <td>{v.year || '—'}</td>
@@ -4251,6 +4700,22 @@ export const App: React.FC = () => {
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, fontWeight: 600, marginBottom: 6 }}>
                   <span>
                     Used: {formatBytes(cacheStats.usedBytes)} of {formatBytes(cacheStats.quotaBytes)} ({cacheStats.usagePercent}%)
+                    {isServerContext && effectivePerms.localCacheTier === 1 && effectivePerms.localCacheLimitMb > 0 && (
+                      <span
+                        style={{
+                          marginLeft: 10,
+                          padding: '1px 7px',
+                          borderRadius: 9,
+                          background: '#fef3c7',
+                          border: '1px solid #fcd34d',
+                          color: '#92400e',
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                        }}
+                      >
+                        Role Cache Quota: {((cacheStats.usedBytes || 0) / (1024 * 1024)).toFixed(1)} / {effectivePerms.localCacheLimitMb} MB
+                      </span>
+                    )}
                   </span>
                   <span>
                     {cacheStats.audioCount} Cached Audio Tracks • {cacheStats.videoCount} 360p Transcoded Videos • {cacheStats.artworkCount} Cached Covers
@@ -4633,9 +5098,36 @@ export const App: React.FC = () => {
           )}
 
           {/* 4. RTUNES STOREFRONT (*ARR REQUEST GATEWAY) */}
+          {(nav.kind === 'uac_role' ||
+            nav.kind === 'uac_all_users' ||
+            nav.kind === 'uac_approvals') && (
+            <UacWorkspaceView
+              selection={nav as UacViewSelection}
+              roles={uacRoles}
+              users={uacUsers}
+              approvals={pendingApprovals}
+              callerMe={callerMe}
+              searchQuery={searchQuery}
+              onSelectView={(next) => setNav(next)}
+              onRefreshData={() => refreshUacState()}
+              externalTrigger={uacModalTrigger}
+              onOpenContextMenu={(e, kind, user, roleId) => {
+                e.preventDefault();
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  kind,
+                  uacUser: user,
+                  uacRoleId: roleId,
+                });
+              }}
+            />
+          )}
+
           {nav.kind === 'store' && (
             <StorefrontView
               settings={settings}
+              approvalRequired={effectivePerms.storeRequest === 1}
               onSettingsUpdated={(updated) => setSettings(updated)}
             />
           )}
@@ -4802,41 +5294,49 @@ export const App: React.FC = () => {
           ===================================================================== */}
       <footer className="bottom-status-bar">
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <button
-            className="aqua-btn"
-            onClick={() => {
-              setNewPlaylistName('New Playlist');
-              setNewPlaylistMediaType('mixed');
-              setShowNewPlaylistModal(true);
-            }}
-            title="Create Regular Music, Video, or Mixed Playlist"
-          >
-            <Plus size={12} /> Playlist
-          </button>
-          <button
-            className="aqua-btn"
-            onClick={() => {
-              setEditingPlaylist(null);
-              setShowSmartModal(true);
-            }}
-            title="Create Granular Smart Playlist with Artist-Normalized Popularity Rules"
-          >
-            <Sparkles size={12} color="#6d28d9" /> Smart Playlist...
-          </button>
-          <button
-            className="aqua-btn"
-            onClick={() => setShowAiPlaylistModal(true)}
-            title="Open AI Playlist Generator (Pre-Alpha)"
-          >
-            <Sparkles size={12} color="#1d4ed8" /> AI Playlist...
-          </button>
-          <button
-            className="aqua-btn"
-            onClick={() => setShowAddDeviceWizard(true)}
-            title="Open Universal ePod Provisioning Wizard"
-          >
-            <Usb size={12} /> Add Device...
-          </button>
+          {effectivePerms.playlists > 0 && (
+            <>
+              <button
+                className="aqua-btn"
+                onClick={() => {
+                  setNewPlaylistName('New Playlist');
+                  setNewPlaylistMediaType('mixed');
+                  setShowNewPlaylistModal(true);
+                }}
+                title="Create Regular Music, Video, or Mixed Playlist"
+              >
+                <Plus size={12} /> Playlist
+              </button>
+              <button
+                className="aqua-btn"
+                onClick={() => {
+                  setEditingPlaylist(null);
+                  setShowSmartModal(true);
+                }}
+                title="Create Granular Smart Playlist with Artist-Normalized Popularity Rules"
+              >
+                <Sparkles size={12} color="#6d28d9" /> Smart Playlist...
+              </button>
+            </>
+          )}
+          {effectivePerms.featEgenius > 0 && (
+            <button
+              className="aqua-btn"
+              onClick={() => setShowAiPlaylistModal(true)}
+              title="Open AI Playlist Generator (Pre-Alpha)"
+            >
+              <Sparkles size={12} color="#1d4ed8" /> AI Playlist...
+            </button>
+          )}
+          {effectivePerms.featDevicesSync > 0 && (
+            <button
+              className="aqua-btn"
+              onClick={() => setShowAddDeviceWizard(true)}
+              title="Open Universal ePod Provisioning Wizard"
+            >
+              <Usb size={12} /> Add Device...
+            </button>
+          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, fontWeight: 600 }}>
@@ -5119,6 +5619,9 @@ export const App: React.FC = () => {
         <PreferencesModal
           settings={settings}
           authState={authState}
+          callerMe={callerMe}
+          effectivePermissions={effectivePerms}
+          isServerContext={isServerContext}
           initialTab={prefsInitialTab}
           onClose={() => {
             setShowPreferences(false);
@@ -5129,6 +5632,18 @@ export const App: React.FC = () => {
             void refreshAllData();
           }}
           onAuthChanged={setAuthState}
+          onOpenUac={() => {
+            setShowPreferences(false);
+            setPrefsInitialTab('paths');
+            setNav({ kind: 'uac_all_users' });
+          }}
+          onProfileUpdated={() => {
+            void refreshUacState();
+          }}
+          onSignedOut={() => {
+            setShowPinUnlockModal(true);
+            void refreshUacState();
+          }}
           onOpenUpload={() => {
             setShowPreferences(false);
             setShowUploadWizard(true);
@@ -5187,6 +5702,7 @@ export const App: React.FC = () => {
 
       {showUploadWizard && (
         <UploadMediaWizardModal
+          approvalRequired={effectivePerms.mediaUpload === 1}
           onClose={() => setShowUploadWizard(false)}
           onUploaded={() => {
             void refreshAllData();
@@ -5344,42 +5860,44 @@ export const App: React.FC = () => {
               >
                 Play
               </button>
-              <button
-                type="button"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '6px 14px',
-                  border: 'none',
-                  background: 'transparent',
-                  cursor: 'pointer',
-                  color: '#1d4ed8',
-                  fontWeight: 600,
-                }}
-                onClick={async () => {
-                  const t = contextMenu.track!;
-                  setContextMenu(null);
-                  try {
-                    const res = await invokeRpc<{
-                      playlistId: number;
-                      mix: { tracks: TrackRow[]; distinctArtists: number; elapsedMs: number };
-                    }>('egenius:createPlaylist', { trackId: t.id, limit: 25, mode: 'balanced' });
-                    await refreshAllData();
-                    setNav({ kind: 'playlist', id: res.playlistId });
-                    setPlaylistTracks(res.mix.tracks);
-                    showToast(
-                      `eGenius built ${res.mix.tracks.length} tracks (${res.mix.distinctArtists} artists) in ${res.mix.elapsedMs}ms.`
-                    );
-                  } catch (err) {
-                    showToast(`eGenius error: ${err instanceof Error ? err.message : String(err)}`);
-                  }
-                }}
-              >
-                <EGeniusAtomIcon size={13} /> Make eGenius Playlist
-              </button>
+              {effectivePerms.featEgenius > 0 && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#1d4ed8',
+                    fontWeight: 600,
+                  }}
+                  onClick={async () => {
+                    const t = contextMenu.track!;
+                    setContextMenu(null);
+                    try {
+                      const res = await invokeRpc<{
+                        playlistId: number;
+                        mix: { tracks: TrackRow[]; distinctArtists: number; elapsedMs: number };
+                      }>('egenius:createPlaylist', { trackId: t.id, limit: 25, mode: 'balanced' });
+                      await refreshAllData();
+                      setNav({ kind: 'playlist', id: res.playlistId });
+                      setPlaylistTracks(res.mix.tracks);
+                      showToast(
+                        `eGenius built ${res.mix.tracks.length} tracks (${res.mix.distinctArtists} artists) in ${res.mix.elapsedMs}ms.`
+                      );
+                    } catch (err) {
+                      showToast(`eGenius error: ${err instanceof Error ? err.message : String(err)}`);
+                    }
+                  }}
+                >
+                  <EGeniusAtomIcon size={13} /> Make eGenius Playlist
+                </button>
+              )}
               <button
                 type="button"
                 style={{
@@ -5474,51 +5992,58 @@ export const App: React.FC = () => {
                   </>
                 );
               })()}
-              <button
-                type="button"
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '6px 14px',
-                  border: 'none',
-                  background: 'transparent',
-                  cursor: 'pointer',
-                  color: '#0f172a',
-                }}
-                onClick={async () => {
-                  const t = contextMenu.track!;
-                  setContextMenu(null);
-                  await invokeRpc('cache:toggleTrack', t.id, !t.keep_cached);
-                  await refreshAllData();
-                  showToast(!t.keep_cached ? `Caching "${t.title}" locally.` : `Removed "${t.title}" from local cache.`);
-                }}
-              >
-                {contextMenu.track.keep_cached ? 'Remove from Local Cache' : 'Keep in Local Cache'}
-              </button>
-              <button
-                type="button"
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '6px 14px',
-                  border: 'none',
-                  background: 'transparent',
-                  cursor: 'pointer',
-                  color: '#0f172a',
-                }}
-                onClick={async () => {
-                  const t = contextMenu.track!;
-                  setContextMenu(null);
-                  await invokeRpc('tracks:hydrate', t.id);
-                  await refreshAllData();
-                  showToast(`Updated metadata for "${t.title}".`);
-                }}
-              >
-                Fetch Metadata &amp; Popularity
-              </button>
-              {playlists.some((p) => !p.is_smart && p.id !== contextMenu.playlistId) && (
+              {effectivePerms.localCacheTier > 0 && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#0f172a',
+                  }}
+                  onClick={async () => {
+                    const t = contextMenu.track!;
+                    const nextKeep = !t.keep_cached;
+                    setContextMenu(null);
+                    if (!checkLocalCacheQuotaBeforePin(nextKeep)) return;
+                    await invokeRpc('cache:toggleTrack', t.id, nextKeep);
+                    await refreshAllData();
+                    showToast(nextKeep ? `Caching "${t.title}" locally.` : `Removed "${t.title}" from local cache.`);
+                  }}
+                >
+                  {contextMenu.track.keep_cached ? 'Remove from Local Cache' : 'Keep in Local Cache'}
+                </button>
+              )}
+              {effectivePerms.libMusic >= 2 && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#0f172a',
+                  }}
+                  onClick={async () => {
+                    const t = contextMenu.track!;
+                    setContextMenu(null);
+                    await invokeRpc('tracks:hydrate', t.id);
+                    await refreshAllData();
+                    showToast(`Updated metadata for "${t.title}".`);
+                  }}
+                >
+                  Fetch Metadata &amp; Popularity
+                </button>
+              )}
+              {effectivePerms.playlists > 0 &&
+                playlists.some((p) => !p.is_smart && p.id !== contextMenu.playlistId) && (
                 <div style={{ borderTop: '1px solid #e2e8f0', margin: '4px 0', paddingTop: 4 }}>
                   <div style={{ padding: '2px 14px', fontSize: 10.5, color: '#64748b', fontWeight: 700 }}>
                     Add to Playlist
@@ -5576,7 +6101,10 @@ export const App: React.FC = () => {
             </>
           )}
 
-          {contextMenu.kind === 'playlist_track' && contextMenu.track && contextMenu.playlistId && (
+          {effectivePerms.playlists > 0 &&
+            contextMenu.kind === 'playlist_track' &&
+            contextMenu.track &&
+            contextMenu.playlistId && (
             <button
               type="button"
               style={{
@@ -5605,7 +6133,10 @@ export const App: React.FC = () => {
             </button>
           )}
 
-          {contextMenu.kind === 'smart_track' && contextMenu.track && contextMenu.playlistId && (
+          {effectivePerms.playlists > 0 &&
+            contextMenu.kind === 'smart_track' &&
+            contextMenu.track &&
+            contextMenu.playlistId && (
             <>
               <button
                 type="button"
@@ -5672,9 +6203,9 @@ export const App: React.FC = () => {
             </>
           )}
 
-          {contextMenu.kind === 'playlist' && contextMenu.playlist && (
+          {effectivePerms.playlists > 0 && contextMenu.kind === 'playlist' && contextMenu.playlist && (
             <>
-              {Boolean(contextMenu.playlist.egenius_seed_track_id) && (
+              {effectivePerms.featEgenius > 0 && Boolean(contextMenu.playlist.egenius_seed_track_id) && (
                 <button
                   type="button"
                   style={{
@@ -5707,7 +6238,7 @@ export const App: React.FC = () => {
                   Refresh eGenius Mix
                 </button>
               )}
-              {Boolean(contextMenu.playlist.ai_prompt) && (
+              {effectivePerms.featEgenius > 0 && Boolean(contextMenu.playlist.ai_prompt) && (
                 <button
                   type="button"
                   style={{
@@ -5839,6 +6370,310 @@ export const App: React.FC = () => {
               Remove from Device
             </button>
           )}
+
+          {contextMenu.kind === 'uac_header' && (
+            <>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                  fontWeight: 600,
+                }}
+                onClick={() => {
+                  setContextMenu(null);
+                  if (!nav.kind.startsWith('uac_')) setNav({ kind: 'uac_all_users' });
+                  setUacModalTrigger({ kind: 'new_role', nonce: Date.now() });
+                }}
+              >
+                Create New Role...
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                  fontWeight: 600,
+                }}
+                onClick={() => {
+                  setContextMenu(null);
+                  if (!nav.kind.startsWith('uac_')) setNav({ kind: 'uac_all_users' });
+                  setUacModalTrigger({ kind: 'new_user', nonce: Date.now() });
+                }}
+              >
+                Create New User...
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#1d4ed8',
+                  fontWeight: 600,
+                }}
+                onClick={() => {
+                  setContextMenu(null);
+                  setNav({ kind: 'uac_approvals' });
+                }}
+              >
+                Open Pending Approvals Queue
+              </button>
+            </>
+          )}
+
+          {contextMenu.kind === 'uac_role' && contextMenu.uacRole && (
+            <>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                  fontWeight: 600,
+                }}
+                onClick={() => {
+                  const role = contextMenu.uacRole!;
+                  setContextMenu(null);
+                  setNav({ kind: 'uac_role', roleId: role.id });
+                }}
+              >
+                Open Role Policy
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                }}
+                onClick={() => {
+                  setContextMenu(null);
+                  if (!nav.kind.startsWith('uac_')) setNav({ kind: 'uac_all_users' });
+                  setUacModalTrigger({ kind: 'new_role', nonce: Date.now() });
+                }}
+              >
+                Create New Role...
+              </button>
+              {!contextMenu.uacRole.isSystem && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#b91c1c',
+                    fontWeight: 600,
+                  }}
+                  onClick={async () => {
+                    const role = contextMenu.uacRole!;
+                    setContextMenu(null);
+                    await invokeRpc('uac:deleteRole', role.id);
+                    await refreshUacState();
+                    if (nav.kind === 'uac_role' && nav.roleId === role.id) {
+                      setNav({ kind: 'uac_all_users' });
+                    }
+                    showToast(`Deleted role "${role.name}".`);
+                  }}
+                >
+                  Delete Role
+                </button>
+              )}
+            </>
+          )}
+
+          {contextMenu.kind === 'uac_user' && contextMenu.uacUser && (
+            <>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                  fontWeight: 600,
+                }}
+                onClick={() => {
+                  const u = contextMenu.uacUser!;
+                  setContextMenu(null);
+                  setNav({ kind: 'uac_all_users' });
+                  setUacModalTrigger({ kind: 'inspect_user', userId: u.id, nonce: Date.now() });
+                }}
+              >
+                Inspect Effective Access
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#0f172a',
+                }}
+                onClick={async () => {
+                  const u = contextMenu.uacUser!;
+                  const nextStatus = u.status === 'active' ? 'suspended' : 'active';
+                  setContextMenu(null);
+                  try {
+                    await invokeRpc('uac:updateUser', u.id, { status: nextStatus });
+                    await refreshUacState();
+                    showToast(`@${u.username} is now ${nextStatus}.`);
+                  } catch (err) {
+                    showToast(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+              >
+                {contextMenu.uacUser.status === 'active' ? 'Suspend User' : 'Activate User'}
+              </button>
+              <button
+                type="button"
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '6px 14px',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: '#1d4ed8',
+                }}
+                onClick={() => {
+                  const u = contextMenu.uacUser!;
+                  setContextMenu(null);
+                  if (!nav.kind.startsWith('uac_')) setNav({ kind: 'uac_all_users' });
+                  setUacModalTrigger({ kind: 'reset_code', userId: u.id, nonce: Date.now() });
+                }}
+              >
+                Generate Password Reset Code...
+              </button>
+              {contextMenu.uacUser.id !== callerMe.user?.id && (
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#b91c1c',
+                    fontWeight: 600,
+                  }}
+                  onClick={async () => {
+                    const u = contextMenu.uacUser!;
+                    setContextMenu(null);
+                    try {
+                      await invokeRpc('uac:deleteUser', u.id);
+                      await refreshUacState();
+                      showToast(`Deleted user "@${u.username}".`);
+                    } catch (err) {
+                      showToast(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                >
+                  Delete User
+                </button>
+              )}
+            </>
+          )}
+
+          {contextMenu.kind === 'uac_role_member' &&
+            contextMenu.uacUser &&
+            contextMenu.uacRoleId && (
+              <>
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#0f172a',
+                    fontWeight: 600,
+                  }}
+                  onClick={() => {
+                    const u = contextMenu.uacUser!;
+                    setContextMenu(null);
+                    setNav({ kind: 'uac_all_users' });
+                    setUacModalTrigger({ kind: 'inspect_user', userId: u.id, nonce: Date.now() });
+                  }}
+                >
+                  Inspect User
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    textAlign: 'left',
+                    padding: '6px 14px',
+                    border: 'none',
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    color: '#b91c1c',
+                    fontWeight: 600,
+                  }}
+                  onClick={async () => {
+                    const { uacUser, uacRoleId } = contextMenu;
+                    setContextMenu(null);
+                    try {
+                      const nextIds = uacUser!.roles
+                        .filter((r) => r.id !== uacRoleId)
+                        .map((r) => r.id);
+                      await invokeRpc('uac:setUserRoles', uacUser!.id, nextIds);
+                      await refreshUacState();
+                      showToast(`Removed @${uacUser!.username} from role.`);
+                    } catch (err) {
+                      showToast(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                >
+                  Remove from Role
+                </button>
+              </>
+            )}
         </div>
       )}
 

@@ -44,11 +44,13 @@ interface UploadPreviewPlan {
 }
 
 interface UploadMediaWizardModalProps {
+  approvalRequired?: boolean;
   onClose: () => void;
   onUploaded: () => void;
 }
 
 export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
+  approvalRequired = false,
   onClose,
   onUploaded,
 }) => {
@@ -594,11 +596,13 @@ export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
               >
                 {executing ? (
                   <>
-                    <RefreshCw size={13} /> Copying & Triggering *arr Scan...
+                    <RefreshCw size={13} />{' '}
+                    {approvalRequired ? 'Submitting for Approval...' : 'Copying & Triggering *arr Scan...'}
                   </>
                 ) : (
                   <>
-                    <Upload size={13} /> Upload to Share & Trigger *arr Import
+                    <Upload size={13} />{' '}
+                    {approvalRequired ? 'Submit for Approval' : 'Upload to Share & Trigger *arr Import'}
                   </>
                 )}
               </button>

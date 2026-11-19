@@ -728,3 +728,82 @@ export interface IndexProgress {
   videoAdded: number;
   metadataHydrated?: number;
 }
+
+export interface CallerMeResponse {
+  user: UserRecord | null;
+  username: string;
+  displayName: string;
+  roles: string[];
+  isGuest: boolean;
+  isSuperAdmin: boolean;
+  authSource: 'local-owner' | 'session' | 'authentik' | 'proxy-headers' | 'pin' | 'guest';
+  permissions: RolePermissions;
+}
+
+export interface PendingUploadRow {
+  id: number;
+  media_type: string;
+  title: string;
+  destination_path: string;
+  file_count: number;
+  arr_triggered: number;
+  approval_status: 'pending' | 'approved' | 'rejected';
+  requested_by_user_id: number | null;
+  requested_by_username: string;
+  staged_payload_json?: string;
+  reviewed_by_user_id?: number | null;
+  reviewed_at?: string | null;
+  rejection_reason?: string | null;
+  uploaded_at?: string;
+  created_at?: string;
+}
+
+export interface PendingStoreRequestRow {
+  id: number;
+  media_type: string;
+  title: string;
+  subtitle: string;
+  foreign_id: string;
+  service: string;
+  status: string;
+  payload_json?: string;
+  approval_status: 'pending' | 'approved' | 'rejected';
+  requested_by_user_id: number | null;
+  requested_by_username: string;
+  staged_payload_json?: string;
+  reviewed_by_user_id?: number | null;
+  reviewed_at?: string | null;
+  rejection_reason?: string | null;
+  requested_at?: string;
+  created_at?: string;
+}
+
+export interface PendingApprovalsPayload {
+  uploads: PendingUploadRow[];
+  storeRequests: PendingStoreRequestRow[];
+}
+
+export const DEFAULT_LOCAL_OWNER_PERMISSIONS: RolePermissions = {
+  libMusic: 2,
+  libMovies: 2,
+  libTvShows: 2,
+  libMusicVideos: 2,
+  libBooks: 2,
+  libAudiobooks: 2,
+  libPhotos: 2,
+  featEgenius: 2,
+  featGenreMap: 2,
+  featDevicesSync: 1,
+  localCacheTier: 2,
+  localCacheLimitMb: 0,
+  mediaUpload: 2,
+  storeRequest: 2,
+  playlists: 2,
+  approveUploads: 1,
+  approveStore: 1,
+  rescanLibrary: 1,
+  rebuildDb: 1,
+  manageApiKeys: 1,
+  viewServerLogs: 1,
+  manageUac: 1,
+};

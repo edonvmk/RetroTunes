@@ -14,27 +14,28 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
 
 ### Directory Layout
 - `src/` — **Renderer (React 19 + TypeScript + Vite)**
-  - `src/App.tsx` — Main three-pane Aqua shell (Source Sidebar, 3D Cover Flow + virtualized Track/Video/Book/Audiobook/Photo views, inset LCD playback header, bottom segmented capacity/sync status bar).
-  - `src/bridge.ts` — Typed IPC & HTTP fallback RPC client (`invokeRpc`, `subscribeEvent`).
-  - `src/types.ts` — Shared TypeScript interfaces (`TrackRow`, `VideoRow`, `BookRow`, `AudiobookRow`, `PhotoRow`, `NetworkShareRow`, `DeviceProfile`, `DeviceInfo`, `AppSettings`, `LogEntry`, `LogSubsystem`).
+  - `src/App.tsx` — Main three-pane Aqua shell (Source Sidebar incl. `ACCESS CONTROL`, 3D Cover Flow + virtualized Track/Video/Book/Audiobook/Photo views, inset LCD playback header, bottom segmented capacity/sync status bar, app-wide RBAC gating).
+  - `src/bridge.ts` — Typed IPC & HTTP fallback RPC client (`invokeRpc`, `subscribeEvent`, remote `uac:*` routing & live UAC SSE subscriptions).
+  - `src/types.ts` — Shared TypeScript interfaces (`TrackRow`, `VideoRow`, `BookRow`, `AudiobookRow`, `PhotoRow`, `NetworkShareRow`, `DeviceProfile`, `DeviceInfo`, `AppSettings`, `RolePermissions`, `CallerMeResponse`, `PendingApprovalsPayload`, `LogEntry`, `LogSubsystem`).
   - `src/styles/rtunes.css` — Late-2000s Snow Leopard Aqua & Brushed Metal CSS theme.
   - `src/components/`:
-    - `PreferencesModal.tsx` — Multi-tab Aqua Preferences (`Paths & Backend`, `NFS / SMB Shares`, `Devices`, `Cache & Transcoder`, `Authentik SSO`, `Store & API Keys`, `About & Credits`).
+    - `PreferencesModal.tsx` — Multi-tab Aqua Preferences (`Paths & Backend`, `NFS / SMB Shares`, `Devices`, `Cache & Transcoder` w/ Role Cache Quota badge, `Auth & Profile` w/ My Account & per-user ListenBrainz + gated Server Auth Gate, `Store & API Keys`, `Genre Map`, `Actions & Help`, `About & Credits`).
+    - `UacWorkspaceView.tsx` — Brushed-metal split-pane Access Control workspace (Role Policy Card Flow & Category Browser across all 22 `RolePermissions`, striped Role Members table, All Users Effective Access Inspector & Direct Overrides grid, Pending Approvals queue).
     - `AboutCreditsModal.tsx` — Dedicated **About RetroTunes & FOSS Credits** modal accessible from the app menu bar and toolbar.
     - `DeviceSummaryView.tsx` — Portable device summary, MTP storage pool selector, 1-click MTP migration, transcode settings, and segmented capacity bar.
     - `AddDeviceWizardModal.tsx` — Provisioning wizard for new UMS/MTP devices.
     - `SmartPlaylistModal.tsx` — Rule builder for dynamic Smart Playlists.
-    - `StorefrontView.tsx` — **rTunes Store**, Multi-Source Top Charts, and live `*arr` Downloads Queue.
+    - `StorefrontView.tsx` — **rTunes Store**, Multi-Source Top Charts, and live `*arr` Downloads Queue (with approval-mode CTA when `storeRequest === 1`).
     - `GenreMapTab.tsx` — ECU-style 2D Subgenre Adjacency Matrix heatmap editor, cell trim/lock controls, and Live Artist Scene Tester (hosted inside **Prefs -> Genre Map**).
-    - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import / approval staging.
+    - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import / approval staging (`Submit for Approval` mode).
     - `OnboardingAuthModals.tsx` — First-run Server Setup (`Label` master account), Unified Login/PIN/Reset-Code modal, and Client First-Run Onboarding wizard.
     - `DiagnosticsModal.tsx` — Live `> Logs` viewer and JSON diagnostic export.
 - `electron/` (compiles to `dist-electron/`) — **Electron Main Process & Headless Server (TypeScript)**
   - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, `--headless*` handoff, desktop GUI/USB IPC overrides (inside local-owner `CallerContext`), HTTP RPC fallback (`127.0.0.1:42815`), and `desktop-server` LAN HTTP server (`syncOptionalLanServer`).
   - `electron/preload.ts` — Context-isolated `rtunesElectron` bridge (`invoke`, `on`).
-  - `electron/rpcHandlers.ts` — Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`), `assertChannelPermission`, UAC/approval handlers (`uac:*`), and secret redaction.
+  - `electron/rpcHandlers.ts` — Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`), `assertChannelPermission`, UAC/approval handlers (`uac:*`), live `uac:permissions-updated` events, and secret redaction.
   - `electron/server.ts` — Headless `rTunes-Server` / `--headless-client` unified HTTP + SSE (`/events`) + JSON-RPC (`/rpc`) + multi-user auth/setup endpoints (`/api/auth/info`, `/api/auth/setup`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/reset-with-code`, `/api/auth/me`, `/api/auth/pin-login`) + RBAC enforcement (`401`/`403`) + multipart browser upload (`/api/upload-files`) + range media streaming (`/track`, `/video`, `/artwork`) + static `dist/` SPA server (`--no-web-ui` / `RTUNES_WEB_UI=false` opt-out, `PORT=3000`, `HOST=0.0.0.0` or `127.0.0.1`, `RTUNES_DATA_DIR=/config`, `RTUNES_MEDIA_DIR=/media`).
-  - `electron/db.ts` — Synchronous `better-sqlite3` + FTS5 5-domain DB initialization (`getCoreDb`, `getCacheDb`, `getVideoDb`, `getStoreDb`, `getUsersDb`), migrations, and `recalculateArtistPopularityScores`.
+  - `electron/db.ts` — Synchronous `better-sqlite3` + FTS5 5-domain DB initialization (`getCoreDb`, `getCacheDb`, `getVideoDb`, `getStoreDb`, `getUsersDb`), migrations, `emitPendingApprovalsUpdate`, and `recalculateArtistPopularityScores`.
   - `electron/settings.ts` — 4-profile runtime mode resolution (`resolveAppMode`), `redactSettingsForCaller`, salted `scryptSync` local PIN hashing, settings persistence in SQLite + OS Keychain / `safeStorage`.
   - `electron/logger.ts` — Ring-buffered, date/time-stamped structured logger + file rotation.
   - `electron/indexer.ts` — Phased background library scanner, on-demand/hybrid metadata hydration, ListenBrainz popularity, TVMaze/IMDb artwork, Plex/Audiobookshelf progress sync, and profile-aware `reconcileBackgroundWatchers` / `stopBackgroundWatchers`.

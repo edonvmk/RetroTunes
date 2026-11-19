@@ -1115,20 +1115,48 @@ export function registerCoreRpcHandlers(
   );
 
   registerChannel('uac:listUsers', () => listUsers());
-  registerChannel('uac:createUser', (input: any) => createUser(input));
-  registerChannel('uac:updateUser', (userId: number, patch: any) => updateUser(userId, patch));
-  registerChannel('uac:deleteUser', (userId: number) => deleteUser(userId));
+  registerChannel('uac:createUser', async (input: any) => {
+    const res = await createUser(input);
+    emitRendererEvent('uac:permissions-updated', { userId: res.id });
+    return res;
+  });
+  registerChannel('uac:updateUser', async (userId: number, patch: any) => {
+    const res = await updateUser(userId, patch);
+    emitRendererEvent('uac:permissions-updated', { userId });
+    return res;
+  });
+  registerChannel('uac:deleteUser', (userId: number) => {
+    const res = deleteUser(userId);
+    emitRendererEvent('uac:permissions-updated', { userId });
+    return res;
+  });
   registerChannel('uac:generateResetCode', (userId: number) => generateResetCode(userId));
   registerChannel('uac:listRoles', () => listRoles());
-  registerChannel('uac:createRole', (input: any) => createRole(input));
-  registerChannel('uac:updateRole', (roleId: number, patch: any) => updateRole(roleId, patch));
-  registerChannel('uac:deleteRole', (roleId: number) => deleteRole(roleId));
-  registerChannel('uac:setUserRoles', (userId: number, roleIds: number[]) =>
-    setUserRoles(userId, roleIds)
-  );
-  registerChannel('uac:setUserOverrides', (userId: number, overrides: Partial<RolePermissions> | null) =>
-    setUserOverrides(userId, overrides)
-  );
+  registerChannel('uac:createRole', (input: any) => {
+    const res = createRole(input);
+    emitRendererEvent('uac:permissions-updated', { roleId: res.id });
+    return res;
+  });
+  registerChannel('uac:updateRole', (roleId: number, patch: any) => {
+    const res = updateRole(roleId, patch);
+    emitRendererEvent('uac:permissions-updated', { roleId });
+    return res;
+  });
+  registerChannel('uac:deleteRole', (roleId: number) => {
+    const res = deleteRole(roleId);
+    emitRendererEvent('uac:permissions-updated', { roleId });
+    return res;
+  });
+  registerChannel('uac:setUserRoles', (userId: number, roleIds: number[]) => {
+    const res = setUserRoles(userId, roleIds);
+    emitRendererEvent('uac:permissions-updated', { userId });
+    return res;
+  });
+  registerChannel('uac:setUserOverrides', (userId: number, overrides: Partial<RolePermissions> | null) => {
+    const res = setUserOverrides(userId, overrides);
+    emitRendererEvent('uac:permissions-updated', { userId });
+    return res;
+  });
 
   registerChannel('uac:listPendingApprovals', () => {
     const caller = getCallerContext();

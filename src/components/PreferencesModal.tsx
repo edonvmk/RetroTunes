@@ -17,15 +17,19 @@ import {
   AppSettings,
   AuthMode,
   AuthState,
+  CallerMeResponse,
   ConnectionTestResult,
+  DEFAULT_LOCAL_OWNER_PERMISSIONS,
   NetworkShareRow,
   RemoteAuthInfo,
+  RolePermissions,
   RuntimeModeInfo,
   ServerSidebarVisibility,
 } from '../types';
 import {
   invokeRpc,
   loginWithPin,
+  logoutServerSession,
   probeRemoteServerAuth,
   resetSharedEventSource,
   setConfiguredRemoteServerUrl,
@@ -37,6 +41,9 @@ import { GenreMapTab } from './GenreMapTab';
 interface PreferencesModalProps {
   settings: AppSettings;
   authState: AuthState;
+  callerMe?: CallerMeResponse | null;
+  effectivePermissions?: RolePermissions;
+  isServerContext?: boolean;
   onClose: () => void;
   onSaved: (updated: AppSettings) => void;
   onAuthChanged: (auth: AuthState) => void;
@@ -47,12 +54,18 @@ interface PreferencesModalProps {
   onOpenNewSmartPlaylist?: () => void;
   onRescanLibrary?: () => void;
   onDevicesChanged?: () => void;
+  onOpenUac?: () => void;
+  onProfileUpdated?: () => void;
+  onSignedOut?: () => void;
   initialTab?: 'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'genreMap' | 'actions' | 'about';
 }
 
 export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   settings,
   authState,
+  callerMe,
+  effectivePermissions,
+  isServerContext = false,
   onClose,
   onSaved,
   onAuthChanged,
@@ -63,6 +76,9 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   onOpenNewSmartPlaylist,
   onRescanLibrary,
   onDevicesChanged,
+  onOpenUac,
+  onProfileUpdated,
+  onSignedOut,
   initialTab,
 }) => {
   const [tab, setTab] = useState<'paths' | 'shares' | 'devices' | 'cache' | 'auth' | 'apis' | 'genreMap' | 'actions' | 'about'>(initialTab || 'paths');
@@ -130,6 +146,34 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   const [remotePinInput, setRemotePinInput] = React.useState('');
   const [remotePinStatus, setRemotePinStatus] = React.useState<string | null>(null);
 
+  const [profileDisplayName, setProfileDisplayName] = useState(callerMe?.user?.displayName || '');
+  const [profileEmail, setProfileEmail] = useState(callerMe?.user?.email || '');
+  const [profilePhone, setProfilePhone] = useState(callerMe?.user?.phone || '');
+  const [curPassword, setCurPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [profileBusy, setProfileBusy] = useState(false);
+
+  React.useEffect(() => {
+    if (callerMe?.user) {
+      setProfileDisplayName(callerMe.user.displayName || '');
+      setProfileEmail(callerMe.user.email || '');
+      setProfilePhone(callerMe.user.phone || '');
+      if (callerMe.user.listenbrainzUsername) {
+        setForm((prev) => ({
+          ...prev,
+          listenbrainzUsername: callerMe.user!.listenbrainzUsername,
+        }));
+      }
+    }
+  }, [
+    callerMe?.user?.id,
+    callerMe?.user?.displayName,
+    callerMe?.user?.email,
+    callerMe?.user?.phone,
+    callerMe?.user?.listenbrainzUsername,
+  ]);
+
   React.useEffect(() => {
     void loadShares();
     invokeRpc<RuntimeModeInfo>('system:runtimeInfo')
@@ -157,21 +201,31 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   const isHeadlessServer = effectiveAppMode === 'headless-server';
   const isClientRole = !isServerRole;
   const isRemoteClient = isClientRole && form.clientSource === 'remote';
+  const perms = effectivePermissions || DEFAULT_LOCAL_OWNER_PERMISSIONS;
+  const canManageUac = Boolean(callerMe?.isSuperAdmin || perms.manageUac >= 1);
 
   const visibleTabs = [
     { id: 'paths' as const, label: 'Profile & Paths', icon: <FolderOpen size={18} /> },
     ...(!isRemoteClient && !(isHeadlessServer && form.serverSidebarVisibility?.networkShares === false)
       ? [{ id: 'shares' as const, label: 'NFS / SMB Shares', icon: <HardDrive size={18} /> }]
       : []),
-    ...(!(isHeadlessServer && form.serverSidebarVisibility?.devices === false)
+    ...(!(isHeadlessServer && form.serverSidebarVisibility?.devices === false) &&
+    !(isServerContext && perms.featDevicesSync === 0)
       ? [{ id: 'devices' as const, label: 'Devices', icon: <Usb size={18} /> }]
       : []),
-    { id: 'cache' as const, label: 'Cache & Transcoder', icon: <HardDrive size={18} /> },
-    ...(isServerRole || isRemoteClient
-      ? [{ id: 'auth' as const, label: 'Auth & Security', icon: <ShieldCheck size={18} /> }]
+    ...(!(isServerContext && perms.localCacheTier === 0)
+      ? [{ id: 'cache' as const, label: 'Cache & Transcoder', icon: <HardDrive size={18} /> }]
       : []),
-    { id: 'apis' as const, label: 'Store & API Keys', icon: <KeyRound size={18} /> },
-    ...(!(isServerRole && form.serverSidebarVisibility?.genreMap === false)
+    {
+      id: 'auth' as const,
+      label: isServerRole || isRemoteClient || isServerContext ? 'Auth & Profile' : 'Profile & ListenBrainz',
+      icon: <ShieldCheck size={18} />,
+    },
+    ...(!(isServerContext && perms.manageApiKeys === 0)
+      ? [{ id: 'apis' as const, label: 'Store & API Keys', icon: <KeyRound size={18} /> }]
+      : []),
+    ...(!(isServerRole && form.serverSidebarVisibility?.genreMap === false) &&
+    !(isServerContext && perms.featGenreMap === 0)
       ? [{ id: 'genreMap' as const, label: 'Genre Map', icon: <Grid size={18} /> }]
       : []),
     { id: 'actions' as const, label: 'Actions & Help', icon: <Activity size={18} /> },
@@ -182,7 +236,18 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     if (!visibleTabs.some((item) => item.id === tab)) {
       setTab('paths');
     }
-  }, [isServerRole, isHeadlessServer, isRemoteClient, form.serverSidebarVisibility, tab]);
+  }, [
+    isServerRole,
+    isHeadlessServer,
+    isRemoteClient,
+    isServerContext,
+    perms.featDevicesSync,
+    perms.localCacheTier,
+    perms.manageApiKeys,
+    perms.featGenreMap,
+    form.serverSidebarVisibility,
+    tab,
+  ]);
 
   const updateField = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -1086,9 +1151,26 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
 
           {tab === 'cache' && (
             <div className="epod-capacity-card">
-              <strong style={{ display: 'block', marginBottom: 12 }}>
-                Local SSD Pre-Cache Quota & Hardware Acceleration (Section 3)
-              </strong>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8, flexWrap: 'wrap' }}>
+                <strong>
+                  Local SSD Pre-Cache Quota &amp; Hardware Acceleration (Section 3)
+                </strong>
+                {isServerContext && perms.localCacheTier === 1 && (
+                  <span
+                    style={{
+                      fontSize: 10.5,
+                      fontWeight: 700,
+                      color: '#92400e',
+                      background: '#fef3c7',
+                      border: '1px solid #fcd34d',
+                      borderRadius: 10,
+                      padding: '2px 8px',
+                    }}
+                  >
+                    Role Cache Quota: Capped at {perms.localCacheLimitMb} MB
+                  </span>
+                )}
+              </div>
 
               <div style={{ marginBottom: 16 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -1333,60 +1415,312 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
           )}
 
           {tab === 'auth' && (
-            <div className="epod-capacity-card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <strong>Server Authentication &amp; Security Gate</strong>
-                {form.authMode === 'authentik' && (
-                  <button className="aqua-btn" onClick={() => runTest('authentik')}>
-                    <Activity size={13} /> Test OIDC Discovery
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* My Account, ListenBrainz & Password */}
+              <div className="epod-capacity-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <strong>My Account &amp; Profile</strong>
+                    {(callerMe?.roles || []).map((r) => (
+                      <span
+                        key={r}
+                        style={{
+                          fontSize: 10,
+                          fontWeight: 700,
+                          padding: '1px 7px',
+                          borderRadius: 9,
+                          background: '#dbeafe',
+                          color: '#1e40af',
+                        }}
+                      >
+                        {r}
+                      </span>
+                    ))}
+                  </div>
+                  {isServerContext && callerMe?.authSource !== 'local-owner' && (
+                    <button
+                      type="button"
+                      className="aqua-btn"
+                      style={{ color: '#991b1b' }}
+                      onClick={async () => {
+                        await logoutServerSession(form.dockerServerUrl || undefined);
+                        onSignedOut?.();
+                        onClose();
+                      }}
+                    >
+                      Sign Out
+                    </button>
+                  )}
+                </div>
+
+                {callerMe?.user ? (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 12 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                        Display Name (@{callerMe.username}):
+                      </label>
+                      <input
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={profileDisplayName}
+                        onChange={(e) => setProfileDisplayName(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                        Email:
+                      </label>
+                      <input
+                        type="email"
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={profileEmail}
+                        onChange={(e) => setProfileEmail(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                        Phone:
+                      </label>
+                      <input
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={profilePhone}
+                        onChange={(e) => setProfilePhone(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 11.5, color: '#475569', marginBottom: 10 }}>
+                    Signed in as <strong>{callerMe?.displayName || 'Local Owner'}</strong> ({callerMe?.authSource || 'local-owner'}).
+                  </div>
+                )}
+
+                {/* Per-User ListenBrainz Credentials */}
+                <div style={{ paddingTop: 10, borderTop: '1px solid #dce2ec', marginBottom: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                    <strong style={{ fontSize: 12 }}>
+                      ListenBrainz (Personal Scrobbling &amp; Two-Way Loved Feedback)
+                    </strong>
+                    <button type="button" className="aqua-btn" onClick={() => runTest('listenbrainz')}>
+                      <Activity size={13} /> Test Token
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                        User Token (Saved {callerMe?.user ? 'to your profile' : `in ${credentialStoreLabel}`}):
+                      </label>
+                      <input
+                        type="password"
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        placeholder={
+                          callerMe?.user?.hasListenbrainzToken
+                            ? 'Token saved to your profile — enter a new UUID to replace'
+                            : 'UUID Token from listenbrainz.org/settings'
+                        }
+                        value={form.listenbrainzToken}
+                        onChange={(e) => updateField('listenbrainzToken', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                        Username:
+                      </label>
+                      <input
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={form.listenbrainzUsername}
+                        onChange={(e) => updateField('listenbrainzUsername', e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  {renderTestBadge('listenbrainz')}
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: callerMe?.user ? 10 : 0 }}>
+                  <button
+                    type="button"
+                    className="aqua-btn primary"
+                    disabled={profileBusy}
+                    onClick={async () => {
+                      setProfileBusy(true);
+                      try {
+                        await invokeRpc('uac:updateMyProfile', {
+                          ...(callerMe?.user
+                            ? {
+                                displayName: profileDisplayName.trim(),
+                                email: profileEmail.trim(),
+                                phone: profilePhone.trim(),
+                              }
+                            : {}),
+                          listenbrainzUsername: form.listenbrainzUsername.trim(),
+                          ...(form.listenbrainzToken.trim()
+                            ? { listenbrainzToken: form.listenbrainzToken.trim() }
+                            : {}),
+                        });
+                        onProfileUpdated?.();
+                        setStatusBanner('Saved your account profile and ListenBrainz settings.');
+                      } catch (err) {
+                        setStatusBanner(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setProfileBusy(false);
+                      }
+                    }}
+                  >
+                    Save Profile &amp; ListenBrainz
                   </button>
+                </div>
+
+                {callerMe?.user && (
+                  <div style={{ paddingTop: 10, borderTop: '1px solid #dce2ec' }}>
+                    {callerMe.user.authentikSub ? (
+                      <div style={{ fontSize: 11.5, color: '#475569' }}>
+                        <strong>Password &amp; MFA:</strong> Managed externally via Authentik SSO (@{callerMe.username}).
+                      </div>
+                    ) : (
+                      <div>
+                        <strong style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
+                          Change Password
+                        </strong>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 8, alignItems: 'end' }}>
+                          <div>
+                            <label style={{ display: 'block', fontSize: 10.5, fontWeight: 600, marginBottom: 2 }}>
+                              Current Password
+                            </label>
+                            <input
+                              type="password"
+                              className="aqua-input"
+                              style={{ width: '100%' }}
+                              value={curPassword}
+                              onChange={(e) => setCurPassword(e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label style={{ display: 'block', fontSize: 10.5, fontWeight: 600, marginBottom: 2 }}>
+                              New Password
+                            </label>
+                            <input
+                              type="password"
+                              className="aqua-input"
+                              style={{ width: '100%' }}
+                              value={newPassword}
+                              onChange={(e) => setNewPassword(e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label style={{ display: 'block', fontSize: 10.5, fontWeight: 600, marginBottom: 2 }}>
+                              Confirm New
+                            </label>
+                            <input
+                              type="password"
+                              className="aqua-input"
+                              style={{ width: '100%' }}
+                              value={confirmPassword}
+                              onChange={(e) => setConfirmPassword(e.target.value)}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            className="aqua-btn"
+                            disabled={profileBusy || !curPassword || newPassword.length < 4}
+                            onClick={async () => {
+                              if (newPassword !== confirmPassword) {
+                                setStatusBanner('New passwords do not match.');
+                                return;
+                              }
+                              setProfileBusy(true);
+                              try {
+                                await invokeRpc('uac:changeMyPassword', curPassword, newPassword);
+                                setCurPassword('');
+                                setNewPassword('');
+                                setConfirmPassword('');
+                                setStatusBanner('Password updated successfully.');
+                              } catch (err) {
+                                setStatusBanner(err instanceof Error ? err.message : String(err));
+                              } finally {
+                                setProfileBusy(false);
+                              }
+                            }}
+                          >
+                            Update Password
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
 
-              {isServerRole && (
-                <div style={{ marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid #d5dce6' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(form.authGateEnabled)}
-                      onChange={(e) => updateField('authGateEnabled', e.target.checked)}
-                    />
-                    <span>Enable Authentication Gate on Server HTTP API, SSE &amp; Media Endpoints</span>
-                  </label>
-                  <div style={{ fontSize: 11, color: '#475569', marginTop: 4, marginLeft: 22 }}>
-                    When enabled (and Auth Mode is not Standalone), `/rpc`, `/events`, and `/track` / `/video` / `/artwork` require valid credentials. `/api/health`, `/api/auth/info`, and `/api/auth/pin-login` remain reachable for client discovery and unlock.
+              {((isServerRole && canManageUac) || isRemoteClient) && (
+                <div className="epod-capacity-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8, flexWrap: 'wrap' }}>
+                    <strong>Server Authentication &amp; Security Gate</strong>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      {isServerContext && canManageUac && onOpenUac && (
+                        <button
+                          type="button"
+                          className="aqua-btn primary"
+                          onClick={() => onOpenUac()}
+                        >
+                          Manage Users, Roles &amp; Approvals...
+                        </button>
+                      )}
+                      {form.authMode === 'authentik' && (
+                        <button className="aqua-btn" onClick={() => runTest('authentik')}>
+                          <Activity size={13} /> Test OIDC Discovery
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
 
-              <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>Authentication Mode:</label>
-                <select
-                  className="aqua-input"
-                  style={{ width: '100%' }}
-                  value={form.authMode || 'standalone'}
-                  onChange={(e) => updateField('authMode', e.target.value as AuthMode)}
-                >
-                  <option value="standalone">Standalone / Open (No login gate)</option>
-                  <option value="local-accounts">Multi-User Local Accounts (Label / Band / Roadie + Roles)</option>
-                  <option value="local-pin">Local Access PIN (Salted scrypt + Bearer Token)</option>
-                  <option value="authentik">Authentik SSO + Homelab Gateway (OAuth2 PKCE JWT)</option>
-                  <option value="proxy-headers">Reverse Proxy Trusted Header (Traefik / Nginx / Authentik ForwardAuth)</option>
-                </select>
-              </div>
+                  {isServerRole && canManageUac && (
+                    <div style={{ marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid #d5dce6' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(form.authGateEnabled)}
+                          onChange={(e) => updateField('authGateEnabled', e.target.checked)}
+                        />
+                        <span>Enable Authentication Gate on Server HTTP API, SSE &amp; Media Endpoints</span>
+                      </label>
+                      <div style={{ fontSize: 11, color: '#475569', marginTop: 4, marginLeft: 22 }}>
+                        When enabled (and Auth Mode is not Standalone), `/rpc`, `/events`, and `/track` / `/video` / `/artwork` require valid credentials. `/api/health`, `/api/auth/info`, and `/api/auth/pin-login` remain reachable for client discovery and unlock.
+                      </div>
+                    </div>
+                  )}
 
-              {isServerRole && (
-                <div style={{ marginBottom: 12 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(form.allowGuestRoadie)}
-                      onChange={(e) => updateField('allowGuestRoadie', e.target.checked)}
-                    />
-                    <span>Allow unauthenticated Guest LAN playback with Roadie (read-only) permissions</span>
-                  </label>
-                </div>
-              )}
+                  {isServerRole && canManageUac && (
+                    <>
+                      <div style={{ marginBottom: 12 }}>
+                        <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>Authentication Mode:</label>
+                        <select
+                          className="aqua-input"
+                          style={{ width: '100%' }}
+                          value={form.authMode || 'standalone'}
+                          onChange={(e) => updateField('authMode', e.target.value as AuthMode)}
+                        >
+                          <option value="standalone">Standalone / Open (No login gate)</option>
+                          <option value="local-accounts">Multi-User Local Accounts (Label / Band / Roadie + Roles)</option>
+                          <option value="local-pin">Local Access PIN (Salted scrypt + Bearer Token)</option>
+                          <option value="authentik">Authentik SSO + Homelab Gateway (OAuth2 PKCE JWT)</option>
+                          <option value="proxy-headers">Reverse Proxy Trusted Header (Traefik / Nginx / Authentik ForwardAuth)</option>
+                        </select>
+                      </div>
+
+                      <div style={{ marginBottom: 12 }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(form.allowGuestRoadie)}
+                            onChange={(e) => updateField('allowGuestRoadie', e.target.checked)}
+                          />
+                          <span>Allow unauthenticated Guest LAN playback with Roadie (read-only) permissions</span>
+                        </label>
+                      </div>
+                    </>
+                  )}
 
               {form.authMode === 'local-pin' && (
                 <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: '#f8fafc', border: '1px solid #cbd5e1' }}>
@@ -1524,48 +1858,13 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   </div>
                 </>
               )}
+                </div>
+              )}
             </div>
           )}
 
           {tab === 'apis' && (
             <>
-              {/* ListenBrainz */}
-              <div className="epod-capacity-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <strong>ListenBrainz (Popularity Normalization & Two-Way Loved Feedback)</strong>
-                  <button className="aqua-btn" onClick={() => runTest('listenbrainz')}>
-                    <Activity size={13} /> Test Token
-                  </button>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
-                      User Token (Saved in {credentialStoreLabel}):
-                    </label>
-                    <input
-                      type="password"
-                      className="aqua-input"
-                      style={{ width: '100%' }}
-                      placeholder="UUID Token from listenbrainz.org/settings"
-                      value={form.listenbrainzToken}
-                      onChange={(e) => updateField('listenbrainzToken', e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
-                      Username:
-                    </label>
-                    <input
-                      className="aqua-input"
-                      style={{ width: '100%' }}
-                      value={form.listenbrainzUsername}
-                      onChange={(e) => updateField('listenbrainzUsername', e.target.value)}
-                    />
-                  </div>
-                </div>
-                {renderTestBadge('listenbrainz')}
-              </div>
-
               {/* Lidarr, Radarr, Sonarr */}
               {[
                 {
@@ -1973,44 +2272,56 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   Quick access to RetroTunes library, playlist, diagnostics, and help commands.
                 </p>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
-                  <button className="aqua-btn primary" onClick={() => onOpenUpload?.()}>
-                    Import / Upload Media...
-                  </button>
-                  <button
-                    className="aqua-btn"
-                    onClick={() => {
-                      onRescanLibrary?.();
-                      setStatusBanner('Background library scan triggered.');
-                    }}
-                  >
-                    Rescan Library Now
-                  </button>
-                  <button
-                    className="aqua-btn"
-                    style={{ color: '#b91c1c' }}
-                    onClick={async () => {
-                      if (
-                        !window.confirm(
-                          'Rebuild Media Database? This clears all indexed tracks, videos, books, photos, and FTS5 caches, then re-scans your configured folders from scratch. Settings, shares, devices, and playlists are preserved.'
-                        )
-                      ) {
-                        return;
-                      }
-                      await invokeRpc('db:rebuild');
-                      setStatusBanner('Database rebuilt and full background re-scan started.');
-                    }}
-                  >
-                    Rebuild Media Database...
-                  </button>
-                  <button className="aqua-btn" onClick={() => onOpenNewPlaylist?.()}>
-                    New Playlist...
-                  </button>
-                  <button className="aqua-btn" onClick={() => onOpenNewSmartPlaylist?.()}>
-                    New Smart Playlist...
-                  </button>
-                  <button className="aqua-btn" onClick={() => onOpenDiagnostics?.()}>
-                    Open Live Logs &amp; Diagnostics
-                  </button>
+                  {!(isServerContext && perms.mediaUpload === 0) && (
+                    <button className="aqua-btn primary" onClick={() => onOpenUpload?.()}>
+                      Import / Upload Media...
+                    </button>
+                  )}
+                  {!(isServerContext && perms.rescanLibrary === 0) && (
+                    <button
+                      className="aqua-btn"
+                      onClick={() => {
+                        onRescanLibrary?.();
+                        setStatusBanner('Background library scan triggered.');
+                      }}
+                    >
+                      Rescan Library Now
+                    </button>
+                  )}
+                  {!(isServerContext && perms.rebuildDb === 0) && (
+                    <button
+                      className="aqua-btn"
+                      style={{ color: '#b91c1c' }}
+                      onClick={async () => {
+                        if (
+                          !window.confirm(
+                            'Rebuild Media Database? This clears all indexed tracks, videos, books, photos, and FTS5 caches, then re-scans your configured folders from scratch. Settings, shares, devices, and playlists are preserved.'
+                          )
+                        ) {
+                          return;
+                        }
+                        await invokeRpc('db:rebuild');
+                        setStatusBanner('Database rebuilt and full background re-scan started.');
+                      }}
+                    >
+                      Rebuild Media Database...
+                    </button>
+                  )}
+                  {!(isServerContext && perms.playlists === 0) && (
+                    <>
+                      <button className="aqua-btn" onClick={() => onOpenNewPlaylist?.()}>
+                        New Playlist...
+                      </button>
+                      <button className="aqua-btn" onClick={() => onOpenNewSmartPlaylist?.()}>
+                        New Smart Playlist...
+                      </button>
+                    </>
+                  )}
+                  {!(isServerContext && perms.viewServerLogs === 0) && (
+                    <button className="aqua-btn" onClick={() => onOpenDiagnostics?.()}>
+                      Open Live Logs &amp; Diagnostics
+                    </button>
+                  )}
                   <button className="aqua-btn" onClick={() => onOpenAbout?.()}>
                     About RetroTunes &amp; Credits
                   </button>

@@ -1876,3 +1876,32 @@ export function rebuildMediaDatabase(): { ok: boolean } {
   logger.info('DB', 'Media databases cleared and FTS5 indexes rebuilt.');
   return { ok: true };
 }
+
+export function getPendingApprovalTotal(): number {
+  try {
+    const storeDb = getStoreDb();
+    const uploadsPending = Number(
+      (
+        storeDb
+          .prepare("SELECT COUNT(*) AS cnt FROM upload_history WHERE approval_status = 'pending'")
+          .get() as { cnt?: number } | undefined
+      )?.cnt || 0
+    );
+    const storePending = Number(
+      (
+        storeDb
+          .prepare("SELECT COUNT(*) AS cnt FROM store_requests WHERE approval_status = 'pending'")
+          .get() as { cnt?: number } | undefined
+      )?.cnt || 0
+    );
+    return uploadsPending + storePending;
+  } catch {
+    return 0;
+  }
+}
+
+export function emitPendingApprovalsUpdate(): number {
+  const pendingCount = getPendingApprovalTotal();
+  emitRendererEvent('uac:approvals-updated', { pendingCount });
+  return pendingCount;
+}

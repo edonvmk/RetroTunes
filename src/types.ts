@@ -616,6 +616,7 @@ export interface AppSettings {
   lanServerPort?: number;
   desktopServerWebUiEnabled?: boolean;
   desktopServerAutoOpenWebUi?: boolean;
+  headlessAutoOpenBrowser?: boolean;
   serverSidebarVisibility: ServerSidebarVisibility;
   backgroundWatchers: boolean;
 

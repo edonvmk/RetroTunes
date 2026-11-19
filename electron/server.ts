@@ -771,9 +771,6 @@ function applyContainerMediaDefaults(): void {
 }
 
 export async function bootHeadlessServer(): Promise<void> {
-  if (!resolveAppMode().isHeadless) {
-    process.env.RTUNES_MODE = 'headless-server';
-  }
   initDatabase();
   ensureRbacSeeded();
   const bootstrappedEnvAdmin = await bootstrapEnvAdminIfNeeded();
@@ -784,6 +781,9 @@ export async function bootHeadlessServer(): Promise<void> {
       authMode: 'local-accounts',
       hasCompletedOnboarding: true,
     });
+  }
+  if (!resolveAppMode(initialSettings.appMode).isHeadless) {
+    process.env.RTUNES_MODE = 'headless-server';
   }
   const runtime = resolveAppMode(initialSettings.appMode);
   const isServerRole = isServerProfile(runtime.appMode);
@@ -814,7 +814,11 @@ export async function bootHeadlessServer(): Promise<void> {
   });
   activePort = started.port;
 
-  if (runtime.webUiEnabled && runtime.autoOpenBrowserOnHeadless) {
+  const shouldAutoOpen =
+    runtime.webUiEnabled &&
+    runtime.autoOpenBrowserOnHeadless &&
+    initialSettings.headlessAutoOpenBrowser !== false;
+  if (shouldAutoOpen) {
     const browserHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
     const browserUrl = `http://${browserHost}:${started.port}`;
     logger.info('SYSTEM', `Auto-launching ${runtime.appMode} Web UI in browser: ${browserUrl}`);

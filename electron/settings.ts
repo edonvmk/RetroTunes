@@ -94,6 +94,11 @@ export function resolveAppMode(
     argv.includes('--no-web-ui') ||
     process.env.RTUNES_WEB_UI === 'false' ||
     process.env.RTUNES_WEB_UI === '0';
+  const explicitOpenBrowser =
+    argv.includes('--open-browser') ||
+    argv.includes('--open-web-ui') ||
+    process.env.RTUNES_OPEN_BROWSER === 'true' ||
+    process.env.RTUNES_OPEN_BROWSER === '1';
   const noOpenBrowser =
     argv.includes('--no-open-browser') ||
     argv.includes('--no-browser') ||
@@ -156,16 +161,23 @@ export function resolveAppMode(
     };
   }
 
-  const appMode: AppProfile = storedMode === 'desktop-server' ? 'desktop-server' : 'client';
+  const appMode: AppProfile =
+    storedMode === 'desktop-server' ||
+    storedMode === 'headless-server' ||
+    storedMode === 'headless-client'
+      ? storedMode
+      : 'client';
+  const isHeadless = appMode === 'headless-server' || appMode === 'headless-client';
+  const isServerRole = appMode === 'desktop-server' || appMode === 'headless-server';
   return {
     appMode,
     isModeLocked: false,
     lockReason: null,
     isDocker: false,
-    isHeadless: false,
-    isServerRole: appMode === 'desktop-server',
-    webUiEnabled: appMode === 'desktop-server' && !webUiDisabled,
-    autoOpenBrowserOnHeadless: false,
+    isHeadless,
+    isServerRole,
+    webUiEnabled: (isServerRole || isHeadless) && !webUiDisabled,
+    autoOpenBrowserOnHeadless: isHeadless ? !webUiDisabled && !noOpenBrowser : explicitOpenBrowser,
     cliHost,
     cliPort,
   };
@@ -240,6 +252,7 @@ export interface AppSettings {
   lanServerPort?: number;
   desktopServerWebUiEnabled?: boolean;
   desktopServerAutoOpenWebUi?: boolean;
+  headlessAutoOpenBrowser?: boolean;
   serverSidebarVisibility: ServerSidebarVisibility;
   backgroundWatchers: boolean;
 
@@ -412,6 +425,7 @@ export function getDefaultSettings(): AppSettings {
     lanServerPort: 3000,
     desktopServerWebUiEnabled: true,
     desktopServerAutoOpenWebUi: false,
+    headlessAutoOpenBrowser: true,
     serverSidebarVisibility: getDefaultServerSidebarVisibility(runtime.appMode),
     backgroundWatchers: true,
 
@@ -513,7 +527,12 @@ export function getSettings(forceReload = false): AppSettings {
 
   let legacyInferredMode: AppProfile | undefined;
   let legacyInferredRemote = false;
-  if (stored.appMode === 'desktop-server' || stored.appMode === 'client') {
+  if (
+    stored.appMode === 'desktop-server' ||
+    stored.appMode === 'client' ||
+    stored.appMode === 'headless-client' ||
+    stored.appMode === 'headless-server'
+  ) {
     legacyInferredMode = stored.appMode;
   } else if (stored.enableLanServerMode === true || stored.backendMode === 'host_server') {
     legacyInferredMode = 'desktop-server';
@@ -674,12 +693,12 @@ export function saveSettings(partial: Partial<AppSettings>): AppSettings {
     }
     delete sanitized.appMode;
   } else if (sanitized.appMode !== undefined) {
-    if (sanitized.appMode === 'headless-client' || sanitized.appMode === 'headless-server') {
-      logger.warn('SYSTEM', 'Refused persisting CLI-only headless profile in GUI settings.', {
-        requested: sanitized.appMode,
-      });
-      delete sanitized.appMode;
-    } else if (sanitized.appMode !== 'client' && sanitized.appMode !== 'desktop-server') {
+    if (
+      sanitized.appMode !== 'client' &&
+      sanitized.appMode !== 'desktop-server' &&
+      sanitized.appMode !== 'headless-client' &&
+      sanitized.appMode !== 'headless-server'
+    ) {
       sanitized.appMode = 'client';
     }
   }

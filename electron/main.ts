@@ -162,9 +162,22 @@ function registerAllHandlers() {
 
   // --- Settings save triggers live LAN host server start/stop + watcher reconciliation ---
   registerChannel('settings:save', (partial) => {
+    const prevMode = getSettings().appMode;
     const saved = saveSettings(partial);
-    syncOptionalLanServer(saved);
+    syncOptionalLanServer(saved, {
+      modeJustChanged: prevMode !== saved.appMode,
+    });
     reconcileBackgroundWatchers(saved.appMode);
+    if (
+      prevMode !== saved.appMode &&
+      (saved.appMode === 'headless-client' || saved.appMode === 'headless-server')
+    ) {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.close();
+        }
+      }
+    }
     return saved;
   });
 
@@ -180,11 +193,21 @@ let activeLanServer: {
   serveStaticDist: boolean;
 } | null = null;
 
-function syncOptionalLanServer(settings = getSettings(), options: { isInitialBoot?: boolean } = {}) {
-  const shouldRun = settings.appMode === 'desktop-server';
+function syncOptionalLanServer(
+  settings = getSettings(),
+  options: { isInitialBoot?: boolean; modeJustChanged?: boolean } = {}
+) {
+  const isHeadlessMode =
+    settings.appMode === 'headless-client' || settings.appMode === 'headless-server';
+  const shouldRun = settings.appMode === 'desktop-server' || isHeadlessMode;
   const desiredPort = Number(settings.lanServerPort) || 3000;
   const runtime = resolveAppMode(settings.appMode);
-  const serveStaticDist = runtime.webUiEnabled && settings.desktopServerWebUiEnabled !== false;
+  const serveStaticDist = isHeadlessMode
+    ? runtime.webUiEnabled
+    : runtime.webUiEnabled && settings.desktopServerWebUiEnabled !== false;
+  const host =
+    runtime.cliHost || (settings.appMode === 'headless-client' ? '127.0.0.1' : '0.0.0.0');
+  const enforceAuthGate = settings.appMode === 'desktop-server' || settings.appMode === 'headless-server';
 
   if (!shouldRun) {
     if (activeLanServer) {
@@ -195,11 +218,26 @@ function syncOptionalLanServer(settings = getSettings(), options: { isInitialBoo
     return;
   }
 
+  const shouldOpenBrowserNow =
+    serveStaticDist &&
+    ((isHeadlessMode &&
+      (options.isInitialBoot || options.modeJustChanged) &&
+      runtime.autoOpenBrowserOnHeadless &&
+      settings.headlessAutoOpenBrowser !== false) ||
+      (settings.appMode === 'desktop-server' &&
+        (options.isInitialBoot || options.modeJustChanged) &&
+        Boolean(settings.desktopServerAutoOpenWebUi)));
+
   if (
     activeLanServer &&
     activeLanServer.port === desiredPort &&
     activeLanServer.serveStaticDist === serveStaticDist
   ) {
+    if (shouldOpenBrowserNow) {
+      const browserUrl = `http://127.0.0.1:${activeLanServer.port}`;
+      logger.info('SYSTEM', `Auto-launching ${settings.appMode} Web UI in browser: ${browserUrl}`);
+      openExternalUrl(browserUrl);
+    }
     return;
   }
   if (activeLanServer) {
@@ -209,18 +247,18 @@ function syncOptionalLanServer(settings = getSettings(), options: { isInitialBoo
 
   void startUnifiedHttpServer({
     port: desiredPort,
-    host: runtime.cliHost || '0.0.0.0',
+    host,
     registry: handlerRegistry,
     serveStaticDist,
     mountMedia: true,
     appMode: settings.appMode,
-    enforceAuthGate: true,
+    enforceAuthGate,
   })
     .then((started) => {
       activeLanServer = { ...started, serveStaticDist };
-      if (options.isInitialBoot && serveStaticDist && settings.desktopServerAutoOpenWebUi) {
+      if (shouldOpenBrowserNow) {
         const browserUrl = `http://127.0.0.1:${started.port}`;
-        logger.info('SYSTEM', `Auto-launching Desktop Server Web UI in browser: ${browserUrl}`);
+        logger.info('SYSTEM', `Auto-launching ${settings.appMode} Web UI in browser: ${browserUrl}`);
         openExternalUrl(browserUrl);
       }
     })
@@ -357,11 +395,11 @@ function createMainWindow() {
 }
 
 app.whenReady().then(async () => {
-  const runtimeBoot = resolveAppMode(undefined, process.argv);
-  if (runtimeBoot.isHeadless) {
-    logger.info('SYSTEM', `Booting RetroTunes in ${runtimeBoot.appMode} mode...`, {
-      lockReason: runtimeBoot.lockReason,
-      webUiEnabled: runtimeBoot.webUiEnabled,
+  const cliRuntimeBoot = resolveAppMode(undefined, process.argv);
+  if (cliRuntimeBoot.isHeadless) {
+    logger.info('SYSTEM', `Booting RetroTunes in ${cliRuntimeBoot.appMode} mode...`, {
+      lockReason: cliRuntimeBoot.lockReason,
+      webUiEnabled: cliRuntimeBoot.webUiEnabled,
     });
     await bootHeadlessServer();
     return;
@@ -371,6 +409,14 @@ app.whenReady().then(async () => {
   initDatabase();
   ensureRbacSeeded();
   const currentSettings = getSettings();
+  const storedRuntime = resolveAppMode(currentSettings.appMode, process.argv);
+  if (storedRuntime.isHeadless) {
+    logger.info('SYSTEM', `Booting RetroTunes in saved ${storedRuntime.appMode} mode (Headless Web UI)...`, {
+      webUiEnabled: storedRuntime.webUiEnabled,
+    });
+    await bootHeadlessServer();
+    return;
+  }
   initAuthentikAuth(true);
   await startMediaServer();
   registerAllHandlers();
@@ -434,6 +480,10 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
+  const currentMode = getSettings().appMode;
+  if (currentMode === 'headless-client' || currentMode === 'headless-server') {
+    return;
+  }
   if (platformDriver.quitOnAllWindowsClosed) {
     app.quit();
   }

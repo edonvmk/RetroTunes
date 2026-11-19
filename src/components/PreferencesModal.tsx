@@ -572,9 +572,15 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                         </option>
                       ) : (
                         <>
-                          <option value="client">Client Mode (Standalone Player or Remote Client)</option>
+                          <option value="client">Client Mode (Standalone Desktop Player or Remote Client)</option>
+                          <option value="headless-client">
+                            Headless Client Mode (Background Local Daemon + Default Web Browser UI)
+                          </option>
                           <option value="desktop-server">
                             Desktop Server Mode (GUI + LAN Web UI &amp; Media Streaming Host)
+                          </option>
+                          <option value="headless-server">
+                            Headless Server Mode (Background Authoritative Server + Default Web Browser UI)
                           </option>
                         </>
                       )}
@@ -598,6 +604,63 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                     </div>
                   )}
                 </div>
+
+                {(effectiveAppMode === 'headless-client' || effectiveAppMode === 'headless-server') && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      padding: '8px 10px',
+                      borderRadius: 6,
+                      background: '#f8fafc',
+                      border: '1px solid #cbd5e1',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 12,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <label
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={form.headlessAutoOpenBrowser !== false}
+                        onChange={(e) => updateField('headlessAutoOpenBrowser', e.target.checked)}
+                      />
+                      <span>
+                        Auto-open default web browser on desktop when launching Headless Mode (
+                        <code>--open-browser</code> / <code>--no-open-browser</code>)
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      className="aqua-btn primary"
+                      onClick={async () => {
+                        try {
+                          await invokeRpc('settings:save', form);
+                          const res = await invokeRpc<{ ok: boolean; url: string }>('system:openWebUi');
+                          setStatusBanner(
+                            res.ok
+                              ? `Launched Headless Web UI at ${res.url}`
+                              : `Headless Web UI active at ${res.url}`
+                          );
+                        } catch (err) {
+                          setStatusBanner(err instanceof Error ? err.message : String(err));
+                        }
+                      }}
+                    >
+                      Launch Web UI Now
+                    </button>
+                  </div>
+                )}
 
                 {isRemoteClient && (
                   <div

@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import { getUsersDb } from '../db';
 import { logger } from '../logger';
+import { getSettings } from '../settings';
+import { encryptSecret, decryptSecret, isEncryptedSecret } from './secretVault';
 import {
   BAND_PERMISSIONS,
   CallerContext,
@@ -181,6 +183,16 @@ export function ensureRbacSeeded(): void {
       1,
       JSON.stringify(LABEL_PERMISSIONS)
     );
+
+    const plainUsers = db
+      .prepare("SELECT id, listenbrainz_token FROM users WHERE listenbrainz_token IS NOT NULL AND listenbrainz_token != ''")
+      .all() as { id: number; listenbrainz_token: string }[];
+    const updToken = db.prepare('UPDATE users SET listenbrainz_token = ? WHERE id = ?');
+    for (const u of plainUsers) {
+      if (!isEncryptedSecret(u.listenbrainz_token)) {
+        updToken.run(encryptSecret(u.listenbrainz_token), u.id);
+      }
+    }
   })();
 }
 
@@ -383,13 +395,38 @@ export function getUserPersonalSecrets(userId: number): {
   listenbrainzToken: string;
   listenbrainzUsername: string;
 } {
+  ensureRbacSeeded();
   const row = getUsersDb()
     .prepare('SELECT listenbrainz_token, listenbrainz_username FROM users WHERE id = ?')
     .get(userId) as { listenbrainz_token?: string; listenbrainz_username?: string } | undefined;
   return {
-    listenbrainzToken: String(row?.listenbrainz_token || ''),
+    listenbrainzToken: decryptSecret(String(row?.listenbrainz_token || '')),
     listenbrainzUsername: String(row?.listenbrainz_username || ''),
   };
+}
+
+export function resolvePersonalListenBrainzCredentials(caller?: CallerContext | null): {
+  token: string;
+  username: string;
+} {
+  if (!caller || caller.isGuest || caller.authSource === 'guest' || caller.authSource === 'local-pin') {
+    return { token: '', username: '' };
+  }
+  if (caller.userId !== null && caller.userId > 0) {
+    const personal = getUserPersonalSecrets(caller.userId);
+    return {
+      token: personal.listenbrainzToken.trim(),
+      username: personal.listenbrainzUsername.trim(),
+    };
+  }
+  if (caller.userId === null && caller.authSource === 'local-owner') {
+    const settings = getSettings();
+    return {
+      token: (settings.personalListenbrainzToken || '').trim(),
+      username: (settings.personalListenbrainzUsername || '').trim(),
+    };
+  }
+  return { token: '', username: '' };
 }
 
 export async function createUser(input: {
@@ -493,7 +530,11 @@ export async function updateUser(
     patch.phone !== undefined ? patch.phone.trim() : existing.phone,
     patch.status !== undefined ? patch.status : existing.status,
     passwordHash,
-    patch.listenbrainzToken !== undefined ? patch.listenbrainzToken : existing.listenbrainz_token,
+    patch.listenbrainzToken !== undefined
+      ? patch.listenbrainzToken.trim()
+        ? encryptSecret(patch.listenbrainzToken.trim())
+        : ''
+      : existing.listenbrainz_token,
     patch.listenbrainzUsername !== undefined ? patch.listenbrainzUsername.trim() : existing.listenbrainz_username,
     userId
   );
@@ -511,7 +552,10 @@ export function deleteUser(userId: number): { ok: boolean } {
   if (existing.status === 'active' && isUserSuperAdmin(userId) && countActiveSuperAdminUsers(userId) === 0) {
     throw new ForbiddenError('Cannot delete the last active Label super-admin user.');
   }
-  db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+  db.transaction(() => {
+    db.prepare('DELETE FROM user_play_history WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+  })();
   return { ok: true };
 }
 

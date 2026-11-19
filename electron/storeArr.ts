@@ -2,6 +2,7 @@ import { emitPendingApprovalsUpdate, getCoreDb, getStoreDb } from './db';
 import { getSettings } from './settings';
 import { getAuthState } from './authOidc';
 import { ForbiddenError, getCallerContext } from './auth/callerContext';
+import { resolvePersonalListenBrainzCredentials } from './auth/rbac';
 import { logger } from './logger';
 
 export interface StoreCatalogItem {
@@ -241,11 +242,12 @@ export async function getStorefrontHome(genreFilter?: string): Promise<StoreHome
 
   const seedArtists = topLocalArtists.map((a) => a.artist);
 
-  // Also check ListenBrainz top artists for the user if ListenBrainz username is configured
-  if (settings.listenbrainzUsername && seedArtists.length < 4) {
+  // Also check ListenBrainz top artists for the user if personal ListenBrainz username is configured
+  const personalLbUsername = resolvePersonalListenBrainzCredentials(getCallerContext()).username;
+  if (personalLbUsername && seedArtists.length < 4) {
     try {
       const lbRes = await fetch(
-        `https://api.listenbrainz.org/1/stats/user/${encodeURIComponent(settings.listenbrainzUsername)}/artists?range=all_time&count=5`
+        `https://api.listenbrainz.org/1/stats/user/${encodeURIComponent(personalLbUsername)}/artists?range=all_time&count=5`
       );
       if (lbRes.ok) {
         const lbData = (await lbRes.json()) as {

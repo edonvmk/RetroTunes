@@ -21,6 +21,9 @@ import { getPlaylistTracks, getPlaylistVideos, generateRelativeM3u8 } from './sm
 import { getSettings } from './settings';
 import { logger } from './logger';
 import { platformDriver } from './platform';
+import { getCallerContext } from './auth/callerContext';
+import { resolvePersonalListenBrainzCredentials } from './auth/rbac';
+import { recordUserPlay } from './scrobbler';
 
 const execFileAsync = promisify(execFile);
 const yieldToEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -1841,6 +1844,9 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         const incPlayStmt = db.prepare(
           `UPDATE tracks SET play_count = COALESCE(play_count, 0) + 1, last_played = datetime(?, 'unixepoch') WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?)`
         );
+        const findScrobbleTrackStmt = db.prepare(
+          `SELECT id, track_uid, artist, title, album, mbid_recording, duration FROM tracks WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?) LIMIT 1`
+        );
         for (const rawLine of logContent.split(/\r?\n/)) {
           const line = rawLine.trim();
           if (!line || line.startsWith('#')) continue;
@@ -1849,7 +1855,15 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
             const [art, , tit, , , rating, tsStr] = parts;
             const ts = parseInt(tsStr, 10) || 0;
             if (rating === 'L' && ts > (deviceRow.last_processed_scrobble_ts || 0)) {
-              incPlayStmt.run(ts, art.trim(), tit.trim());
+              const cleanArt = art.trim();
+              const cleanTit = tit.trim();
+              incPlayStmt.run(ts, cleanArt, cleanTit);
+              const matched = findScrobbleTrackStmt.get(cleanArt, cleanTit) as TrackRow | undefined;
+              void recordUserPlay(
+                getCallerContext(),
+                matched || { artist: cleanArt, title: cleanTit },
+                ts
+              );
               if (ts > maxScrobbleTs) maxScrobbleTs = ts;
             }
           }
@@ -1937,14 +1951,15 @@ async function runSyncDeviceWorker(uuid: string): Promise<SyncProgress> {
         markLovedStmt.run(customStars, track.id);
         lovedImported++;
 
-        if (settings.listenbrainzToken && track.mbid_recording) {
+        const personalLb = resolvePersonalListenBrainzCredentials(getCallerContext());
+        if (personalLb.token && track.mbid_recording) {
           try {
             const lbRes = await fetch(
               'https://api.listenbrainz.org/1/feedback/recording-feedback',
               {
                 method: 'POST',
                 headers: {
-                  Authorization: `Token ${settings.listenbrainzToken.trim()}`,
+                  Authorization: `Token ${personalLb.token.trim()}`,
                   'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({

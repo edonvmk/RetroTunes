@@ -6,7 +6,7 @@ import { getDb } from './db';
 import { logger } from './logger';
 import { platformDriver } from './platform';
 import type { CallerContext } from './auth/callerContext';
-import { getUserPersonalSecrets } from './auth/rbac';
+import { encryptSecret, decryptSecret, isEncryptedSecret } from './auth/secretVault';
 
 // Resolve bundled ffmpeg / ffprobe sidecar paths
 let bundledFfmpegPath = '';
@@ -248,6 +248,8 @@ export interface AppSettings {
   // API Keys & Integrations
   listenbrainzToken: string;
   listenbrainzUsername: string;
+  personalListenbrainzToken?: string;
+  personalListenbrainzUsername?: string;
   lastfmApiKey?: string;
   theAudioDbApiKey?: string;
 
@@ -284,6 +286,7 @@ export interface AppSettings {
 const SECRET_KEYS: (keyof AppSettings)[] = [
   'remoteServerToken',
   'listenbrainzToken',
+  'personalListenbrainzToken',
   'lastfmApiKey',
   'theAudioDbApiKey',
   'plexToken',
@@ -413,6 +416,8 @@ export function getDefaultSettings(): AppSettings {
 
     listenbrainzToken: '',
     listenbrainzUsername: '',
+    personalListenbrainzToken: '',
+    personalListenbrainzUsername: '',
     lastfmApiKey: '',
     theAudioDbApiKey: '2',
 
@@ -449,21 +454,47 @@ export function getDefaultSettings(): AppSettings {
 
 let cachedSettings: AppSettings | null = null;
 
+export function migratePlaintextSecrets(): void {
+  const db = getDb();
+  const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
+  const upd = db.prepare("UPDATE settings SET value = ?, updated_at = datetime('now') WHERE key = ?");
+  db.transaction(() => {
+    for (const row of rows) {
+      if (!SECRET_KEYS.includes(row.key as keyof AppSettings)) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.value);
+      } catch {
+        parsed = row.value;
+      }
+      if (typeof parsed === 'string' && parsed.length > 0 && !isEncryptedSecret(parsed)) {
+        upd.run(JSON.stringify(encryptSecret(parsed)), row.key);
+      }
+    }
+  })();
+}
+
 export function getSettings(forceReload = false): AppSettings {
   if (cachedSettings && !forceReload) {
     return cachedSettings;
   }
   const db = getDb();
+  migratePlaintextSecrets();
   const defaults = getDefaultSettings();
   const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
   const stored: Record<string, unknown> = {};
 
   for (const row of rows) {
+    let val: unknown;
     try {
-      stored[row.key] = JSON.parse(row.value);
+      val = JSON.parse(row.value);
     } catch {
-      stored[row.key] = row.value;
+      val = row.value;
     }
+    if (SECRET_KEYS.includes(row.key as keyof AppSettings) && typeof val === 'string') {
+      val = decryptSecret(val);
+    }
+    stored[row.key] = val;
   }
 
   let legacyInferredMode: AppProfile | undefined;
@@ -519,7 +550,7 @@ export function getSettings(forceReload = false): AppSettings {
   for (const key of SECRET_KEYS) {
     const keychainVal = getKeychainSecret(key);
     if (keychainVal !== null && keychainVal.length > 0) {
-      (merged as unknown as Record<string, unknown>)[key] = keychainVal;
+      (merged as unknown as Record<string, unknown>)[key] = decryptSecret(keychainVal);
     }
   }
 
@@ -572,20 +603,27 @@ export function redactSettingsForCaller(
     localPinPlaintext: '',
     remoteServerToken: '',
   };
+
+  if (caller.userId !== null || caller.authSource !== 'local-owner') {
+    clone.personalListenbrainzToken = '';
+    clone.personalListenbrainzUsername = '';
+  }
+
   if (!caller.isSuperAdmin && caller.permissions.manageApiKeys < 1) {
     for (const key of SECRET_KEYS) {
-      if (key === 'listenbrainzToken') continue;
+      if (
+        key === 'personalListenbrainzToken' &&
+        caller.userId === null &&
+        caller.authSource === 'local-owner'
+      ) {
+        continue;
+      }
       (clone as unknown as Record<string, unknown>)[key] = '';
     }
     clone.listenbrainzToken = '';
     clone.listenbrainzUsername = '';
   }
 
-  if (caller.userId !== null) {
-    const personal = getUserPersonalSecrets(caller.userId);
-    clone.listenbrainzToken = personal.listenbrainzToken;
-    clone.listenbrainzUsername = personal.listenbrainzUsername;
-  }
   return clone;
 }
 
@@ -650,6 +688,8 @@ export function saveSettings(partial: Partial<AppSettings>): AppSettings {
       if (v === undefined) continue;
       if (SECRET_KEYS.includes(k as keyof AppSettings) && typeof v === 'string') {
         setKeychainSecret(k, v);
+        upsert.run(k, JSON.stringify(v ? encryptSecret(v) : ''));
+        continue;
       }
       upsert.run(k, JSON.stringify(v));
     }
@@ -798,16 +838,13 @@ export async function testIntegrationConnection(
         });
         const data = (await res.json()) as { valid?: boolean; user_name?: string; message?: string };
         if (res.ok && data.valid) {
-          if (data.user_name) {
-            saveSettings({ listenbrainzUsername: data.user_name });
-          }
           logger.info('LISTENBRAINZ', `Token validated for user: ${data.user_name}`, data, Date.now() - start);
           return {
             ok: true,
             target,
             message: `Authenticated as ListenBrainz user "${data.user_name}"`,
             latencyMs: Date.now() - start,
-            details: data,
+            details: { ...data, username: data.user_name || '' },
           };
         }
         logger.warn('LISTENBRAINZ', 'ListenBrainz token validation failed', data, Date.now() - start);

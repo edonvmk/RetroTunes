@@ -6,6 +6,8 @@ import os from 'os';
 import { logger } from './logger';
 import { emitRendererEvent, getAppDataPath } from './runtimeBus';
 import { classifyVariant, isInterludeOrSkit } from './egenius/variantFilter';
+import { getCallerContext, CallerContext } from './auth/callerContext';
+import { recordUserPlay } from './scrobbler';
 
 export interface TrackRow {
   id: number;
@@ -1265,6 +1267,22 @@ export function initDatabase(customPath?: string): Database.Database {
       used INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS user_play_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL DEFAULT 0,
+      track_uid TEXT DEFAULT '',
+      artist TEXT NOT NULL,
+      title TEXT NOT NULL,
+      album TEXT DEFAULT '',
+      recording_mbid TEXT DEFAULT '',
+      duration_ms INTEGER DEFAULT 0,
+      played_at INTEGER NOT NULL,
+      scrobbled_at INTEGER,
+      scrobble_error TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_play_history_queue ON user_play_history(user_id, scrobbled_at, played_at);
   `);
 
   coreDbInstance = coreDb;
@@ -1464,15 +1482,19 @@ export function getDeltaSyncBatch(
   };
 }
 
-export function applyPlaybackDeltaSync(updates: PlaybackDeltaUpdate[]): {
+export function applyPlaybackDeltaSync(
+  updates: PlaybackDeltaUpdate[],
+  caller?: CallerContext | null
+): {
   ok: boolean;
   current_rev: number;
   applied: number;
 } {
   const db = getCoreDb();
+  const activeCaller = caller !== undefined ? caller : getCallerContext();
   let applied = 0;
   const findStmt = db.prepare(
-    'SELECT id, play_count, local_star_rating, is_loved, last_played FROM tracks WHERE track_uid = ?'
+    'SELECT id, track_uid, artist, title, album, mbid_recording, duration, play_count, local_star_rating, is_loved, last_played FROM tracks WHERE track_uid = ?'
   );
   const updateStmt = db.prepare(
     `UPDATE tracks
@@ -1482,6 +1504,28 @@ export function applyPlaybackDeltaSync(updates: PlaybackDeltaUpdate[]): {
          last_played = ?
      WHERE id = ?`
   );
+  const upsertUserStateStmt = db.prepare(
+    `INSERT INTO user_track_state (user_id, track_uid, play_count, rating, loved, last_played_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, track_uid) DO UPDATE SET
+       play_count = COALESCE(user_track_state.play_count, 0) + excluded.play_count,
+       rating = CASE WHEN ? THEN excluded.rating ELSE user_track_state.rating END,
+       loved = CASE WHEN ? THEN excluded.loved ELSE user_track_state.loved END,
+       last_played_at = COALESCE(excluded.last_played_at, user_track_state.last_played_at)`
+  );
+
+  const playsToRecord: {
+    track: {
+      track_uid?: string | null;
+      artist: string;
+      title: string;
+      album?: string | null;
+      mbid_recording?: string | null;
+      duration?: number | null;
+    };
+    playedAtSec?: number;
+  }[] = [];
+
   const tx = db.transaction(() => {
     for (const u of updates) {
       const uid = (u.track_uid || '').trim();
@@ -1489,6 +1533,12 @@ export function applyPlaybackDeltaSync(updates: PlaybackDeltaUpdate[]): {
       const row = findStmt.get(uid) as
         | {
             id: number;
+            track_uid: string | null;
+            artist: string;
+            title: string;
+            album: string;
+            mbid_recording: string | null;
+            duration: number | null;
             play_count: number;
             local_star_rating: number;
             is_loved: number;
@@ -1497,24 +1547,55 @@ export function applyPlaybackDeltaSync(updates: PlaybackDeltaUpdate[]): {
         | undefined;
       if (!row) continue;
       const delta = Math.max(0, Math.round(Number(u.play_count_delta || 0)));
-      const nextRating =
-        u.rating !== undefined && Number.isFinite(Number(u.rating))
-          ? Math.max(0, Math.min(5, Math.round(Number(u.rating))))
-          : row.local_star_rating || 0;
+      const hasRating = u.rating !== undefined && Number.isFinite(Number(u.rating));
+      const nextRating = hasRating
+        ? Math.max(0, Math.min(5, Math.round(Number(u.rating))))
+        : row.local_star_rating || 0;
+      const hasLoved = u.loved !== undefined || (hasRating && nextRating === 5);
       const nextLoved =
         u.loved !== undefined
           ? u.loved === true || u.loved === 1
             ? 1
             : 0
-          : u.rating !== undefined && nextRating === 5
+          : hasRating && nextRating === 5
           ? 1
           : row.is_loved || 0;
       const nextLastPlayed = u.last_played_at || row.last_played || new Date().toISOString();
       updateStmt.run(delta, nextRating, nextLoved, nextLastPlayed, row.id);
+
+      if (activeCaller?.userId !== null && activeCaller?.userId !== undefined) {
+        upsertUserStateStmt.run(
+          activeCaller.userId,
+          uid,
+          delta,
+          nextRating,
+          nextLoved,
+          nextLastPlayed,
+          hasRating ? 1 : 0,
+          hasLoved ? 1 : 0
+        );
+      }
+
+      if (delta > 0) {
+        const parsedTs = u.last_played_at ? Date.parse(u.last_played_at) : NaN;
+        const basePlayedSec =
+          Number.isFinite(parsedTs) && parsedTs > 0
+            ? Math.floor(parsedTs / 1000)
+            : Math.floor(Date.now() / 1000);
+        playsToRecord.push({
+          track: row,
+          playedAtSec: basePlayedSec,
+        });
+      }
       applied++;
     }
   });
   tx();
+
+  for (const item of playsToRecord) {
+    void recordUserPlay(activeCaller, item.track, item.playedAtSec);
+  }
+
   const current_rev = getLibraryRevision();
   if (applied > 0) {
     emitRendererEvent('library:updated', { current_rev });

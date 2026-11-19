@@ -24,6 +24,7 @@ import {
   RemoteAuthInfo,
   RolePermissions,
   RuntimeModeInfo,
+  ScrobbleQueueStats,
   ServerSidebarVisibility,
 } from '../types';
 import {
@@ -149,33 +150,95 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
   const [profileDisplayName, setProfileDisplayName] = useState(callerMe?.user?.displayName || '');
   const [profileEmail, setProfileEmail] = useState(callerMe?.user?.email || '');
   const [profilePhone, setProfilePhone] = useState(callerMe?.user?.phone || '');
+  const [myListenbrainzToken, setMyListenbrainzToken] = useState('');
+  const [myListenbrainzUsername, setMyListenbrainzUsername] = useState(
+    callerMe?.personalListenbrainzUsername ||
+      callerMe?.user?.listenbrainzUsername ||
+      settings.personalListenbrainzUsername ||
+      ''
+  );
+  const [hasSavedPersonalLbToken, setHasSavedPersonalLbToken] = useState(
+    Boolean(
+      callerMe?.hasPersonalListenbrainzToken ||
+        callerMe?.user?.hasListenbrainzToken ||
+        settings.personalListenbrainzToken
+    )
+  );
+  const [testingPersonalLb, setTestingPersonalLb] = useState(false);
+  const [personalLbTestResult, setPersonalLbTestResult] = useState<{
+    ok: boolean;
+    message: string;
+    latencyMs: number;
+  } | null>(null);
+  const [scrobbleQueueStats, setScrobbleQueueStats] = useState<ScrobbleQueueStats>({
+    pendingCount: 0,
+    oldestPendingAt: null,
+    totalLogged: 0,
+  });
+  const [syncingScrobbles, setSyncingScrobbles] = useState(false);
   const [curPassword, setCurPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [profileBusy, setProfileBusy] = useState(false);
+
+  const loadScrobbleQueueStats = async () => {
+    try {
+      const stats = await invokeRpc<ScrobbleQueueStats>('uac:getScrobbleQueueStats');
+      if (stats && typeof stats.pendingCount === 'number') {
+        setScrobbleQueueStats(stats);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   React.useEffect(() => {
     if (callerMe?.user) {
       setProfileDisplayName(callerMe.user.displayName || '');
       setProfileEmail(callerMe.user.email || '');
       setProfilePhone(callerMe.user.phone || '');
-      if (callerMe.user.listenbrainzUsername) {
-        setForm((prev) => ({
-          ...prev,
-          listenbrainzUsername: callerMe.user!.listenbrainzUsername,
-        }));
-      }
     }
+    const nextUser =
+      callerMe?.personalListenbrainzUsername ||
+      callerMe?.user?.listenbrainzUsername ||
+      settings.personalListenbrainzUsername ||
+      '';
+    if (nextUser) {
+      setMyListenbrainzUsername(nextUser);
+    }
+    setHasSavedPersonalLbToken(
+      Boolean(
+        callerMe?.hasPersonalListenbrainzToken ||
+          callerMe?.user?.hasListenbrainzToken ||
+          settings.personalListenbrainzToken
+      )
+    );
   }, [
     callerMe?.user?.id,
     callerMe?.user?.displayName,
     callerMe?.user?.email,
     callerMe?.user?.phone,
     callerMe?.user?.listenbrainzUsername,
+    callerMe?. user?.hasListenbrainzToken,
+    callerMe?.personalListenbrainzUsername,
+    callerMe?.hasPersonalListenbrainzToken,
+    settings.personalListenbrainzUsername,
+    settings.personalListenbrainzToken,
   ]);
 
   React.useEffect(() => {
     void loadShares();
+    void loadScrobbleQueueStats();
+    invokeRpc<CallerMeResponse>('uac:getMe')
+      .then((me) => {
+        if (!me) return;
+        const uname = me.personalListenbrainzUsername || me.user?.listenbrainzUsername || '';
+        if (uname) setMyListenbrainzUsername(uname);
+        setHasSavedPersonalLbToken(
+          Boolean(me.hasPersonalListenbrainzToken || me.user?.hasListenbrainzToken)
+        );
+      })
+      .catch(() => {});
     invokeRpc<RuntimeModeInfo>('system:runtimeInfo')
       .then((rt) => setRuntimeInfo(rt))
       .catch(() => {});
@@ -1502,26 +1565,58 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                     <strong style={{ fontSize: 12 }}>
                       ListenBrainz (Personal Scrobbling &amp; Two-Way Loved Feedback)
                     </strong>
-                    <button type="button" className="aqua-btn" onClick={() => runTest('listenbrainz')}>
-                      <Activity size={13} /> Test Token
+                    <button
+                      type="button"
+                      className="aqua-btn"
+                      disabled={testingPersonalLb}
+                      onClick={async () => {
+                        setTestingPersonalLb(true);
+                        try {
+                          const res = await invokeRpc<{
+                            ok: boolean;
+                            valid?: boolean;
+                            username?: string;
+                            message: string;
+                            latencyMs: number;
+                          }>('uac:testMyListenBrainzToken', myListenbrainzToken);
+                          setPersonalLbTestResult({
+                            ok: Boolean(res.ok),
+                            message: res.message,
+                            latencyMs: res.latencyMs || 0,
+                          });
+                          if (res.ok && res.username) {
+                            setMyListenbrainzUsername(res.username);
+                          }
+                        } catch (err) {
+                          setPersonalLbTestResult({
+                            ok: false,
+                            message: err instanceof Error ? err.message : String(err),
+                            latencyMs: 0,
+                          });
+                        } finally {
+                          setTestingPersonalLb(false);
+                        }
+                      }}
+                    >
+                      <Activity size={13} /> {testingPersonalLb ? 'Testing...' : 'Test Token'}
                     </button>
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
                     <div>
                       <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
-                        User Token (Saved {callerMe?.user ? 'to your profile' : `in ${credentialStoreLabel}`}):
+                        Personal User Token (Saved {callerMe?.user ? 'to your profile' : `in ${credentialStoreLabel}`}):
                       </label>
                       <input
                         type="password"
                         className="aqua-input"
                         style={{ width: '100%' }}
                         placeholder={
-                          callerMe?.user?.hasListenbrainzToken
-                            ? 'Token saved to your profile — enter a new UUID to replace'
+                          hasSavedPersonalLbToken
+                            ? 'Personal token saved — enter a new UUID to replace'
                             : 'UUID Token from listenbrainz.org/settings'
                         }
-                        value={form.listenbrainzToken}
-                        onChange={(e) => updateField('listenbrainzToken', e.target.value)}
+                        value={myListenbrainzToken}
+                        onChange={(e) => setMyListenbrainzToken(e.target.value)}
                       />
                     </div>
                     <div>
@@ -1531,12 +1626,103 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                       <input
                         className="aqua-input"
                         style={{ width: '100%' }}
-                        value={form.listenbrainzUsername}
-                        onChange={(e) => updateField('listenbrainzUsername', e.target.value)}
+                        value={myListenbrainzUsername}
+                        onChange={(e) => setMyListenbrainzUsername(e.target.value)}
                       />
                     </div>
                   </div>
-                  {renderTestBadge('listenbrainz')}
+                  {personalLbTestResult ? (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        fontSize: 11,
+                        color: personalLbTestResult.ok ? '#15803d' : '#b91c1c',
+                        marginTop: 4,
+                      }}
+                    >
+                      <span className={`status-dot ${personalLbTestResult.ok ? 'green' : 'red'}`} />
+                      <span>
+                        {personalLbTestResult.message} ({personalLbTestResult.latencyMs}ms)
+                      </span>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 11, color: '#64748b', display: 'inline-flex', alignItems: 'center', gap: 5, marginTop: 4 }}>
+                      <span className={`status-dot ${hasSavedPersonalLbToken ? 'green' : 'gray'}`} />{' '}
+                      {hasSavedPersonalLbToken ? 'Personal token stored (encrypted at rest)' : 'Untested'}
+                    </span>
+                  )}
+
+                  {/* Local Play History & Scrobble Queue */}
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: '8px 10px',
+                      borderRadius: 6,
+                      background: '#f8fafc',
+                      border: '1px solid #cbd5e1',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 10,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: '#334155' }}>
+                      <strong>Local Play History &amp; Scrobble Queue:</strong>{' '}
+                      <span style={{ fontWeight: 700, color: scrobbleQueueStats.pendingCount > 0 ? '#1d4ed8' : '#15803d' }}>
+                        {scrobbleQueueStats.pendingCount}
+                      </span>{' '}
+                      queued plays pending sync •{' '}
+                      <span style={{ fontWeight: 600 }}>{scrobbleQueueStats.totalLogged}</span> total plays logged
+                    </div>
+                    <button
+                      type="button"
+                      className="aqua-btn"
+                      disabled={
+                        syncingScrobbles ||
+                        scrobbleQueueStats.pendingCount <= 0 ||
+                        (!hasSavedPersonalLbToken && !myListenbrainzToken.trim())
+                      }
+                      onClick={async () => {
+                        setSyncingScrobbles(true);
+                        try {
+                          if (myListenbrainzToken.trim()) {
+                            await invokeRpc('uac:updateMyProfile', {
+                              listenbrainzToken: myListenbrainzToken.trim(),
+                              listenbrainzUsername: myListenbrainzUsername.trim(),
+                            });
+                            setHasSavedPersonalLbToken(true);
+                            setMyListenbrainzToken('');
+                          }
+                          const res = await invokeRpc<{
+                            ok: boolean;
+                            submitted: number;
+                            remaining: number;
+                            errors: string[];
+                          }>('uac:syncPendingScrobbles');
+                          await loadScrobbleQueueStats();
+                          if (res.ok) {
+                            setStatusBanner(
+                              `Synced ${res.submitted} queued plays to ListenBrainz (${res.remaining} remaining).`
+                            );
+                          } else {
+                            setStatusBanner(
+                              `Submitted ${res.submitted} plays (${res.remaining} remaining): ${res.errors.join('; ')}`
+                            );
+                          }
+                        } catch (err) {
+                          setStatusBanner(err instanceof Error ? err.message : String(err));
+                        } finally {
+                          setSyncingScrobbles(false);
+                        }
+                      }}
+                    >
+                      <RefreshCw size={12} />{' '}
+                      {syncingScrobbles ? 'Syncing...' : 'Sync Queued Plays to ListenBrainz'}
+                    </button>
+                  </div>
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: callerMe?.user ? 10 : 0 }}>
@@ -1555,13 +1741,18 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                                 phone: profilePhone.trim(),
                               }
                             : {}),
-                          listenbrainzUsername: form.listenbrainzUsername.trim(),
-                          ...(form.listenbrainzToken.trim()
-                            ? { listenbrainzToken: form.listenbrainzToken.trim() }
+                          listenbrainzUsername: myListenbrainzUsername.trim(),
+                          ...(myListenbrainzToken.trim()
+                            ? { listenbrainzToken: myListenbrainzToken.trim() }
                             : {}),
                         });
+                        if (myListenbrainzToken.trim()) {
+                          setHasSavedPersonalLbToken(true);
+                          setMyListenbrainzToken('');
+                        }
+                        await loadScrobbleQueueStats();
                         onProfileUpdated?.();
-                        setStatusBanner('Saved your account profile and ListenBrainz settings.');
+                        setStatusBanner('Saved your account profile and personal ListenBrainz settings.');
                       } catch (err) {
                         setStatusBanner(err instanceof Error ? err.message : String(err));
                       } finally {
@@ -1865,6 +2056,47 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
 
           {tab === 'apis' && (
             <>
+              {/* Server Catalog Hydration ListenBrainz Key */}
+              <div className="epod-capacity-card">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <strong>ListenBrainz &amp; MusicBrainz (Server Catalog Hydration)</strong>
+                  <button type="button" className="aqua-btn" onClick={() => runTest('listenbrainz')}>
+                    <Activity size={13} /> Test Connection
+                  </button>
+                </div>
+                <p style={{ margin: '0 0 8px', fontSize: 11, color: '#475569' }}>
+                  Server-wide key for global popularity &amp; metadata hydration only. Never used for personal play scrobbling.
+                </p>
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                      Server Hydration Token (Encrypted at rest):
+                    </label>
+                    <input
+                      type="password"
+                      className="aqua-input"
+                      style={{ width: '100%' }}
+                      placeholder="ListenBrainz Token for Global Popularity Hydration"
+                      value={form.listenbrainzToken}
+                      onChange={(e) => updateField('listenbrainzToken', e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 3 }}>
+                      Hydration Account Label (Optional):
+                    </label>
+                    <input
+                      className="aqua-input"
+                      style={{ width: '100%' }}
+                      placeholder="server-hydration"
+                      value={form.listenbrainzUsername}
+                      onChange={(e) => updateField('listenbrainzUsername', e.target.value)}
+                    />
+                  </div>
+                </div>
+                {renderTestBadge('listenbrainz')}
+              </div>
+
               {/* Lidarr, Radarr, Sonarr */}
               {[
                 {

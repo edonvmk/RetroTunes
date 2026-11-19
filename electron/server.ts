@@ -609,7 +609,7 @@ export function startUnifiedHttpServer(
             try {
               const body = await readJsonBody(req);
               const parsed = JSON.parse(body || '{}') as { updates?: PlaybackDeltaUpdate[] };
-              const result = applyPlaybackDeltaSync(Array.isArray(parsed.updates) ? parsed.updates : []);
+              const result = applyPlaybackDeltaSync(Array.isArray(parsed.updates) ? parsed.updates : [], caller);
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(result));
             } catch (err) {

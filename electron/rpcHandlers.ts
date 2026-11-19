@@ -48,11 +48,18 @@ import {
   getUserPersonalSecrets,
   listRoles,
   listUsers,
+  resolvePersonalListenBrainzCredentials,
   setUserOverrides,
   setUserRoles,
   updateRole,
   updateUser,
 } from './auth/rbac';
+import {
+  recordUserPlay,
+  submitNowPlaying,
+  getScrobbleQueueStats,
+  flushPendingScrobbles,
+} from './scrobbler';
 import {
   runLibraryScan,
   getIndexProgress,
@@ -355,10 +362,7 @@ export function registerCoreRpcHandlers(
       `).run(caller.userId, current.track_uid, newLoved, newRating);
     }
 
-    const lbToken =
-      caller.userId !== null
-        ? getUserPersonalSecrets(caller.userId).listenbrainzToken
-        : getSettings().listenbrainzToken;
+    const lbToken = resolvePersonalListenBrainzCredentials(caller).token;
     if (lbToken && current.mbid_recording && (newLoved === 1 || isLoved !== undefined)) {
       try {
         await fetch('https://api.listenbrainz.org/1/feedback/recording-feedback', {
@@ -391,25 +395,50 @@ export function registerCoreRpcHandlers(
     db.prepare("UPDATE tracks SET play_count = play_count + 1, last_played = datetime('now') WHERE id = ?").run(
       trackId
     );
-    if (caller.userId !== null) {
-      const tRow = db.prepare('SELECT track_uid FROM tracks WHERE id = ?').get(trackId) as
-        | { track_uid?: string | null }
-        | undefined;
-      if (tRow?.track_uid) {
-        db.prepare(`
-          INSERT INTO user_track_state (user_id, track_uid, play_count, last_played_at)
-          VALUES (?, ?, 1, datetime('now'))
-          ON CONFLICT(user_id, track_uid) DO UPDATE SET
-            play_count = user_track_state.play_count + 1,
-            last_played_at = datetime('now')
-        `).run(caller.userId, tRow.track_uid);
-      }
+    const tRow = db
+      .prepare('SELECT id, track_uid, artist, title, album, mbid_recording, duration FROM tracks WHERE id = ?')
+      .get(trackId) as TrackRow | undefined;
+
+    if (caller.userId !== null && tRow?.track_uid) {
+      db.prepare(`
+        INSERT INTO user_track_state (user_id, track_uid, play_count, last_played_at)
+        VALUES (?, ?, 1, datetime('now'))
+        ON CONFLICT(user_id, track_uid) DO UPDATE SET
+          play_count = user_track_state.play_count + 1,
+          last_played_at = datetime('now')
+      `).run(caller.userId, tRow.track_uid);
+    }
+    if (tRow) {
+      void recordUserPlay(caller, tRow);
     }
     if (getSettings().autoCachePlayback) {
       queueTrackCache(trackId, true);
     }
     emitRendererEvent('library:updated', { current_rev: getLibraryRevision() });
     return await hydrateTrackMetadata(trackId, true);
+  });
+
+  registerChannel('tracks:nowPlaying', async (trackIdOrTrack: number | Partial<TrackRow>) => {
+    const caller = getCallerContext();
+    if (typeof trackIdOrTrack === 'number') {
+      const db = getDb();
+      const row = db
+        .prepare('SELECT id, track_uid, artist, title, album, mbid_recording, duration FROM tracks WHERE id = ?')
+        .get(trackIdOrTrack) as TrackRow | undefined;
+      if (!row) return { ok: false, sent: false };
+      return submitNowPlaying(caller, row);
+    }
+    if (trackIdOrTrack && typeof trackIdOrTrack === 'object' && trackIdOrTrack.title) {
+      return submitNowPlaying(caller, {
+        track_uid: trackIdOrTrack.track_uid || '',
+        artist: trackIdOrTrack.artist || 'Unknown Artist',
+        title: trackIdOrTrack.title || 'Unknown Track',
+        album: trackIdOrTrack.album || '',
+        mbid_recording: trackIdOrTrack.mbid_recording || '',
+        duration: trackIdOrTrack.duration || 0,
+      });
+    }
+    return { ok: false, sent: false };
   });
 
   registerChannel('tracks:hydrate', (trackId: number) => hydrateTrackMetadata(trackId, true));
@@ -1018,7 +1047,7 @@ export function registerCoreRpcHandlers(
     getDeltaSyncBatch(Number(sinceRev) || 0, Number(limit) || 2000)
   );
   registerChannel('sync:playback', (updates: PlaybackDeltaUpdate[]) =>
-    applyPlaybackDeltaSync(Array.isArray(updates) ? updates : [])
+    applyPlaybackDeltaSync(Array.isArray(updates) ? updates : [], getCallerContext())
   );
   registerChannel('sync:remoteDelta', (serverUrl?: string, authToken?: string) => {
     const url = resolveEffectiveRemoteServerUrl(serverUrl);
@@ -1080,6 +1109,7 @@ export function registerCoreRpcHandlers(
       caller.userId !== null
         ? computeEffectivePermissions(caller.userId)
         : { permissions: caller.permissions, isSuperAdmin: caller.isSuperAdmin };
+    const personalLb = resolvePersonalListenBrainzCredentials(caller);
     return {
       user,
       username: caller.username,
@@ -1089,6 +1119,8 @@ export function registerCoreRpcHandlers(
       isSuperAdmin: effective.isSuperAdmin,
       authSource: caller.authSource,
       permissions: effective.permissions,
+      personalListenbrainzUsername: personalLb.username,
+      hasPersonalListenbrainzToken: Boolean(personalLb.token),
     };
   });
 
@@ -1103,16 +1135,87 @@ export function registerCoreRpcHandlers(
     }) => {
       const caller = getCallerContext();
       if (caller.userId === null) {
-        saveSettings({
-          ...(patch.listenbrainzToken !== undefined ? { listenbrainzToken: patch.listenbrainzToken } : {}),
-          ...(patch.listenbrainzUsername !== undefined ? { listenbrainzUsername: patch.listenbrainzUsername } : {}),
-        });
+        if (caller.authSource === 'local-owner') {
+          saveSettings({
+            ...(patch.listenbrainzToken !== undefined
+              ? { personalListenbrainzToken: patch.listenbrainzToken.trim() }
+              : {}),
+            ...(patch.listenbrainzUsername !== undefined
+              ? { personalListenbrainzUsername: patch.listenbrainzUsername.trim() }
+              : {}),
+          });
+        }
         return { ok: true, user: null };
       }
       const user = await updateUser(caller.userId, patch);
       return { ok: true, user };
     }
   );
+
+  registerChannel('uac:testMyListenBrainzToken', async (tokenInput?: string) => {
+    const start = Date.now();
+    const caller = getCallerContext();
+    const token =
+      typeof tokenInput === 'string' && tokenInput.trim().length > 0
+        ? tokenInput.trim()
+        : resolvePersonalListenBrainzCredentials(caller).token;
+
+    if (!token) {
+      return {
+        ok: false,
+        valid: false,
+        username: '',
+        message: 'Personal ListenBrainz token is empty.',
+        latencyMs: Date.now() - start,
+      };
+    }
+
+    try {
+      const res = await fetch('https://api.listenbrainz.org/1/validate-token', {
+        headers: {
+          Authorization: `Token ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        valid?: boolean;
+        user_name?: string;
+        message?: string;
+      };
+      if (res.ok && data.valid) {
+        return {
+          ok: true,
+          valid: true,
+          username: data.user_name || '',
+          message: `Authenticated as ListenBrainz user "${data.user_name || ''}"`,
+          latencyMs: Date.now() - start,
+        };
+      }
+      return {
+        ok: false,
+        valid: false,
+        username: '',
+        message: data.message || `Token invalid (HTTP ${res.status})`,
+        latencyMs: Date.now() - start,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        valid: false,
+        username: '',
+        message: `ListenBrainz token validation failed: ${err instanceof Error ? err.message : String(err)}`,
+        latencyMs: Date.now() - start,
+      };
+    }
+  });
+
+  registerChannel('uac:getScrobbleQueueStats', () => {
+    return getScrobbleQueueStats(getCallerContext());
+  });
+
+  registerChannel('uac:syncPendingScrobbles', async () => {
+    return flushPendingScrobbles(getCallerContext());
+  });
 
   registerChannel(
     'uac:changeMyPassword',

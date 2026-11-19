@@ -631,6 +631,8 @@ export interface AppSettings {
 
   listenbrainzToken: string;
   listenbrainzUsername: string;
+  personalListenbrainzToken?: string;
+  personalListenbrainzUsername?: string;
   lastfmApiKey?: string;
   theAudioDbApiKey?: string;
 
@@ -739,6 +741,14 @@ export interface CallerMeResponse {
   isSuperAdmin: boolean;
   authSource: 'local-owner' | 'session' | 'authentik' | 'proxy-headers' | 'pin' | 'guest';
   permissions: RolePermissions;
+  personalListenbrainzUsername?: string;
+  hasPersonalListenbrainzToken?: boolean;
+}
+
+export interface ScrobbleQueueStats {
+  pendingCount: number;
+  oldestPendingAt: number | null;
+  totalLogged: number;
 }
 
 export interface PendingUploadRow {

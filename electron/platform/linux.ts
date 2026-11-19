@@ -5,6 +5,7 @@ import os from 'os';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { getAppDataPath, getSafeStorage } from '../runtimeBus';
+import { encryptSecret, decryptSecret, isEncryptedSecret } from '../auth/secretVault';
 import { PlatformDriver, ShareMountParams } from './types';
 
 const execFileAsync = promisify(execFile);
@@ -51,7 +52,7 @@ export const linuxDriver: PlatformDriver = {
         if (safeStorage?.isEncryptionAvailable?.()) {
           fs.writeFileSync(secretFile, safeStorage.encryptString(secret));
         } else {
-          fs.writeFileSync(secretFile, Buffer.from(secret, 'utf8'), { mode: 0o600 });
+          fs.writeFileSync(secretFile, Buffer.from(encryptSecret(secret), 'utf8'), { mode: 0o600 });
         }
         return true;
       } catch {
@@ -74,11 +75,15 @@ export const linuxDriver: PlatformDriver = {
       const secretFile = getFallbackSecretPath(service, account);
       if (!fs.existsSync(secretFile)) return null;
       const buf = fs.readFileSync(secretFile);
+      const rawText = buf.toString('utf8');
+      if (isEncryptedSecret(rawText)) {
+        return decryptSecret(rawText);
+      }
       const safeStorage = getSafeStorage();
       if (safeStorage?.isEncryptionAvailable?.()) {
         return safeStorage.decryptString(buf);
       }
-      return buf.toString('utf8');
+      return decryptSecret(rawText);
     } catch {
       return null;
     }

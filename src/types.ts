@@ -479,8 +479,50 @@ export interface ChartTrackItem {
   inLibrary?: boolean;
 }
 
+export type AppProfile = 'client' | 'headless-client' | 'desktop-server' | 'headless-server';
+export type ClientSource = 'local' | 'remote';
+export type AuthMode = 'standalone' | 'authentik' | 'proxy-headers' | 'local-pin';
+export type TranscoderUpdateSchedule = 'off' | 'daily' | 'weekly';
+
+export interface ServerSidebarVisibility {
+  music: boolean;
+  movies: boolean;
+  tvShows: boolean;
+  musicVideos: boolean;
+  audiobooks: boolean;
+  books: boolean;
+  photos: boolean;
+  store: boolean;
+  devices: boolean;
+  networkShares: boolean;
+  genreMap: boolean;
+}
+
+export interface RuntimeModeInfo {
+  appMode: AppProfile;
+  isModeLocked: boolean;
+  lockReason: 'docker' | 'cli' | null;
+  isDocker: boolean;
+  isHeadless: boolean;
+  isServerRole: boolean;
+  webUiEnabled: boolean;
+}
+
+export interface RemoteAuthInfo {
+  serverName: string;
+  version: string;
+  appMode: AppProfile;
+  authGateEnabled: boolean;
+  authMode: AuthMode;
+  authentikIssuerUrl?: string;
+  authentikClientId?: string;
+  authentikRedirectUri?: string;
+  trustedProxyHeader?: string;
+}
+
 export interface AppSettings {
-  backendMode?: 'standalone' | 'host_server' | 'docker_server';
+  appMode: AppProfile;
+  clientSource: ClientSource;
   dockerServerUrl?: string;
 
   nfsSharePath: string;
@@ -499,21 +541,30 @@ export interface AppSettings {
   cacheMaxSizeGb: number;
   autoEvictLru: boolean;
   autoCachePlayback: boolean;
-  hardwareAccelMode: 'auto' | 'vt_h264' | 'nvenc' | 'qsv' | 'software';
+  enableClientLocalTranscoding: boolean;
+  transcoderUpdateSchedule: TranscoderUpdateSchedule;
+  lastTranscoderUpdateCheckAt: number;
+  hardwareAccelMode: 'auto' | 'vt_h264' | 'nvenc' | 'qsv' | 'vaapi' | 'software';
   metadataHydrationMode: 'hybrid' | 'on_demand';
   tableColumnsJson: string;
   showOfflineDevices?: boolean;
   lcdArtistClickBehavior?: 'jump' | 'filter';
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
-  enableLanServerMode?: boolean;
   lanServerPort?: number;
+  serverSidebarVisibility: ServerSidebarVisibility;
+  backgroundWatchers: boolean;
 
-  authMode: 'standalone' | 'authentik';
+  authGateEnabled: boolean;
+  authMode: AuthMode;
   authentikIssuerUrl: string;
   authentikClientId: string;
   authentikRedirectUri: string;
   homelabGatewayUrl: string;
+  trustedProxyHeader: string;
+  localPinHash?: string;
+  localPinPlaintext?: string;
+  hasLocalPin?: boolean;
 
   listenbrainzToken: string;
   listenbrainzUsername: string;
@@ -569,7 +620,7 @@ export interface SsoUserProfile {
 
 export interface AuthState {
   authenticated: boolean;
-  mode: 'standalone' | 'authentik';
+  mode: AuthMode;
   user: SsoUserProfile | null;
   accessToken: string | null;
   expiresAt: number | null;

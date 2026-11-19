@@ -14,7 +14,7 @@ import {
   recalculateArtistPopularityScores,
   TrackRow,
 } from './db';
-import { getSettings } from './settings';
+import { AppProfile, getSettings, isServerProfile } from './settings';
 import { logger } from './logger';
 import { rebuildGenreMatrix } from './egenius/genreMatrix';
 import {
@@ -989,8 +989,9 @@ export async function runLibraryScan(
     // Rebuild 2D Subgenre Adjacency Matrix from updated artist tags
     rebuildGenreMatrix();
 
-    // Kick off gentle background metadata trickle if hybrid mode is enabled
-    if (settings.metadataHydrationMode === 'hybrid' && !cancelRequested) {
+    // Kick off gentle background metadata trickle if hybrid mode is enabled and not in remote client mode
+    const allowLocalTrickle = isServerProfile(settings.appMode) || settings.clientSource !== 'remote';
+    if (settings.metadataHydrationMode === 'hybrid' && !cancelRequested && allowLocalTrickle) {
       void startBackgroundMetadataTrickle();
     }
 
@@ -1146,6 +1147,10 @@ export async function hydrateAlbumMetadata(artist: string, album: string): Promi
  */
 export async function startBackgroundMetadataTrickle(): Promise<void> {
   if (backgroundHydrationRunning || currentProgress.running) return;
+  const initialSettings = getSettings();
+  if (!isServerProfile(initialSettings.appMode) && initialSettings.clientSource === 'remote') {
+    return;
+  }
   backgroundHydrationRunning = true;
 
   const db = getDb();
@@ -1156,6 +1161,9 @@ export async function startBackgroundMetadataTrickle(): Promise<void> {
     while (backgroundHydrationRunning && !cancelRequested) {
       const settings = getSettings();
       if (settings.metadataHydrationMode === 'on_demand') {
+        break;
+      }
+      if (!isServerProfile(settings.appMode) && settings.clientSource === 'remote') {
         break;
       }
 
@@ -2377,4 +2385,91 @@ export function deduplicateLibraryTracks(): DeduplicateResult {
   const totalAfter = (db.prepare('SELECT COUNT(*) as c FROM tracks').get() as { c: number }).c;
   logger.info('INDEXER', `Library deduplication complete: merged ${groupsMerged} groups, removed ${rowsRemoved} duplicate rows (${totalBefore} -> ${totalAfter}).`);
   return { totalBefore, groupsMerged, rowsRemoved, totalAfter };
+}
+
+const activeFsWatchers: fs.FSWatcher[] = [];
+let watcherDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let watcherInterval: ReturnType<typeof setInterval> | null = null;
+
+export function stopBackgroundWatchers(): void {
+  backgroundHydrationRunning = false;
+  if (watcherDebounceTimer) {
+    clearTimeout(watcherDebounceTimer);
+    watcherDebounceTimer = null;
+  }
+  if (watcherInterval) {
+    clearInterval(watcherInterval);
+    watcherInterval = null;
+  }
+  while (activeFsWatchers.length > 0) {
+    const w = activeFsWatchers.pop();
+    try {
+      w?.close();
+    } catch {
+      // ignore close errors
+    }
+  }
+}
+
+export function reconcileBackgroundWatchers(appMode?: AppProfile): { active: boolean; watchedRoots: number } {
+  stopBackgroundWatchers();
+  const settings = getSettings();
+  const effectiveMode = appMode || settings.appMode;
+
+  if (!isServerProfile(effectiveMode) || settings.backgroundWatchers === false) {
+    logger.debug('INDEXER', 'Background FS watchers suppressed.', {
+      appMode: effectiveMode,
+      clientSource: settings.clientSource,
+      backgroundWatchers: settings.backgroundWatchers,
+    });
+    return { active: false, watchedRoots: 0 };
+  }
+
+  const candidateDirs = [
+    settings.musicRootPath,
+    settings.videoRootPath,
+    settings.tvRootPath,
+    settings.musicVideosRootPath,
+    settings.booksRootPath,
+    settings.audiobooksRootPath,
+    settings.photosRootPath,
+  ]
+    .map((p) => (p || '').trim())
+    .filter((p) => p.length > 0 && fs.existsSync(p));
+
+  const uniqueDirs = Array.from(new Set(candidateDirs));
+  const triggerDebouncedScan = () => {
+    if (watcherDebounceTimer) clearTimeout(watcherDebounceTimer);
+    watcherDebounceTimer = setTimeout(() => {
+      watcherDebounceTimer = null;
+      if (!currentProgress.running) {
+        void runLibraryScan();
+      }
+    }, 10_000);
+    if (watcherDebounceTimer.unref) watcherDebounceTimer.unref();
+  };
+
+  for (const dir of uniqueDirs) {
+    try {
+      const watcher = fs.watch(dir, { recursive: process.platform !== 'linux' }, triggerDebouncedScan);
+      watcher.on('error', () => {});
+      activeFsWatchers.push(watcher);
+    } catch (err) {
+      logger.warn('INDEXER', `Failed to watch media root: ${dir}`, { error: String(err) });
+    }
+  }
+
+  watcherInterval = setInterval(() => {
+    if (!currentProgress.running) {
+      void runLibraryScan();
+    }
+  }, 60 * 60 * 1000);
+  if (watcherInterval.unref) watcherInterval.unref();
+
+  logger.info('INDEXER', `Reconciled background server watchers (${activeFsWatchers.length} roots active).`, {
+    appMode: effectiveMode,
+    roots: uniqueDirs,
+  });
+
+  return { active: true, watchedRoots: activeFsWatchers.length };
 }

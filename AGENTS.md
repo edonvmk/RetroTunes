@@ -29,43 +29,43 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
     - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import.
     - `DiagnosticsModal.tsx` — Live `> Logs` viewer and JSON diagnostic export.
 - `electron/` (compiles to `dist-electron/`) — **Electron Main Process & Headless Server (TypeScript)**
-  - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, desktop GUI/USB IPC overrides, HTTP RPC fallback (`127.0.0.1:42815`), and optional LAN HTTP server (`enableLanServerMode`).
+  - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, `--headless*` handoff, desktop GUI/USB IPC overrides, HTTP RPC fallback (`127.0.0.1:42815`), and `desktop-server` LAN HTTP server (`syncOptionalLanServer`).
   - `electron/preload.ts` — Context-isolated `rtunesElectron` bridge (`invoke`, `on`).
   - `electron/rpcHandlers.ts` — Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) used by both Electron `main.ts` and headless `server.ts` (with graceful `{ supported: false, mode: 'server' }` stubs for desktop hardware/dialogs).
-  - `electron/server.ts` — Headless `rTunes-Server` unified HTTP + SSE (`/events`) + JSON-RPC (`/rpc`) + multipart browser upload (`/api/upload-files`) + range media streaming (`/track`, `/video`, `/artwork`) + static `dist/` SPA server (`PORT=3000`, `HOST=0.0.0.0`, `RTUNES_DATA_DIR=/config`, `RTUNES_MEDIA_DIR=/media`; build/run via `npm run build:server` & `npm run server` or `Dockerfile` / `docker-compose.yml`).
+  - `electron/server.ts` — Headless `rTunes-Server` / `--headless-client` unified HTTP + SSE (`/events`) + JSON-RPC (`/rpc`) + auth discovery/unlock (`/api/auth/info`, `/api/auth/pin-login`) + auth-gate enforcement + multipart browser upload (`/api/upload-files`) + range media streaming (`/track`, `/video`, `/artwork`) + static `dist/` SPA server (`--no-web-ui` / `RTUNES_WEB_UI=false` opt-out, `PORT=3000`, `HOST=0.0.0.0` or `127.0.0.1` for headless client, `RTUNES_DATA_DIR=/config`, `RTUNES_MEDIA_DIR=/media`).
   - `electron/db.ts` — Synchronous `better-sqlite3` + FTS5 initialization, migrations, and `recalculateArtistPopularityScores`.
-  - `electron/settings.ts` — Settings persistence in SQLite + OS Keychain / `safeStorage` secret storage.
+  - `electron/settings.ts` — 4-profile runtime mode resolution (`resolveAppMode`: `'client'`, `'headless-client'`, `'desktop-server'`, `'headless-server'` + Docker lock), salted `scryptSync` local PIN hashing, settings persistence in SQLite + OS Keychain / `safeStorage`.
   - `electron/logger.ts` — Ring-buffered, date/time-stamped structured logger + file rotation.
-  - `electron/indexer.ts` — Phased background library scanner, on-demand/hybrid metadata hydration, ListenBrainz popularity, TVMaze/IMDb artwork, and Plex/Audiobookshelf progress sync.
+  - `electron/indexer.ts` — Phased background library scanner, on-demand/hybrid metadata hydration, ListenBrainz popularity, TVMaze/IMDb artwork, Plex/Audiobookshelf progress sync, and profile-aware `reconcileBackgroundWatchers` / `stopBackgroundWatchers`.
   - `electron/cacheTranscoder.ts` — Local SSD LRU pre-cache and FFmpeg/HandBrakeCLI 360p H.264/AAC transcoder + cover art sanitizer.
   - `electron/deviceSync.ts` — Unified MTP (`rtunes-mtp`) + UMS (`DeviceTransportProvider`) sync engine, USB poller, `.m3u8` exporter, `.scrobbler.log` delta sync, and safe eject.
-  - `electron/shareManager.ts` — Direct NFS / SMB mount manager and Docker Companion Server / Standalone DB abstraction.
+  - `electron/shareManager.ts` — Direct NFS / SMB mount manager and remote `rTunes-Server` transport abstraction.
   - `electron/smartPlaylists.ts` — SQL/filter evaluator for Smart Playlists.
   - `electron/storeArr.ts` — rTunes Store catalog, multi-source Top Charts (Deezer, Last.fm, TheAudioDB, Library Relative), and Lidarr/Radarr/Sonarr integration.
   - `electron/uploadWizard.ts` — Metadata lookup, `*arr` naming preview, file transfer, and `*arr` scan trigger.
   - `electron/authOidc.ts` — Underlying Authentik OIDC / OAuth2 PKCE flow and token management.
-  - `electron/auth/authentik.ts` — Isolated SSO boundary (returns a guest/standalone context when `isDev === false`).
-  - `electron/providers/standaloneLocal.ts` — Active default provider for local SQLite + direct NFS/SMB access (never modify for SSO or Docker server changes).
-  - `electron/providers/remoteServer.ts` — Isolated stub/preview provider for future `rTunes-Server` Docker HTTPS/WebSocket API (gated behind `isDev === true`).
-  - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>`).
+  - `electron/auth/authentik.ts` — Authentik SSO gateway boundary.
+  - `electron/providers/standaloneLocal.ts` — Active default provider for local SQLite + direct NFS/SMB access.
+  - `electron/providers/remoteServer.ts` — Remote `rTunes-Server` delta cache & playback sync provider (`syncDeltaFromRemoteServer`, `pushPlaybackToRemoteServer`).
+  - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>` and `--headless` / `--headless-server` / `--headless-client` flags).
   - `electron/runtimeBus.ts` — Electron-free event bus & path/keychain runtime abstraction for shared backend modules.
-  - `electron/transcoder/binaryManager.ts` — Startup auto-check & updater for managed `FFmpeg` and `HandBrakeCLI` binaries.
+  - `electron/transcoder/binaryManager.ts` — Scheduled startup auto-check (`runStartupTranscoderCheck`) & updater for managed `FFmpeg`, `FFprobe`, and `HandBrakeCLI` binaries, plus hardware encoder detection (including Linux VA-API).
   - `electron/mediaServer.ts` — Local HTTP range-streaming server for audio/video playback.
   - `electron/platform/` — Cross-platform OS drivers: `darwin.ts`, `win32.ts`, `linux.ts`.
 - `native/` — Native helpers (`native/rtunes_mtp.c` on macOS, `native/rtunes_wpd.cs` on Windows, compiled to `.toolchain/bin/rtunes-mtp`).
 
 ### Registered IPC Channels (`electron/main.ts`)
 Do **not** duplicate existing handlers. Always reuse or extend the existing channels:
-- **System & Logs:** `media:port`, `logs:get`, `logs:clear`, `logs:testEvent`
+- **System & Logs:** `system:isDev`, `system:runtimeInfo`, `system:credentialStoreLabel`, `media:port`, `logs:get`, `logs:clear`, `logs:testEvent`
 - **OS Dialogs & Settings:** `dialog:selectDirectory`, `dialog:selectFile`, `dialog:selectFiles`, `settings:get`, `settings:save`, `settings:testConnection`
 - **Tracks & Videos:** `tracks:search`, `tracks:rate`, `tracks:recordPlay`, `tracks:hydrate`, `tracks:hydrateAlbum`, `tracks:getLyrics`, `videos:search`, `videos:markWatched`, `videos:hydrateArtwork`, `videos:updateProgress`, `audiobooks:updateProgress`
 - **Extended Media & Sync:** `books:list`, `audiobooks:list`, `photos:list`, `musicVideos:list`, `media:syncPlexAndAbs`
 - **Indexer:** `indexer:scan`, `indexer:cancel`, `indexer:progress`, `indexer:syncPopularity`, `indexer:recalculateMedians`, `indexer:cleanAllTitles`, `indexer:scanExtended`
-- **Cache:** `cache:stats`, `cache:clear`, `cache:toggleTrack`, `cache:toggleAlbum`, `cache:toggleVideo`, `cache:toggleShow`, `cache:precacheAllPlaylists`, `transcoder:getBinaryStatus`, `transcoder:checkUpdateBinaries`
+- **Cache:** `cache:stats`, `cache:clear`, `cache:toggleTrack`, `cache:toggleAlbum`, `cache:toggleVideo`, `cache:toggleShow`, `cache:precacheAllPlaylists`, `transcoder:getBinaryStatus`, `transcoder:checkUpdateBinaries`, `transcoder:checkUpdates`
 - **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`, `playlists:getExclusions`, `playlists:ignoreTrack`, `playlists:excludeTrackGlobally`, `playlists:restoreExclusion`, `egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`, `genreMatrix:get`, `genreMatrix:rebuild`, `genreMatrix:setCell`, `genreMatrix:resetCell`, `genreMatrix:testArtists`, `genreMatrix:getArtistSlice`
 - **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`, `devices:getCatalog`, `devices:removeItem`
 - **Shares & Upload:** `shares:list`, `shares:save`, `shares:delete`, `shares:mount`, `shares:unmount`, `shares:autoDetect`, `upload:searchMetadata`, `upload:previewPlan`, `upload:execute`
-- **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `sync:delta`, `sync:playback`, `sync:remoteDelta`, `auth:getState`, `auth:login`, `auth:logout`
+- **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `sync:delta`, `sync:playback`, `sync:remoteDelta`, `auth:getState`, `auth:login`, `auth:logout`, `auth:probeRemoteServer`, `auth:pinLogin`
 
 ### SQLite Multi-DB Domain Split (`electron/db.ts`)
 Four domain-isolated WAL databases inside `RTUNES_DATA_DIR` (with automatic idempotent migration from legacy `rtunes.sqlite`):

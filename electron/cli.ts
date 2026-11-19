@@ -326,6 +326,22 @@ async function main() {
   const asJson = Boolean(flags.json);
   const [group, sub] = positional;
 
+  const isHeadlessBoot =
+    positional.length === 0 &&
+    Boolean(
+      flags.headless ||
+        flags['headless-server'] ||
+        flags['headless-client'] ||
+        process.env.RTUNES_MODE === 'headless-server' ||
+        process.env.RTUNES_MODE === 'headless-client'
+    );
+
+  if (isHeadlessBoot) {
+    const { bootHeadlessServer } = await import('./server');
+    await bootHeadlessServer();
+    return;
+  }
+
   try {
     if (group === 'doctor') {
       process.exitCode = await cmdDoctor(asJson);

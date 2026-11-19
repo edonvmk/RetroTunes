@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
+    DOCKER_CONTAINER=true \
     PORT=3000 \
     HOST=0.0.0.0 \
     RTUNES_DATA_DIR=/config \

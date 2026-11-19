@@ -12,13 +12,27 @@ import {
   Usb,
   Grid,
 } from 'lucide-react';
-import { AppSettings, AuthState, ConnectionTestResult, NetworkShareRow } from '../types';
-import { invokeRpc, isDevMode } from '../bridge';
+import {
+  AppProfile,
+  AppSettings,
+  AuthMode,
+  AuthState,
+  ConnectionTestResult,
+  NetworkShareRow,
+  RemoteAuthInfo,
+  RuntimeModeInfo,
+  ServerSidebarVisibility,
+} from '../types';
+import {
+  invokeRpc,
+  loginWithPin,
+  probeRemoteServerAuth,
+  resetSharedEventSource,
+  setConfiguredRemoteServerUrl,
+  setStoredAuthToken,
+} from '../bridge';
 import { FossCreditsContent } from './AboutCreditsModal';
 import { GenreMapTab } from './GenreMapTab';
-
-const COMING_SOON_TOOLTIP =
-  'Coming soon — rTunes is currently focused on direct network shares, local media, and USB/MTP ePod syncing.';
 
 interface PreferencesModalProps {
   settings: AppSettings;
@@ -105,12 +119,22 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     }
   };
 
-  const isDev = isDevMode();
   const [autoOpenOnMtp, setAutoOpenOnMtp] = React.useState(false);
   const [credentialStoreLabel, setCredentialStoreLabel] = React.useState('OS Credential Store');
+  const [runtimeInfo, setRuntimeInfo] = React.useState<RuntimeModeInfo | null>(null);
+  const [remoteProbe, setRemoteProbe] = React.useState<{
+    loading: boolean;
+    info: RemoteAuthInfo | null;
+    error: string | null;
+  }>({ loading: false, info: null, error: null });
+  const [remotePinInput, setRemotePinInput] = React.useState('');
+  const [remotePinStatus, setRemotePinStatus] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     void loadShares();
+    invokeRpc<RuntimeModeInfo>('system:runtimeInfo')
+      .then((rt) => setRuntimeInfo(rt))
+      .catch(() => {});
     invokeRpc<boolean>('devices:getAutoOpenOnMtp')
       .then((v) => setAutoOpenOnMtp(Boolean(v)))
       .catch(() => {});
@@ -125,8 +149,93 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
       .catch(() => {});
   }, []);
 
+  const effectiveAppMode: AppProfile = runtimeInfo?.isModeLocked
+    ? runtimeInfo.appMode
+    : form.appMode || 'client';
+  const isServerRole =
+    effectiveAppMode === 'desktop-server' || effectiveAppMode === 'headless-server';
+  const isHeadlessServer = effectiveAppMode === 'headless-server';
+  const isClientRole = !isServerRole;
+  const isRemoteClient = isClientRole && form.clientSource === 'remote';
+
+  const visibleTabs = [
+    { id: 'paths' as const, label: 'Profile & Paths', icon: <FolderOpen size={18} /> },
+    ...(!isRemoteClient && !(isHeadlessServer && form.serverSidebarVisibility?.networkShares === false)
+      ? [{ id: 'shares' as const, label: 'NFS / SMB Shares', icon: <HardDrive size={18} /> }]
+      : []),
+    ...(!(isHeadlessServer && form.serverSidebarVisibility?.devices === false)
+      ? [{ id: 'devices' as const, label: 'Devices', icon: <Usb size={18} /> }]
+      : []),
+    { id: 'cache' as const, label: 'Cache & Transcoder', icon: <HardDrive size={18} /> },
+    ...(isServerRole || isRemoteClient
+      ? [{ id: 'auth' as const, label: 'Auth & Security', icon: <ShieldCheck size={18} /> }]
+      : []),
+    { id: 'apis' as const, label: 'Store & API Keys', icon: <KeyRound size={18} /> },
+    ...(!(isServerRole && form.serverSidebarVisibility?.genreMap === false)
+      ? [{ id: 'genreMap' as const, label: 'Genre Map', icon: <Grid size={18} /> }]
+      : []),
+    { id: 'actions' as const, label: 'Actions & Help', icon: <Activity size={18} /> },
+    { id: 'about' as const, label: 'About & Credits', icon: <Info size={18} /> },
+  ];
+
+  React.useEffect(() => {
+    if (!visibleTabs.some((item) => item.id === tab)) {
+      setTab('paths');
+    }
+  }, [isServerRole, isHeadlessServer, isRemoteClient, form.serverSidebarVisibility, tab]);
+
   const updateField = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const toggleSidebarVisibility = (key: keyof ServerSidebarVisibility, value: boolean) => {
+    setForm((prev) => ({
+      ...prev,
+      serverSidebarVisibility: {
+        ...prev.serverSidebarVisibility,
+        [key]: value,
+      },
+    }));
+  };
+
+  const handleProbeRemoteServer = async (urlOverride?: string) => {
+    const targetUrl = (urlOverride ?? form.dockerServerUrl ?? '').trim().replace(/\/+$/, '');
+    if (!targetUrl) {
+      setRemoteProbe({ loading: false, info: null, error: 'Enter a server URL first.' });
+      return;
+    }
+    setRemoteProbe({ loading: true, info: null, error: null });
+    setRemotePinStatus(null);
+    try {
+      let info: RemoteAuthInfo;
+      if (window.rtunesElectron?.invoke) {
+        const res = await invokeRpc<{ ok: boolean; info?: RemoteAuthInfo; error?: string }>(
+          'auth:probeRemoteServer',
+          targetUrl
+        );
+        if (!res.ok || !res.info) {
+          throw new Error(res.error || 'Server probe failed');
+        }
+        info = res.info;
+      } else {
+        info = await probeRemoteServerAuth(targetUrl);
+      }
+      setRemoteProbe({ loading: false, info, error: null });
+      setForm((prev) => ({
+        ...prev,
+        authMode: info.authMode || 'standalone',
+        authentikIssuerUrl: info.authentikIssuerUrl || prev.authentikIssuerUrl,
+        authentikClientId: info.authentikClientId || prev.authentikClientId,
+        authentikRedirectUri: info.authentikRedirectUri || prev.authentikRedirectUri,
+        trustedProxyHeader: info.trustedProxyHeader || prev.trustedProxyHeader,
+      }));
+    } catch (err) {
+      setRemoteProbe({
+        loading: false,
+        info: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const browseDirectory = async (field: keyof AppSettings, title: string) => {
@@ -178,6 +287,17 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
     setSaving(true);
     try {
       const updated = await invokeRpc<AppSettings>('settings:save', form);
+      setForm({ ...updated, localPinPlaintext: '' });
+      if (
+        (updated.appMode === 'client' || updated.appMode === 'headless-client') &&
+        updated.clientSource === 'remote' &&
+        updated.dockerServerUrl
+      ) {
+        setConfiguredRemoteServerUrl(updated.dockerServerUrl);
+      } else {
+        setConfiguredRemoteServerUrl(null);
+      }
+      resetSharedEventSource();
       onSaved(updated);
       setStatusBanner(`Preferences saved to SQLite & ${credentialStoreLabel}.`);
       setTimeout(() => setStatusBanner(null), 3000);
@@ -247,20 +367,10 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             padding: '8px 14px',
           }}
         >
-          {[
-            { id: 'paths', label: 'Paths & Backend', icon: <FolderOpen size={18} /> },
-            { id: 'shares', label: 'NFS / SMB Shares', icon: <HardDrive size={18} /> },
-            { id: 'devices', label: 'Devices', icon: <Usb size={18} /> },
-            { id: 'cache', label: 'Cache & Transcoder', icon: <HardDrive size={18} /> },
-            { id: 'auth', label: isDev ? 'Authentik SSO [DEV]' : 'Authentik SSO', icon: <ShieldCheck size={18} /> },
-            { id: 'apis', label: 'Store & API Keys', icon: <KeyRound size={18} /> },
-            { id: 'genreMap', label: 'Genre Map', icon: <Grid size={18} /> },
-            { id: 'actions', label: 'Actions & Help', icon: <Activity size={18} /> },
-            { id: 'about', label: 'About & Credits', icon: <Info size={18} /> },
-          ].map((item) => (
+          {visibleTabs.map((item) => (
             <button
               key={item.id}
-              onClick={() => setTab(item.id as any)}
+              onClick={() => setTab(item.id)}
               style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -289,118 +399,314 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
         <div style={{ padding: 20, overflowY: 'auto', maxHeight: '66vh', display: 'flex', flexDirection: 'column', gap: 16 }}>
           {tab === 'paths' && (
             <>
-              {/* Priority 3: Backend Architecture Mode (Standalone vs Remote Docker Server) */}
+              {/* Application Profile & Role */}
               <div className="epod-capacity-card">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <strong>
-                    Backend Architecture Mode (MediaDatabaseProvider & FileTransportProvider)
-                  </strong>
-                  {isDev ? (
-                    <span className="aqua-dev-badge">[DEV PREVIEW]</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <strong>Application Profile &amp; Role</strong>
+                  {runtimeInfo?.isModeLocked ? (
+                    <span
+                      style={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        padding: '2px 8px',
+                        borderRadius: 10,
+                        background: '#dbeafe',
+                        color: '#1e40af',
+                        border: '1px solid #93c5fd',
+                      }}
+                    >
+                      Locked by {runtimeInfo.lockReason === 'docker' ? 'Docker Container' : 'CLI Flag'} ({effectiveAppMode})
+                    </span>
                   ) : (
-                    <span className="aqua-coming-soon-pill" title={COMING_SOON_TOOLTIP}>
-                      rTunes-Server: Coming Soon
+                    <span style={{ fontSize: 11, color: '#475569' }}>
+                      Desktop GUI Profile
                     </span>
                   )}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+
+                <div style={{ display: 'grid', gridTemplateColumns: isClientRole ? '1fr 1fr' : '1fr', gap: 10 }}>
                   <div>
                     <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
-                      Active Provider Mode:
+                      Application Profile:
                     </label>
                     <select
                       className="aqua-input"
                       style={{ width: '100%' }}
-                      value={
-                        form.backendMode === 'docker_server' && !isDev
-                          ? 'standalone'
-                          : form.backendMode || (form.enableLanServerMode ? 'host_server' : 'standalone')
-                      }
-                      onChange={(e) => {
-                        const mode = e.target.value as 'standalone' | 'host_server' | 'docker_server';
-                        setForm((prev) => ({
-                          ...prev,
-                          backendMode: mode,
-                          enableLanServerMode: mode === 'host_server',
-                        }));
-                      }}
+                      disabled={Boolean(runtimeInfo?.isModeLocked)}
+                      value={effectiveAppMode}
+                      onChange={(e) => updateField('appMode', e.target.value as AppProfile)}
                     >
-                      <option value="standalone">
-                        Standalone / Direct Share Mode (Local SQLite + Mounted NFS/SMB)
-                      </option>
-                      <option value="host_server">
-                        Desktop Host / LAN Server Mode (Local + Serve Web UI &amp; Media over HTTP)
-                      </option>
-                      <option value="docker_server" disabled={!isDev}>
-                        {isDev
-                          ? 'Remote Docker Server Mode (rTunes-Server + Authentik OIDC JWT) [DEV PREVIEW]'
-                          : 'Remote Docker Server Mode (rTunes-Server Client) — Coming Soon'}
-                      </option>
+                      {runtimeInfo?.isModeLocked ? (
+                        <option value={effectiveAppMode}>
+                          {effectiveAppMode === 'headless-server'
+                            ? 'Headless Server (Authoritative HTTP Server & Web UI)'
+                            : 'Headless Client (Local HTTP Client Web UI)'}
+                        </option>
+                      ) : (
+                        <>
+                          <option value="client">Client Mode (Standalone Player or Remote Client)</option>
+                          <option value="desktop-server">
+                            Desktop Server Mode (GUI + LAN Web UI &amp; Media Streaming Host)
+                          </option>
+                        </>
+                      )}
                     </select>
                   </div>
-                  <div className={!isDev ? 'aqua-gated-disabled' : ''} title={!isDev ? COMING_SOON_TOOLTIP : undefined}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
-                      <span>rTunes-Server Companion URL:</span>
-                      {!isDev && <span className="aqua-coming-soon-pill">Coming Soon</span>}
-                    </label>
-                    <input
-                      className="aqua-input"
-                      style={{ width: '100%' }}
-                      disabled={!isDev}
-                      placeholder="https://rtunes-server.yourdomain.com"
-                      value={form.dockerServerUrl || ''}
-                      onChange={(e) => updateField('dockerServerUrl', e.target.value)}
-                    />
-                  </div>
+
+                  {isClientRole && (
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
+                        Library Source:
+                      </label>
+                      <select
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={form.clientSource || 'local'}
+                        onChange={(e) => updateField('clientSource', e.target.value as 'local' | 'remote')}
+                      >
+                        <option value="local">Local Library (Direct Disk / Mounted NAS Shares)</option>
+                        <option value="remote">Remote rTunes-Server (LAN / HTTPS Companion)</option>
+                      </select>
+                    </div>
+                  )}
                 </div>
-                <div
-                  style={{
-                    marginTop: 10,
-                    paddingTop: 10,
-                    borderTop: '1px solid #d5dce6',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                  }}
-                >
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(form.enableLanServerMode || form.backendMode === 'host_server')}
-                      onChange={(e) => {
-                        const enabled = e.target.checked;
-                        setForm((prev) => ({
-                          ...prev,
-                          enableLanServerMode: enabled,
-                          backendMode: enabled
-                            ? 'host_server'
-                            : prev.backendMode === 'host_server'
-                            ? 'standalone'
-                            : prev.backendMode,
-                        }));
-                      }}
-                    />
-                    <span>
-                      Host Web UI, RPC &amp; Media Streaming on LAN (http://localhost:{form.lanServerPort ?? 3000})
-                    </span>
-                  </label>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <label style={{ fontSize: 11, fontWeight: 600 }}>Port:</label>
-                    <input
-                      type="number"
-                      min={1024}
-                      max={65535}
-                      className="aqua-input"
-                      style={{ width: 84 }}
-                      disabled={!(form.enableLanServerMode || form.backendMode === 'host_server')}
-                      value={form.lanServerPort ?? 3000}
-                      onChange={(e) => updateField('lanServerPort', Number(e.target.value) || 3000)}
-                    />
+
+                {isRemoteClient && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      paddingTop: 12,
+                      borderTop: '1px solid #d5dce6',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                    }}
+                  >
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
+                        Remote rTunes-Server URL:
+                      </label>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <input
+                          className="aqua-input"
+                          style={{ flex: 1 }}
+                          placeholder="http://192.168.1.10:3000 or https://rtunes.yourdomain.com"
+                          value={form.dockerServerUrl || ''}
+                          onChange={(e) => updateField('dockerServerUrl', e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="aqua-btn primary"
+                          disabled={remoteProbe.loading}
+                          onClick={() => void handleProbeRemoteServer()}
+                        >
+                          {remoteProbe.loading ? 'Detecting...' : 'Detect Server'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {remoteProbe.error && (
+                      <div style={{ fontSize: 11, color: '#b91c1c', fontWeight: 600 }}>
+                        Probe error: {remoteProbe.error}
+                      </div>
+                    )}
+
+                    {remoteProbe.info && (
+                      <div
+                        style={{
+                          padding: 10,
+                          borderRadius: 6,
+                          background: '#f8fafc',
+                          border: '1px solid #cbd5e1',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 8,
+                        }}
+                      >
+                        <div style={{ fontSize: 11.5, fontWeight: 700, color: '#0f172a' }}>
+                          Detected: {remoteProbe.info.serverName} ({remoteProbe.info.appMode}) •{' '}
+                          {!remoteProbe.info.authGateEnabled || remoteProbe.info.authMode === 'standalone'
+                            ? 'Direct Server (Open Access)'
+                            : remoteProbe.info.authMode === 'local-pin'
+                            ? 'PIN Unlock Required'
+                            : remoteProbe.info.authMode === 'authentik'
+                            ? 'Authentik SSO Mode'
+                            : 'Reverse Proxy Header Auth'}
+                        </div>
+
+                        {remoteProbe.info.authGateEnabled && remoteProbe.info.authMode === 'local-pin' && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <input
+                              type="password"
+                              className="aqua-input"
+                              style={{ flex: 1 }}
+                              placeholder="Enter server access PIN..."
+                              value={remotePinInput}
+                              onChange={(e) => setRemotePinInput(e.target.value)}
+                            />
+                            <button
+                              type="button"
+                              className="aqua-btn primary"
+                              onClick={async () => {
+                                setRemotePinStatus(null);
+                                try {
+                                  const targetUrl = (form.dockerServerUrl || '').trim();
+                                  const res = window.rtunesElectron?.invoke
+                                    ? await invokeRpc<{ ok: boolean; token?: string; error?: string }>(
+                                        'auth:pinLogin',
+                                        remotePinInput,
+                                        targetUrl
+                                      )
+                                    : await loginWithPin(remotePinInput, targetUrl);
+                                  if (!res.ok || !res.token) {
+                                    setRemotePinStatus(res.error || 'PIN unlock failed.');
+                                    return;
+                                  }
+                                  setStoredAuthToken(res.token);
+                                  resetSharedEventSource();
+                                  setRemotePinInput('');
+                                  setRemotePinStatus('PIN verified — bearer token stored.');
+                                } catch (err) {
+                                  setRemotePinStatus(err instanceof Error ? err.message : String(err));
+                                }
+                              }}
+                            >
+                              Unlock
+                            </button>
+                          </div>
+                        )}
+
+                        {remotePinStatus && (
+                          <div style={{ fontSize: 11, color: '#15803d', fontWeight: 600 }}>
+                            {remotePinStatus}
+                          </div>
+                        )}
+
+                        {remoteProbe.info.authGateEnabled && remoteProbe.info.authMode === 'authentik' && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <div style={{ fontSize: 11, color: '#334155' }}>
+                              Issuer: <code>{remoteProbe.info.authentikIssuerUrl || 'Configured on server'}</code>{' '}
+                              • Client ID: <code>{remoteProbe.info.authentikClientId || 'retrotunes-desktop'}</code>
+                            </div>
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <button
+                                type="button"
+                                className="aqua-btn primary"
+                                onClick={async () => {
+                                  await invokeRpc('settings:save', form);
+                                  const next = await invokeRpc<AuthState>('auth:login');
+                                  onAuthChanged(next);
+                                }}
+                              >
+                                Sign In with Authentik SSO
+                              </button>
+                            </div>
+                            <details style={{ fontSize: 11, color: '#475569' }}>
+                              <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                                Advanced SSO Override
+                              </summary>
+                              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+                                <input
+                                  className="aqua-input"
+                                  placeholder="Authentik Issuer URL"
+                                  value={form.authentikIssuerUrl}
+                                  onChange={(e) => updateField('authentikIssuerUrl', e.target.value)}
+                                />
+                                <input
+                                  className="aqua-input"
+                                  placeholder="OAuth2 Client ID"
+                                  value={form.authentikClientId}
+                                  onChange={(e) => updateField('authentikClientId', e.target.value)}
+                                />
+                              </div>
+                            </details>
+                          </div>
+                        )}
+
+                        {remoteProbe.info.authGateEnabled && remoteProbe.info.authMode === 'proxy-headers' && (
+                          <div style={{ fontSize: 11, color: '#334155' }}>
+                            Authenticated via reverse proxy trusted header:{' '}
+                            <code>{remoteProbe.info.trustedProxyHeader || 'X-authentik-username'}</code>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                </div>
+                )}
+
+                {isServerRole && (
+                  <div
+                    style={{
+                      marginTop: 12,
+                      paddingTop: 12,
+                      borderTop: '1px solid #d5dce6',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 12,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={form.backgroundWatchers !== false}
+                          onChange={(e) => updateField('backgroundWatchers', e.target.checked)}
+                        />
+                        <span>Enable background filesystem watchers &amp; hourly library scan</span>
+                      </label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <label style={{ fontSize: 11, fontWeight: 600 }}>HTTP Port:</label>
+                        <input
+                          type="number"
+                          min={1024}
+                          max={65535}
+                          className="aqua-input"
+                          style={{ width: 84 }}
+                          value={form.lanServerPort ?? 3000}
+                          onChange={(e) => updateField('lanServerPort', Number(e.target.value) || 3000)}
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <strong style={{ display: 'block', fontSize: 11.5, marginBottom: 6 }}>
+                        Server UI &amp; Web Client Sidebar Visibility
+                      </strong>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 6 }}>
+                        {(
+                          [
+                            ['music', 'Music'],
+                            ['movies', 'Movies'],
+                            ['tvShows', 'TV Shows'],
+                            ['musicVideos', 'Music Videos'],
+                            ['audiobooks', 'Audiobooks'],
+                            ['books', 'Books'],
+                            ['photos', 'Photos'],
+                            ['store', 'Store'],
+                            ['devices', 'Devices'],
+                            ['networkShares', 'Network Shares'],
+                            ['genreMap', 'Genre Map'],
+                          ] as [keyof ServerSidebarVisibility, string][]
+                        ).map(([key, label]) => (
+                          <label
+                            key={key}
+                            style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11, cursor: 'pointer' }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={form.serverSidebarVisibility?.[key] !== false}
+                              onChange={(e) => toggleSidebarVisibility(key, e.target.checked)}
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
+              {!isRemoteClient && (
               <div className="epod-capacity-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
                   <strong>Master Media Share & Local Directory Paths</strong>
@@ -495,6 +801,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 ))}
                 {renderTestBadge('paths')}
               </div>
+              )}
 
               <div className="epod-capacity-card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
@@ -823,6 +1130,17 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   />
                   Enable Automatic LRU Eviction when cache exceeds quota
                 </label>
+
+                {isClientRole && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.enableClientLocalTranscoding)}
+                      onChange={(e) => updateField('enableClientLocalTranscoding', e.target.checked)}
+                    />
+                    Enable Client Local Video Transcoding (Sync 360p ePod MP4 locally on this device)
+                  </label>
+                )}
               </div>
 
               <div style={{ marginBottom: 16 }}>
@@ -852,10 +1170,11 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   value={form.hardwareAccelMode}
                   onChange={(e) => updateField('hardwareAccelMode', e.target.value as any)}
                 >
-                  <option value="auto">Auto-Detect (VideoToolbox / NVENC / QSV)</option>
+                  <option value="auto">Auto-Detect (VideoToolbox / NVENC / QSV / VA-API)</option>
                   <option value="vt_h264">macOS ARM64 VideoToolbox (h264_videotoolbox)</option>
                   <option value="nvenc">NVIDIA NVENC (h264_nvenc)</option>
                   <option value="qsv">Intel QuickSync (h264_qsv)</option>
+                  <option value="vaapi">Linux VA-API Hardware Encoder (h264_vaapi)</option>
                   <option value="software">Software CPU x264 (libx264)</option>
                 </select>
                 <p style={{ fontSize: 11, color: '#475569', marginTop: 6 }}>
@@ -891,43 +1210,88 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   borderTop: '1px solid #cbd5e1',
                 }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <strong>Transcoder Binaries (FFmpeg &amp; HandBrakeCLI)</strong>
-                  <button
-                    className="aqua-btn primary"
-                    disabled={checkingBinaries}
-                    onClick={async () => {
-                      setCheckingBinaries(true);
-                      setStatusBanner('Checking / updating FFmpeg & HandBrakeCLI...');
-                      try {
-                        const res = await invokeRpc<any>('transcoder:checkUpdateBinaries', {
-                          forceDownload: true,
-                          autoDownload: true,
-                        });
-                        setBinaryStatus(res);
-                        setStatusBanner('Transcoder binaries checked & updated.');
-                      } catch (err) {
-                        setStatusBanner(`Binary check failed: ${String(err)}`);
-                      } finally {
-                        setCheckingBinaries(false);
-                      }
-                    }}
-                  >
-                    {checkingBinaries ? 'Checking...' : 'Check & Update FFmpeg / HandBrakeCLI'}
-                  </button>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
+                  <strong>Transcoder Binaries (FFmpeg, FFprobe &amp; HandBrakeCLI)</strong>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <select
+                      className="aqua-input"
+                      value={form.transcoderUpdateSchedule || 'weekly'}
+                      onChange={(e) => updateField('transcoderUpdateSchedule', e.target.value as any)}
+                      title="Startup Transcoder Binary Update Schedule"
+                    >
+                      <option value="off">Auto-Check: Off</option>
+                      <option value="daily">Auto-Check: Daily</option>
+                      <option value="weekly">Auto-Check: Weekly</option>
+                    </select>
+                    <button
+                      className="aqua-btn"
+                      disabled={checkingBinaries}
+                      onClick={async () => {
+                        setCheckingBinaries(true);
+                        setStatusBanner('Checking transcoder binary updates...');
+                        try {
+                          const res = await invokeRpc<any>('transcoder:checkUpdates');
+                          setBinaryStatus(res);
+                          updateField('lastTranscoderUpdateCheckAt', Date.now());
+                          setStatusBanner('Transcoder update check complete.');
+                        } catch (err) {
+                          setStatusBanner(`Binary check failed: ${String(err)}`);
+                        } finally {
+                          setCheckingBinaries(false);
+                        }
+                      }}
+                    >
+                      {checkingBinaries ? 'Checking...' : 'Check Now'}
+                    </button>
+                    <button
+                      className="aqua-btn primary"
+                      disabled={checkingBinaries}
+                      onClick={async () => {
+                        setCheckingBinaries(true);
+                        setStatusBanner('Checking / updating FFmpeg & HandBrakeCLI...');
+                        try {
+                          const res = await invokeRpc<any>('transcoder:checkUpdateBinaries', {
+                            forceDownload: true,
+                            autoDownload: true,
+                          });
+                          setBinaryStatus(res);
+                          updateField('lastTranscoderUpdateCheckAt', Date.now());
+                          setStatusBanner('Transcoder binaries checked & updated.');
+                        } catch (err) {
+                          setStatusBanner(`Binary check failed: ${String(err)}`);
+                        } finally {
+                          setCheckingBinaries(false);
+                        }
+                      }}
+                    >
+                      {checkingBinaries ? 'Downloading...' : 'Force Re-Download Binaries'}
+                    </button>
+                  </div>
                 </div>
                 <div style={{ fontSize: 11, color: '#334155', display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <div>
                     <strong>FFmpeg:</strong>{' '}
-                    {binaryStatus?.ffmpeg?.found
+                    {binaryStatus?.ffmpeg?.present
                       ? `${binaryStatus.ffmpeg.version || 'Installed'} (${binaryStatus.ffmpeg.path})`
-                      : 'Not found — click Check & Update to auto-install'}
+                      : 'Not found — click Check Now to auto-install'}
+                  </div>
+                  <div>
+                    <strong>FFprobe:</strong>{' '}
+                    {binaryStatus?.ffprobe?.present
+                      ? `${binaryStatus.ffprobe.version || 'Installed'} (${binaryStatus.ffprobe.path})`
+                      : 'Not found — click Check Now to auto-install'}
                   </div>
                   <div>
                     <strong>HandBrakeCLI:</strong>{' '}
-                    {binaryStatus?.handbrake?.found
+                    {binaryStatus?.handbrake?.present
                       ? `${binaryStatus.handbrake.version || 'Installed'} (${binaryStatus.handbrake.path})`
-                      : 'Not found — click Check & Update to auto-install'}
+                      : 'Not found — optional fallback'}
+                  </div>
+                  <div style={{ color: '#64748b' }}>
+                    <strong>Last Startup/Manual Check:</strong>{' '}
+                    {form.lastTranscoderUpdateCheckAt
+                      ? new Date(form.lastTranscoderUpdateCheckAt).toLocaleString()
+                      : 'Never'}
                   </div>
                 </div>
               </div>
@@ -969,39 +1333,29 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
           )}
 
           {tab === 'auth' && (
-            <div
-              className={`epod-capacity-card ${!isDev ? 'aqua-gated-disabled' : ''}`}
-              title={!isDev ? COMING_SOON_TOOLTIP : undefined}
-            >
+            <div className="epod-capacity-card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <strong>Authentik OIDC / OAuth2 PKCE Single Sign-On</strong>
-                  {isDev ? (
-                    <span className="aqua-dev-badge">[DEV PREVIEW]</span>
-                  ) : (
-                    <span className="aqua-coming-soon-pill" title={COMING_SOON_TOOLTIP}>
-                      Coming Soon
-                    </span>
-                  )}
-                </div>
-                <button className="aqua-btn" disabled={!isDev} onClick={() => runTest('authentik')}>
-                  <Activity size={13} /> Test OIDC Discovery
-                </button>
+                <strong>Server Authentication &amp; Security Gate</strong>
+                {form.authMode === 'authentik' && (
+                  <button className="aqua-btn" onClick={() => runTest('authentik')}>
+                    <Activity size={13} /> Test OIDC Discovery
+                  </button>
+                )}
               </div>
 
-              {!isDev && (
-                <div
-                  style={{
-                    marginBottom: 12,
-                    padding: '8px 10px',
-                    borderRadius: 6,
-                    background: '#f1f5f9',
-                    border: '1px solid #cbd5e1',
-                    fontSize: 11,
-                    color: '#475569',
-                  }}
-                >
-                  {COMING_SOON_TOOLTIP}
+              {isServerRole && (
+                <div style={{ marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid #d5dce6' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.authGateEnabled)}
+                      onChange={(e) => updateField('authGateEnabled', e.target.checked)}
+                    />
+                    <span>Enable Authentication Gate on Server HTTP API, SSE &amp; Media Endpoints</span>
+                  </label>
+                  <div style={{ fontSize: 11, color: '#475569', marginTop: 4, marginLeft: 22 }}>
+                    When enabled (and Auth Mode is not Standalone), `/rpc`, `/events`, and `/track` / `/video` / `/artwork` require valid credentials. `/api/health`, `/api/auth/info`, and `/api/auth/pin-login` remain reachable for client discovery and unlock.
+                  </div>
                 </div>
               )}
 
@@ -1010,118 +1364,152 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                 <select
                   className="aqua-input"
                   style={{ width: '100%' }}
-                  disabled={!isDev}
-                  value={isDev ? form.authMode : 'standalone'}
-                  onChange={(e) => updateField('authMode', e.target.value as any)}
+                  value={form.authMode || 'standalone'}
+                  onChange={(e) => updateField('authMode', e.target.value as AuthMode)}
                 >
-                  <option value="standalone">Standalone Mode (Direct *arr & NFS/SMB connections)</option>
-                  <option value="authentik" disabled={!isDev}>
-                    Authentik SSO + Homelab Gateway Mode (OAuth2 PKCE)
-                  </option>
+                  <option value="standalone">Standalone / Open (No login gate)</option>
+                  <option value="local-pin">Local Access PIN (Salted scrypt + Bearer Token)</option>
+                  <option value="authentik">Authentik SSO + Homelab Gateway (OAuth2 PKCE JWT)</option>
+                  <option value="proxy-headers">Reverse Proxy Trusted Header (Traefik / Nginx / Authentik ForwardAuth)</option>
                 </select>
               </div>
 
-              <div style={{ marginBottom: 10 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>
-                  Authentik OIDC Issuer URL:
-                </label>
-                <input
-                  className="aqua-input"
-                  style={{ width: '100%' }}
-                  disabled={!isDev}
-                  placeholder="https://auth.yourdomain.com/application/o/retrotunes/"
-                  value={form.authentikIssuerUrl}
-                  onChange={(e) => updateField('authentikIssuerUrl', e.target.value)}
-                />
-              </div>
+              {form.authMode === 'local-pin' && (
+                <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: '#f8fafc', border: '1px solid #cbd5e1' }}>
+                  <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>
+                    {form.hasLocalPin ? 'Update Local Access PIN (leave blank to keep existing PIN):' : 'Set Local Access PIN:'}
+                  </label>
+                  <input
+                    type="password"
+                    className="aqua-input"
+                    style={{ width: '100%' }}
+                    placeholder={form.hasLocalPin ? 'PIN is set — enter a new PIN to replace it' : 'Enter access PIN...'}
+                    value={form.localPinPlaintext || ''}
+                    onChange={(e) => updateField('localPinPlaintext', e.target.value)}
+                  />
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                    {form.hasLocalPin
+                      ? 'An active salted scrypt PIN hash is stored in SQLite. Click Save Preferences after entering a new PIN.'
+                      : 'Enter a PIN and click Save Preferences to hash and persist it.'}
+                  </div>
+                </div>
+              )}
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                <div>
-                  <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>OAuth2 Client ID:</label>
+              {form.authMode === 'proxy-headers' && (
+                <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: '#f8fafc', border: '1px solid #cbd5e1' }}>
+                  <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>
+                    Trusted Proxy Username Header:
+                  </label>
                   <input
                     className="aqua-input"
                     style={{ width: '100%' }}
-                    disabled={!isDev}
-                    value={form.authentikClientId}
-                    onChange={(e) => updateField('authentikClientId', e.target.value)}
+                    placeholder="X-authentik-username"
+                    value={form.trustedProxyHeader || 'X-authentik-username'}
+                    onChange={(e) => updateField('trustedProxyHeader', e.target.value)}
                   />
+                  <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>
+                    Server allows requests carrying a non-empty value for this HTTP header injected by your reverse proxy.
+                  </div>
                 </div>
-                <div>
-                  <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>Loopback Redirect URI:</label>
-                  <input
-                    className="aqua-input"
-                    style={{ width: '100%' }}
-                    disabled={!isDev}
-                    value={form.authentikRedirectUri}
-                    onChange={(e) => updateField('authentikRedirectUri', e.target.value)}
-                  />
-                </div>
-              </div>
+              )}
 
-              <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>
-                  Companion Homelab Gateway URL (FastAPI/Go Proxy for Non-Admin Store Requests):
-                </label>
-                <input
-                  className="aqua-input"
-                  style={{ width: '100%' }}
-                  disabled={!isDev}
-                  placeholder="https://gateway.yourdomain.com"
-                  value={form.homelabGatewayUrl}
-                  onChange={(e) => updateField('homelabGatewayUrl', e.target.value)}
-                />
-              </div>
+              {form.authMode === 'authentik' && (
+                <>
+                  <div style={{ marginBottom: 10 }}>
+                    <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>
+                      Authentik OIDC Issuer URL:
+                    </label>
+                    <input
+                      className="aqua-input"
+                      style={{ width: '100%' }}
+                      placeholder="https://auth.yourdomain.com/application/o/retrotunes/"
+                      value={form.authentikIssuerUrl}
+                      onChange={(e) => updateField('authentikIssuerUrl', e.target.value)}
+                    />
+                  </div>
 
-              {renderTestBadge('authentik')}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                    <div>
+                      <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>OAuth2 Client ID:</label>
+                      <input
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={form.authentikClientId}
+                        onChange={(e) => updateField('authentikClientId', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>Loopback Redirect URI:</label>
+                      <input
+                        className="aqua-input"
+                        style={{ width: '100%' }}
+                        value={form.authentikRedirectUri}
+                        onChange={(e) => updateField('authentikRedirectUri', e.target.value)}
+                      />
+                    </div>
+                  </div>
 
-              <div
-                style={{
-                  marginTop: 14,
-                  paddingTop: 12,
-                  borderTop: '1px solid #cbd5e1',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
-              >
-                <div>
-                  {authState.authenticated && authState.user && isDev ? (
-                    <span style={{ color: '#15803d', fontWeight: 700 }}>
-                      Signed in via SSO as {authState.user.name} (@{authState.user.username})
-                    </span>
-                  ) : (
-                    <span style={{ color: '#475569' }}>
-                      {isDev
-                        ? 'Not currently signed in to Authentik SSO.'
-                        : 'SSO is disabled in production builds (Standalone mode active).'}
-                    </span>
-                  )}
-                </div>
-                {authState.authenticated && isDev ? (
-                  <button
-                    className="aqua-btn"
-                    disabled={!isDev}
-                    onClick={async () => {
-                      const next = await invokeRpc<AuthState>('auth:logout');
-                      onAuthChanged(next);
+                  <div style={{ marginBottom: 12 }}>
+                    <label style={{ display: 'block', fontWeight: 600, marginBottom: 4 }}>
+                      Companion Homelab Gateway URL (Proxy for Store Requests):
+                    </label>
+                    <input
+                      className="aqua-input"
+                      style={{ width: '100%' }}
+                      placeholder="https://gateway.yourdomain.com"
+                      value={form.homelabGatewayUrl}
+                      onChange={(e) => updateField('homelabGatewayUrl', e.target.value)}
+                    />
+                  </div>
+
+                  {renderTestBadge('authentik')}
+
+                  <div
+                    style={{
+                      marginTop: 14,
+                      paddingTop: 12,
+                      borderTop: '1px solid #cbd5e1',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
                     }}
                   >
-                    Logout SSO
-                  </button>
-                ) : (
-                  <button
-                    className="aqua-btn primary"
-                    disabled={!isDev}
-                    onClick={async () => {
-                      await invokeRpc('settings:save', form);
-                      const next = await invokeRpc<AuthState>('auth:login');
-                      onAuthChanged(next);
-                    }}
-                  >
-                    Sign In with Authentik (PKCE)
-                  </button>
-                )}
-              </div>
+                    <div>
+                      {authState.authenticated && authState.user ? (
+                        <span style={{ color: '#15803d', fontWeight: 700 }}>
+                          Signed in via SSO as {authState.user.name} (@{authState.user.username})
+                        </span>
+                      ) : (
+                        <span style={{ color: '#475569' }}>
+                          Not currently signed in to Authentik SSO.
+                        </span>
+                      )}
+                    </div>
+                    {authState.authenticated ? (
+                      <button
+                        className="aqua-btn"
+                        onClick={async () => {
+                          const next = await invokeRpc<AuthState>('auth:logout');
+                          onAuthChanged(next);
+                        }}
+                      >
+                        Logout SSO
+                      </button>
+                    ) : (
+                      <button
+                        className="aqua-btn primary"
+                        onClick={async () => {
+                          await invokeRpc('settings:save', form);
+                          const next = await invokeRpc<AuthState>('auth:login');
+                          onAuthChanged(next);
+                        }}
+                      >
+                        Sign In with Authentik (PKCE)
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           )}
 

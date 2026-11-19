@@ -1,3 +1,5 @@
+import type { RemoteAuthInfo } from './types';
+
 declare global {
   interface Window {
     electronAPI?: {
@@ -46,6 +48,86 @@ export function getConfiguredRemoteServerUrl(): string {
   }
 }
 
+export function setConfiguredRemoteServerUrl(url: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const cleaned = (url || '').trim().replace(/\/+$/, '');
+    if (cleaned) {
+      window.localStorage?.setItem('rtunes_server_url', cleaned);
+    } else {
+      window.localStorage?.removeItem('rtunes_server_url');
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function getStoredAuthToken(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage?.getItem('rtunes_auth_token')?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setStoredAuthToken(token: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const cleaned = (token || '').trim();
+    if (cleaned) {
+      window.localStorage?.setItem('rtunes_auth_token', cleaned);
+    } else {
+      window.localStorage?.removeItem('rtunes_auth_token');
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function appendAuthTokenParam(url: string): string {
+  const token = getStoredAuthToken();
+  if (!token || !url) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
+function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const token = getStoredAuthToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  return headers;
+}
+
+export async function probeRemoteServerAuth(serverUrl?: string): Promise<RemoteAuthInfo> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/api/auth/info`);
+  if (!res.ok) {
+    throw new Error(`Probe failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as RemoteAuthInfo;
+}
+
+export async function loginWithPin(
+  pin: string,
+  serverUrl?: string
+): Promise<{ ok: boolean; token?: string; error?: string }> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/api/auth/pin-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pin }),
+  });
+  const json = (await res.json()) as { ok: boolean; token?: string; error?: string };
+  if (res.ok && json.ok && json.token) {
+    setStoredAuthToken(json.token);
+    resetSharedEventSource();
+  }
+  return json;
+}
+
 export interface SyncDeltaResponse {
   current_rev: number;
   upserted: any[];
@@ -55,7 +137,9 @@ export interface SyncDeltaResponse {
 
 export async function fetchSyncDelta(sinceRev = 0, limit = 2000): Promise<SyncDeltaResponse> {
   const base = getConfiguredRemoteServerUrl() || getRpcBaseUrl();
-  const res = await fetch(`${base}/api/sync/delta?since_rev=${sinceRev}&limit=${limit}`);
+  const res = await fetch(`${base}/api/sync/delta?since_rev=${sinceRev}&limit=${limit}`, {
+    headers: buildAuthHeaders(),
+  });
   if (!res.ok) {
     throw new Error(`Delta sync failed (HTTP ${res.status})`);
   }
@@ -74,7 +158,7 @@ export async function postPlaybackSync(
   const base = getConfiguredRemoteServerUrl() || getRpcBaseUrl();
   const res = await fetch(`${base}/api/sync/playback`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ updates }),
   });
   if (!res.ok) {
@@ -117,10 +201,18 @@ export async function invokeRpc<T = any>(channel: string, ...args: unknown[]): P
   const baseUrl = getRpcBaseUrl();
   const res = await fetch(`${baseUrl}/rpc`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ channel, args }),
   });
-  const json = (await res.json()) as { ok: boolean; data?: T; error?: string };
+  const json = (await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }))) as {
+    ok: boolean;
+    data?: T;
+    error?: string;
+    authMode?: string;
+  };
+  if (res.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('rtunes:auth-required', { detail: json }));
+  }
   if (!json.ok) {
     throw new Error(json.error || `RPC error on ${channel}`);
   }
@@ -135,7 +227,7 @@ function ensureSharedEventSource(): void {
     return;
   }
   const baseUrl = getRpcBaseUrl();
-  const es = new EventSource(`${baseUrl}/events`);
+  const es = new EventSource(appendAuthTokenParam(`${baseUrl}/events`));
   es.onmessage = (ev) => {
     try {
       const parsed = JSON.parse(ev.data) as { channel?: string; payload?: unknown };
@@ -154,6 +246,16 @@ function ensureSharedEventSource(): void {
     // EventSource automatically reconnects
   };
   sharedEventSource = es;
+}
+
+export function resetSharedEventSource(): void {
+  if (sharedEventSource) {
+    sharedEventSource.close();
+    sharedEventSource = null;
+  }
+  if (sseListeners.size > 0) {
+    ensureSharedEventSource();
+  }
 }
 
 export function subscribeEvent<T = any>(

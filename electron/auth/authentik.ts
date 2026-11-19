@@ -8,43 +8,21 @@ import {
 
 export type { AuthState };
 
-const STANDALONE_GUEST_STATE: AuthState = {
-  authenticated: false,
-  mode: 'standalone',
-  user: null,
-  accessToken: null,
-  expiresAt: null,
-};
-
 /**
- * Isolated Authentik OIDC / SSO module.
- * In production builds (isDev === false), SSO is gated as "Coming Soon" and
- * always returns a guest/standalone context without invoking OIDC flows.
+ * Authentik OIDC / SSO gateway boundary.
  */
-export function initAuthentikAuth(isDev: boolean): AuthState {
-  if (!isDev) {
-    return { ...STANDALONE_GUEST_STATE };
-  }
+export function initAuthentikAuth(_isDev = true): AuthState {
   return initAuthFromKeychain();
 }
 
-export function getAuthentikAuthState(isDev: boolean): AuthState {
-  if (!isDev) {
-    return { ...STANDALONE_GUEST_STATE };
-  }
+export function getAuthentikAuthState(_isDev = true): AuthState {
   return getPublicAuthState();
 }
 
-export async function loginWithAuthentik(isDev: boolean): Promise<AuthState> {
-  if (!isDev) {
-    return { ...STANDALONE_GUEST_STATE };
-  }
+export async function loginWithAuthentik(_isDev = true): Promise<AuthState> {
   return startAuthentikPkceLogin();
 }
 
-export function logoutAuthentik(isDev: boolean): AuthState {
-  if (!isDev) {
-    return { ...STANDALONE_GUEST_STATE };
-  }
+export function logoutAuthentik(_isDev = true): AuthState {
   return logoutAuthentikSso();
 }

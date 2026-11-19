@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import { emitRendererEvent } from './runtimeBus';
 import {
   getDb,
@@ -19,6 +20,9 @@ import {
 import {
   getSettings,
   saveSettings,
+  resolveAppMode,
+  verifyLocalPin,
+  getStoredLocalPinHash,
   testIntegrationConnection,
   AppSettings,
 } from './settings';
@@ -36,6 +40,7 @@ import {
   updateVideoPlaybackProgress,
   updateAudiobookPlaybackProgress,
   scanExtendedMediaSections,
+  reconcileBackgroundWatchers,
 } from './indexer';
 import {
   getCacheStats,
@@ -125,6 +130,14 @@ export function registerCoreRpcHandlers(
 
   // --- System & Diagnostics ---
   registerChannel('system:isDev', () => isDev);
+  registerChannel('system:runtimeInfo', () => {
+    const settings = getSettings();
+    const runtime = resolveAppMode(settings.appMode);
+    return {
+      ...runtime,
+      serverName: os.hostname(),
+    };
+  });
   registerChannel('media:port', () => getPort());
   registerChannel(
     'logs:get',
@@ -151,7 +164,11 @@ export function registerCoreRpcHandlers(
 
   // --- Settings & Connection Testers ---
   registerChannel('settings:get', () => getSettings());
-  registerChannel('settings:save', (partial: Partial<AppSettings>) => saveSettings(partial));
+  registerChannel('settings:save', (partial: Partial<AppSettings>) => {
+    const saved = saveSettings(partial);
+    reconcileBackgroundWatchers(saved.appMode);
+    return saved;
+  });
   registerChannel('settings:testConnection', (target: any, overrideConfig?: Partial<AppSettings>) =>
     testIntegrationConnection(target, overrideConfig)
   );
@@ -656,6 +673,9 @@ export function registerCoreRpcHandlers(
     (opts?: { forceDownload?: boolean; autoDownload?: boolean }) =>
       checkAndUpdateTranscoderBinaries(opts)
   );
+  registerChannel('transcoder:checkUpdates', () =>
+    checkAndUpdateTranscoderBinaries({ forceDownload: false, autoDownload: true })
+  );
   registerChannel('ai:model-cache-status', (models: { id: string; filename?: string }[]) =>
     getAiModelCacheStatus(models)
   );
@@ -775,4 +795,28 @@ export function registerCoreRpcHandlers(
   registerChannel('auth:getState', serverAuth);
   registerChannel('auth:login', serverAuth);
   registerChannel('auth:logout', serverAuth);
+  registerChannel('auth:probeRemoteServer', async (serverUrl: string) => {
+    const base = String(serverUrl || '').trim().replace(/\/+$/, '');
+    if (!base) return { ok: false, error: 'Missing server URL.' };
+    const res = await fetch(`${base}/api/auth/info`);
+    if (!res.ok) {
+      return { ok: false, error: `HTTP ${res.status}` };
+    }
+    const info = await res.json();
+    return { ok: true, info };
+  });
+  registerChannel('auth:pinLogin', async (pin: string, serverUrl?: string) => {
+    const base = String(serverUrl || '').trim().replace(/\/+$/, '');
+    if (base) {
+      const res = await fetch(`${base}/api/auth/pin-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      return res.json();
+    }
+    const storedHash = getStoredLocalPinHash();
+    const ok = Boolean(storedHash && verifyLocalPin(String(pin || ''), storedHash));
+    return ok ? { ok: true } : { ok: false, error: 'Invalid PIN.' };
+  });
 }

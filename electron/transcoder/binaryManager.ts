@@ -4,7 +4,7 @@ import path from 'path';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { emitRendererEvent, getAppDataPath } from '../runtimeBus';
-import { AppSettings, getSettings, saveSettings } from '../settings';
+import { AppProfile, AppSettings, getSettings, isDockerContainer, isServerProfile, saveSettings } from '../settings';
 import { logger } from '../logger';
 
 const execFileAsync = promisify(execFile);
@@ -249,6 +249,7 @@ export async function checkAndUpdateTranscoderBinaries(options?: {
     if (!needFfmpeg && !needHandbrake && !force) {
       lastCheckedAt = new Date().toISOString();
       lastMessage = 'FFmpeg & HandBrakeCLI verified.';
+      saveSettings({ lastTranscoderUpdateCheckAt: Date.now() });
       return statusBefore;
     }
 
@@ -313,9 +314,11 @@ export async function checkAndUpdateTranscoderBinaries(options?: {
       }
     }
 
-    if (changed) {
-      saveSettings(updatedSettings);
-    }
+    saveSettings(
+      changed
+        ? { ...updatedSettings, lastTranscoderUpdateCheckAt: Date.now() }
+        : { lastTranscoderUpdateCheckAt: Date.now() }
+    );
 
     lastCheckedAt = new Date().toISOString();
     lastMessage = 'Transcoder binary check completed.';
@@ -330,6 +333,31 @@ export async function checkAndUpdateTranscoderBinaries(options?: {
   } finally {
     checkingActive = false;
   }
+}
+
+export async function runStartupTranscoderCheck(
+  appMode?: AppProfile
+): Promise<TranscoderBinaryStatus | null> {
+  const settings = getSettings();
+  const effectiveMode = appMode || settings.appMode;
+
+  if (settings.transcoderUpdateSchedule === 'off') {
+    return null;
+  }
+  if (!isServerProfile(effectiveMode) && !settings.enableClientLocalTranscoding) {
+    return null;
+  }
+
+  const lastCheck = Number(settings.lastTranscoderUpdateCheckAt || 0);
+  const intervalMs = settings.transcoderUpdateSchedule === 'daily' ? 86_400_000 : 7 * 86_400_000;
+  if (lastCheck > 0 && Date.now() - lastCheck < intervalMs) {
+    return getTranscoderBinaryStatus();
+  }
+
+  return checkAndUpdateTranscoderBinaries({
+    forceDownload: false,
+    autoDownload: !isDockerContainer(),
+  });
 }
 
 export type H264Encoder = 'h264_videotoolbox' | 'h264_nvenc' | 'h264_qsv' | 'h264_vaapi' | 'libx264';

@@ -56,13 +56,16 @@ import {
   VideoRow,
 } from './types';
 import {
+  appendAuthTokenParam,
   formatBytes,
   formatDuration,
   getConfiguredRemoteServerUrl,
   getMediaBaseUrl,
   invokeRpc,
-  isDevMode,
+  loginWithPin,
   postPlaybackSync,
+  resetSharedEventSource,
+  setStoredAuthToken,
   subscribeEvent,
 } from './bridge';
 import { PreferencesModal } from './components/PreferencesModal';
@@ -334,6 +337,10 @@ export const App: React.FC = () => {
   const [showAddDeviceWizard, setShowAddDeviceWizard] = useState(false);
   const [showUploadWizard, setShowUploadWizard] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showPinUnlockModal, setShowPinUnlockModal] = useState(false);
+  const [pinUnlockInput, setPinUnlockInput] = useState('');
+  const [pinUnlockError, setPinUnlockError] = useState<string | null>(null);
+  const [pinUnlockBusy, setPinUnlockBusy] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const hasRecordedPlayRef = useRef<number | null>(null);
 
@@ -490,7 +497,16 @@ export const App: React.FC = () => {
         .catch(() => {});
     }
 
+    const handleAuthRequired = () => {
+      if (!window.rtunesElectron) {
+        setPinUnlockError(null);
+        setShowPinUnlockModal(true);
+      }
+    };
+    window.addEventListener('rtunes:auth-required', handleAuthRequired);
+
     return () => {
+      window.removeEventListener('rtunes:auth-required', handleAuthRequired);
       unsubOpenAbout();
       unsubOpenPrefs();
       unsubBinaryProgress();
@@ -984,7 +1000,7 @@ export const App: React.FC = () => {
   const getArtworkUrl = (coverArtPath?: string | null) => {
     const base = getMediaBaseUrl(mediaPort);
     if (!coverArtPath || !base) return null;
-    return `${base}/artwork?path=${encodeURIComponent(coverArtPath)}`;
+    return appendAuthTokenParam(`${base}/artwork?path=${encodeURIComponent(coverArtPath)}`);
   };
 
   const openTrackContextMenu = (
@@ -1052,7 +1068,9 @@ export const App: React.FC = () => {
 
   // Dual-buffer next-track preloader helpers
   const buildTrackStreamUrl = (track: TrackRow, base: string) =>
-    `${base}/track?id=${track.id}${track.track_uid ? `&uid=${encodeURIComponent(track.track_uid)}` : ''}`;
+    appendAuthTokenParam(
+      `${base}/track?id=${track.id}${track.track_uid ? `&uid=${encodeURIComponent(track.track_uid)}` : ''}`
+    );
 
   const resetPreloader = () => {
     preloadedTrackKeyRef.current = null;
@@ -1708,152 +1726,20 @@ export const App: React.FC = () => {
         {/* Left Source Sidebar */}
         <aside className="source-sidebar">
           <div className="source-scroll">
-            {/* LIBRARY */}
-            <div className="source-section-header">LIBRARY</div>
-            <div
-              className={`source-item ${nav.kind === 'music' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'music' })}
-            >
-              <div className="source-item-left">
-                <Music size={14} color={nav.kind === 'music' ? '#fff' : '#2563eb'} />
-                <span className="source-item-label">Music</span>
-              </div>
-              <span className="source-badge">{tracks.length}</span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'movies' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'movies' })}
-            >
-              <div className="source-item-left">
-                <Film size={14} color={nav.kind === 'movies' ? '#fff' : '#7c3aed'} />
-                <span className="source-item-label">Movies</span>
-              </div>
-              <span className="source-badge">{videos.filter((v) => v.type === 'movie').length}</span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'tv' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'tv' })}
-            >
-              <div className="source-item-left">
-                <Tv size={14} color={nav.kind === 'tv' ? '#fff' : '#0d9488'} />
-                <span className="source-item-label">TV Shows</span>
-              </div>
-              <span className="source-badge">{groupedTvShows.length}</span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'music_videos' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'music_videos' })}
-            >
-              <div className="source-item-left">
-                <Video size={14} color={nav.kind === 'music_videos' ? '#fff' : '#db2777'} />
-                <span className="source-item-label">Music Videos</span>
-              </div>
-              <span className="source-badge">
-                {videos.filter((v) => v.type === 'music_video').length}
-              </span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'audiobooks' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'audiobooks' })}
-            >
-              <div className="source-item-left">
-                <Headphones size={14} color={nav.kind === 'audiobooks' ? '#fff' : '#ea580c'} />
-                <span className="source-item-label">Audiobooks</span>
-              </div>
-              <span className="source-badge">{audiobooks.length}</span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'books' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'books' })}
-            >
-              <div className="source-item-left">
-                <BookOpen size={14} color={nav.kind === 'books' ? '#fff' : '#854d0e'} />
-                <span className="source-item-label">Books</span>
-              </div>
-              <span className="source-badge">{books.length}</span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'photos' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'photos' })}
-            >
-              <div className="source-item-left">
-                <Image size={14} color={nav.kind === 'photos' ? '#fff' : '#0284c7'} />
-                <span className="source-item-label">Photos</span>
-              </div>
-              <span className="source-badge">{photos.length}</span>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'cache' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'cache' })}
-            >
-              <div className="source-item-left">
-                <HardDrive size={14} color={nav.kind === 'cache' ? '#fff' : '#d97706'} />
-                <span className="source-item-label">Local Cache</span>
-              </div>
-              <span className="source-badge">
-                {cacheStats ? `${cacheStats.audioCount + cacheStats.videoCount}` : 0}
-              </span>
-            </div>
-
-            {/* STORE */}
-            <div className="source-section-header">STORE</div>
-            <div
-              className={`source-item ${nav.kind === 'store' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'store' })}
-            >
-              <div className="source-item-left">
-                <ShoppingBag size={14} color={nav.kind === 'store' ? '#fff' : '#16a34a'} />
-                <span className="source-item-label">rTunes Store</span>
-              </div>
-            </div>
-
-            <div
-              className="source-item"
-              onClick={() => setShowUploadWizard(true)}
-            >
-              <div className="source-item-left">
-                <Upload size={14} color="#2563eb" />
-                <span className="source-item-label">Upload Media...</span>
-              </div>
-            </div>
-
-            <div
-              className={`source-item ${nav.kind === 'downloads' ? 'selected' : ''}`}
-              onClick={() => setNav({ kind: 'downloads' })}
-            >
-              <div className="source-item-left">
-                <Download size={14} color={nav.kind === 'downloads' ? '#fff' : '#2563eb'} />
-                <span className="source-item-label">Downloads</span>
-              </div>
-              {arrQueue.length > 0 && <span className="source-badge">{arrQueue.length}</span>}
-            </div>
-
-            {/* DEVICES (ePod / Innioasis Y2) */}
-            <div className="source-section-header">
-              <span>DEVICES</span>
-              <button
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: '#2563eb',
-                  fontWeight: 700,
-                  fontSize: 10,
-                }}
-                onClick={() => setShowAddDeviceWizard(true)}
-                title="Provision a new ePod or portable device"
-              >
-                + Add ePod
-              </button>
-            </div>
             {(() => {
+              const isServerMode =
+                settings?.appMode === 'desktop-server' || settings?.appMode === 'headless-server';
+              const vis = isServerMode ? settings?.serverSidebarVisibility : undefined;
+              const showMusic = !vis || vis.music !== false;
+              const showMovies = !vis || vis.movies !== false;
+              const showTvShows = !vis || vis.tvShows !== false;
+              const showMusicVideos = !vis || vis.musicVideos !== false;
+              const showAudiobooks = !vis || vis.audiobooks !== false;
+              const showBooks = !vis || vis.books !== false;
+              const showPhotos = !vis || vis.photos !== false;
+              const showStore = !vis || vis.store !== false;
+              const showDevices = !vis || vis.devices !== false;
+
               const isDevConnected = (dev: DeviceInfo) =>
                 dev.transport_mode === 'mtp' || dev.mount_path.startsWith('mtp://')
                   ? Boolean(dev.mtp_connected)
@@ -1863,185 +1749,354 @@ export const App: React.FC = () => {
                 (dev) => isDevConnected(dev) || Boolean(settings?.showOfflineDevices)
               );
 
-              if (visibleDevices.length === 0) {
-                return (
-                  <div
-                    style={{ padding: '4px 18px', fontSize: 11, color: '#64748b', cursor: 'pointer' }}
-                    onClick={() => setShowAddDeviceWizard(true)}
-                  >
-                    No ePod connected (Click to Add)
-                  </div>
-                );
-              }
-
-              return visibleDevices.map((dev) => {
-                const isSelected = nav.kind === 'device' && nav.uuid === dev.uuid && !nav.category;
-                const connected = isDevConnected(dev);
-                const isDragOver = dragOverDeviceUuid === dev.uuid;
-                const isExpanded = Boolean(expandedDevices[dev.uuid]);
-                const catalog = deviceCatalogs[dev.uuid];
-                const subCategories: {
-                  key: DeviceCatalogCategory;
-                  label: string;
-                  count: number;
-                }[] = catalog
-                  ? (
-                      [
-                        { key: 'music', label: 'Music', count: catalog.items.filter((i) => i.mediaType === 'music').length },
-                        { key: 'movies', label: 'Movies', count: catalog.items.filter((i) => i.mediaType === 'movies').length },
-                        { key: 'tv', label: 'TV Shows', count: catalog.items.filter((i) => i.mediaType === 'tv').length },
-                        { key: 'music_videos', label: 'Music Videos', count: catalog.items.filter((i) => i.mediaType === 'music_videos').length },
-                        { key: 'audiobooks', label: 'Audiobooks', count: catalog.items.filter((i) => i.mediaType === 'audiobooks').length },
-                        { key: 'books', label: 'Books', count: catalog.items.filter((i) => i.mediaType === 'books').length },
-                        { key: 'photos', label: 'Photos', count: catalog.items.filter((i) => i.mediaType === 'photos').length },
-                        { key: 'playlists', label: 'Playlists', count: catalog.playlists.length },
-                      ] as { key: DeviceCatalogCategory; label: string; count: number }[]
-                    ).filter((c) => c.count > 0)
-                  : [];
-
-                return (
-                  <React.Fragment key={dev.uuid}>
+              return (
+                <>
+                  {/* LIBRARY */}
+                  <div className="source-section-header">LIBRARY</div>
+                  {showMusic && (
                     <div
-                      className={`source-item ${isSelected ? 'selected' : ''}`}
-                      style={{
-                        ...(!connected ? { opacity: 0.72 } : {}),
-                        ...(isDragOver
-                          ? {
-                              outline: '2px solid #2563eb',
-                              background: isSelected ? undefined : '#dbeafe',
-                            }
-                          : {}),
-                      }}
-                      onClick={() => setNav({ kind: 'device', uuid: dev.uuid })}
-                      onDragEnter={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        e.dataTransfer.dropEffect = 'copy';
-                        setDragOverDeviceUuid(dev.uuid);
-                      }}
-                      onDragOver={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        e.dataTransfer.dropEffect = 'copy';
-                        if (dragOverDeviceUuid !== dev.uuid) {
-                          setDragOverDeviceUuid(dev.uuid);
-                        }
-                      }}
-                      onDragLeave={(e) => {
-                        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-                          setDragOverDeviceUuid(null);
-                        }
-                      }}
-                      onDrop={(e) => void handleDropOnDevice(dev, e)}
+                      className={`source-item ${nav.kind === 'music' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'music' })}
                     >
-                      <div
-                        className="source-item-left"
-                        style={{
-                          minWidth: 0,
-                          flex: 1,
-                          pointerEvents: isDragOver ? 'none' : undefined,
-                        }}
-                      >
-                        <button
-                          type="button"
-                          title={isExpanded ? 'Collapse device contents' : 'Expand device contents'}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const nextExpanded = !isExpanded;
-                            setExpandedDevices((prev) => ({ ...prev, [dev.uuid]: nextExpanded }));
-                            if (nextExpanded) {
-                              void invokeRpc<DeviceCatalog>('devices:getCatalog', dev.uuid)
-                                .then((cat) =>
-                                  setDeviceCatalogs((prev) => ({ ...prev, [dev.uuid]: cat }))
-                                )
-                                .catch(() => {});
-                            }
-                          }}
-                          style={{
-                            border: 'none',
-                            background: 'transparent',
-                            padding: '0 2px',
-                            cursor: 'pointer',
-                            color: isSelected ? '#fff' : '#64748b',
-                            fontSize: 11,
-                            lineHeight: 1,
-                            flexShrink: 0,
-                          }}
-                        >
-                          {isExpanded ? '▾' : '▸'}
-                        </button>
-                        <Usb
-                          size={14}
-                          color={isSelected ? '#fff' : connected ? '#0284c7' : '#94a3b8'}
-                        />
-                        <span className="source-item-label">{dev.name}</span>
-                        {!connected && (
-                          <span
-                            style={{
-                              fontSize: 9,
-                              fontWeight: 600,
-                              padding: '1px 5px',
-                              borderRadius: 4,
-                              background: isSelected ? 'rgba(255,255,255,0.2)' : '#e2e8f0',
-                              color: isSelected ? '#fff' : '#475569',
-                              whiteSpace: 'nowrap',
-                              flexShrink: 0,
-                            }}
-                          >
-                            Not Connected
-                          </span>
-                        )}
+                      <div className="source-item-left">
+                        <Music size={14} color={nav.kind === 'music' ? '#fff' : '#2563eb'} />
+                        <span className="source-item-label">Music</span>
                       </div>
-                      {connected && (
-                        <button
-                          className="eject-mini-btn"
-                          title="Safely Eject Device"
-                          onClick={async (e) => {
-                            e.stopPropagation();
-                            await invokeRpc('devices:eject', dev.uuid);
-                            await refreshAllData();
-                          }}
-                        >
-                          ⏏
-                        </button>
-                      )}
+                      <span className="source-badge">{tracks.length}</span>
                     </div>
-                    {isExpanded &&
-                      subCategories.map((cat) => {
-                        const isCatSelected =
-                          nav.kind === 'device' &&
-                          nav.uuid === dev.uuid &&
-                          nav.category === cat.key;
-                        return (
-                          <div
-                            key={`${dev.uuid}:${cat.key}`}
-                            className={`source-item ${isCatSelected ? 'selected' : ''}`}
-                            style={{ paddingLeft: 28, fontSize: 11.5 }}
-                            onClick={() =>
-                              setNav({ kind: 'device', uuid: dev.uuid, category: cat.key })
-                            }
-                          >
-                            <div className="source-item-left" style={{ minWidth: 0, flex: 1 }}>
-                              <span className="source-item-label">{cat.label}</span>
-                            </div>
-                            <span
-                              style={{
-                                fontSize: 10,
-                                fontWeight: 700,
-                                padding: '0 6px',
-                                borderRadius: 9,
-                                background: isCatSelected ? 'rgba(255,255,255,0.25)' : '#d5dde9',
-                                color: isCatSelected ? '#fff' : '#334155',
-                              }}
-                            >
-                              {cat.count}
-                            </span>
-                          </div>
-                        );
-                      })}
-                  </React.Fragment>
-                );
-              });
+                  )}
+
+                  {showMovies && (
+                    <div
+                      className={`source-item ${nav.kind === 'movies' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'movies' })}
+                    >
+                      <div className="source-item-left">
+                        <Film size={14} color={nav.kind === 'movies' ? '#fff' : '#7c3aed'} />
+                        <span className="source-item-label">Movies</span>
+                      </div>
+                      <span className="source-badge">{videos.filter((v) => v.type === 'movie').length}</span>
+                    </div>
+                  )}
+
+                  {showTvShows && (
+                    <div
+                      className={`source-item ${nav.kind === 'tv' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'tv' })}
+                    >
+                      <div className="source-item-left">
+                        <Tv size={14} color={nav.kind === 'tv' ? '#fff' : '#0d9488'} />
+                        <span className="source-item-label">TV Shows</span>
+                      </div>
+                      <span className="source-badge">{groupedTvShows.length}</span>
+                    </div>
+                  )}
+
+                  {showMusicVideos && (
+                    <div
+                      className={`source-item ${nav.kind === 'music_videos' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'music_videos' })}
+                    >
+                      <div className="source-item-left">
+                        <Video size={14} color={nav.kind === 'music_videos' ? '#fff' : '#db2777'} />
+                        <span className="source-item-label">Music Videos</span>
+                      </div>
+                      <span className="source-badge">
+                        {videos.filter((v) => v.type === 'music_video').length}
+                      </span>
+                    </div>
+                  )}
+
+                  {showAudiobooks && (
+                    <div
+                      className={`source-item ${nav.kind === 'audiobooks' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'audiobooks' })}
+                    >
+                      <div className="source-item-left">
+                        <Headphones size={14} color={nav.kind === 'audiobooks' ? '#fff' : '#ea580c'} />
+                        <span className="source-item-label">Audiobooks</span>
+                      </div>
+                      <span className="source-badge">{audiobooks.length}</span>
+                    </div>
+                  )}
+
+                  {showBooks && (
+                    <div
+                      className={`source-item ${nav.kind === 'books' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'books' })}
+                    >
+                      <div className="source-item-left">
+                        <BookOpen size={14} color={nav.kind === 'books' ? '#fff' : '#854d0e'} />
+                        <span className="source-item-label">Books</span>
+                      </div>
+                      <span className="source-badge">{books.length}</span>
+                    </div>
+                  )}
+
+                  {showPhotos && (
+                    <div
+                      className={`source-item ${nav.kind === 'photos' ? 'selected' : ''}`}
+                      onClick={() => setNav({ kind: 'photos' })}
+                    >
+                      <div className="source-item-left">
+                        <Image size={14} color={nav.kind === 'photos' ? '#fff' : '#0284c7'} />
+                        <span className="source-item-label">Photos</span>
+                      </div>
+                      <span className="source-badge">{photos.length}</span>
+                    </div>
+                  )}
+
+                  <div
+                    className={`source-item ${nav.kind === 'cache' ? 'selected' : ''}`}
+                    onClick={() => setNav({ kind: 'cache' })}
+                  >
+                    <div className="source-item-left">
+                      <HardDrive size={14} color={nav.kind === 'cache' ? '#fff' : '#d97706'} />
+                      <span className="source-item-label">Local Cache</span>
+                    </div>
+                    <span className="source-badge">
+                      {cacheStats ? `${cacheStats.audioCount + cacheStats.videoCount}` : 0}
+                    </span>
+                  </div>
+
+                  {/* STORE */}
+                  {showStore && (
+                    <>
+                      <div className="source-section-header">STORE</div>
+                      <div
+                        className={`source-item ${nav.kind === 'store' ? 'selected' : ''}`}
+                        onClick={() => setNav({ kind: 'store' })}
+                      >
+                        <div className="source-item-left">
+                          <ShoppingBag size={14} color={nav.kind === 'store' ? '#fff' : '#16a34a'} />
+                          <span className="source-item-label">rTunes Store</span>
+                        </div>
+                      </div>
+
+                      <div
+                        className="source-item"
+                        onClick={() => setShowUploadWizard(true)}
+                      >
+                        <div className="source-item-left">
+                          <Upload size={14} color="#2563eb" />
+                          <span className="source-item-label">Upload Media...</span>
+                        </div>
+                      </div>
+
+                      <div
+                        className={`source-item ${nav.kind === 'downloads' ? 'selected' : ''}`}
+                        onClick={() => setNav({ kind: 'downloads' })}
+                      >
+                        <div className="source-item-left">
+                          <Download size={14} color={nav.kind === 'downloads' ? '#fff' : '#2563eb'} />
+                          <span className="source-item-label">Downloads</span>
+                        </div>
+                        {arrQueue.length > 0 && <span className="source-badge">{arrQueue.length}</span>}
+                      </div>
+                    </>
+                  )}
+
+                  {/* DEVICES (ePod / Innioasis Y2) */}
+                  {showDevices && (
+                    <>
+                      <div className="source-section-header">
+                        <span>DEVICES</span>
+                        <button
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            cursor: 'pointer',
+                            color: '#2563eb',
+                            fontWeight: 700,
+                            fontSize: 10,
+                          }}
+                          onClick={() => setShowAddDeviceWizard(true)}
+                          title="Provision a new ePod or portable device"
+                        >
+                          + Add ePod
+                        </button>
+                      </div>
+                      {visibleDevices.length === 0 ? (
+                        <div
+                          style={{ padding: '4px 18px', fontSize: 11, color: '#64748b', cursor: 'pointer' }}
+                          onClick={() => setShowAddDeviceWizard(true)}
+                        >
+                          No ePod connected (Click to Add)
+                        </div>
+                      ) : (
+                        visibleDevices.map((dev) => {
+                          const isSelected = nav.kind === 'device' && nav.uuid === dev.uuid && !nav.category;
+                          const connected = isDevConnected(dev);
+                          const isDragOver = dragOverDeviceUuid === dev.uuid;
+                          const isExpanded = Boolean(expandedDevices[dev.uuid]);
+                          const catalog = deviceCatalogs[dev.uuid];
+                          const subCategories: {
+                            key: DeviceCatalogCategory;
+                            label: string;
+                            count: number;
+                          }[] = catalog
+                            ? (
+                                [
+                                  { key: 'music', label: 'Music', count: catalog.items.filter((i) => i.mediaType === 'music').length },
+                                  { key: 'movies', label: 'Movies', count: catalog.items.filter((i) => i.mediaType === 'movies').length },
+                                  { key: 'tv', label: 'TV Shows', count: catalog.items.filter((i) => i.mediaType === 'tv').length },
+                                  { key: 'music_videos', label: 'Music Videos', count: catalog.items.filter((i) => i.mediaType === 'music_videos').length },
+                                  { key: 'audiobooks', label: 'Audiobooks', count: catalog.items.filter((i) => i.mediaType === 'audiobooks').length },
+                                  { key: 'books', label: 'Books', count: catalog.items.filter((i) => i.mediaType === 'books').length },
+                                  { key: 'photos', label: 'Photos', count: catalog.items.filter((i) => i.mediaType === 'photos').length },
+                                  { key: 'playlists', label: 'Playlists', count: catalog.playlists.length },
+                                ] as { key: DeviceCatalogCategory; label: string; count: number }[]
+                              ).filter((c) => c.count > 0)
+                            : [];
+
+                          return (
+                            <React.Fragment key={dev.uuid}>
+                              <div
+                                className={`source-item ${isSelected ? 'selected' : ''}`}
+                                style={{
+                                  ...(!connected ? { opacity: 0.72 } : {}),
+                                  ...(isDragOver
+                                    ? {
+                                        outline: '2px solid #2563eb',
+                                        background: isSelected ? undefined : '#dbeafe',
+                                      }
+                                    : {}),
+                                }}
+                                onClick={() => setNav({ kind: 'device', uuid: dev.uuid })}
+                                onDragEnter={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  e.dataTransfer.dropEffect = 'copy';
+                                  setDragOverDeviceUuid(dev.uuid);
+                                }}
+                                onDragOver={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  e.dataTransfer.dropEffect = 'copy';
+                                  if (dragOverDeviceUuid !== dev.uuid) {
+                                    setDragOverDeviceUuid(dev.uuid);
+                                  }
+                                }}
+                                onDragLeave={(e) => {
+                                  if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                                    setDragOverDeviceUuid(null);
+                                  }
+                                }}
+                                onDrop={(e) => void handleDropOnDevice(dev, e)}
+                              >
+                                <div
+                                  className="source-item-left"
+                                  style={{
+                                    minWidth: 0,
+                                    flex: 1,
+                                    pointerEvents: isDragOver ? 'none' : undefined,
+                                  }}
+                                >
+                                  <button
+                                    type="button"
+                                    title={isExpanded ? 'Collapse device contents' : 'Expand device contents'}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const nextExpanded = !isExpanded;
+                                      setExpandedDevices((prev) => ({ ...prev, [dev.uuid]: nextExpanded }));
+                                      if (nextExpanded) {
+                                        void invokeRpc<DeviceCatalog>('devices:getCatalog', dev.uuid)
+                                          .then((cat) =>
+                                            setDeviceCatalogs((prev) => ({ ...prev, [dev.uuid]: cat }))
+                                          )
+                                          .catch(() => {});
+                                      }
+                                    }}
+                                    style={{
+                                      border: 'none',
+                                      background: 'transparent',
+                                      padding: '0 2px',
+                                      cursor: 'pointer',
+                                      color: isSelected ? '#fff' : '#64748b',
+                                      fontSize: 11,
+                                      lineHeight: 1,
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    {isExpanded ? '▾' : '▸'}
+                                  </button>
+                                  <Usb
+                                    size={14}
+                                    color={isSelected ? '#fff' : connected ? '#0284c7' : '#94a3b8'}
+                                  />
+                                  <span className="source-item-label">{dev.name}</span>
+                                  {!connected && (
+                                    <span
+                                      style={{
+                                        fontSize: 9,
+                                        fontWeight: 600,
+                                        padding: '1px 5px',
+                                        borderRadius: 4,
+                                        background: isSelected ? 'rgba(255,255,255,0.2)' : '#e2e8f0',
+                                        color: isSelected ? '#fff' : '#475569',
+                                        whiteSpace: 'nowrap',
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      Not Connected
+                                    </span>
+                                  )}
+                                </div>
+                                {connected && (
+                                  <button
+                                    className="eject-mini-btn"
+                                    title="Safely Eject Device"
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      await invokeRpc('devices:eject', dev.uuid);
+                                      await refreshAllData();
+                                    }}
+                                  >
+                                    ⏏
+                                  </button>
+                                )}
+                              </div>
+                              {isExpanded &&
+                                subCategories.map((cat) => {
+                                  const isCatSelected =
+                                    nav.kind === 'device' &&
+                                    nav.uuid === dev.uuid &&
+                                    nav.category === cat.key;
+                                  return (
+                                    <div
+                                      key={`${dev.uuid}:${cat.key}`}
+                                      className={`source-item ${isCatSelected ? 'selected' : ''}`}
+                                      style={{ paddingLeft: 28, fontSize: 11.5 }}
+                                      onClick={() =>
+                                        setNav({ kind: 'device', uuid: dev.uuid, category: cat.key })
+                                      }
+                                    >
+                                      <div className="source-item-left" style={{ minWidth: 0, flex: 1 }}>
+                                        <span className="source-item-label">{cat.label}</span>
+                                      </div>
+                                      <span
+                                        style={{
+                                          fontSize: 10,
+                                          fontWeight: 700,
+                                          padding: '0 6px',
+                                          borderRadius: 9,
+                                          background: isCatSelected ? 'rgba(255,255,255,0.25)' : '#d5dde9',
+                                          color: isCatSelected ? '#fff' : '#334155',
+                                        }}
+                                      >
+                                        {cat.count}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                            </React.Fragment>
+                          );
+                        })
+                      )}
+                    </>
+                  )}
+                </>
+              );
             })()}
 
             {/* PLAYLISTS */}
@@ -2361,16 +2416,22 @@ export const App: React.FC = () => {
                                   );
                                 })}
                               </div>
-                              <button
-                                className="aqua-btn"
-                                style={{ padding: '1px 8px' }}
-                                onClick={() => {
-                                  setPrefsInitialTab('genreMap');
-                                  setShowPreferences(true);
-                                }}
-                              >
-                                Genre Map
-                              </button>
+                              {!(
+                                (settings?.appMode === 'desktop-server' ||
+                                  settings?.appMode === 'headless-server') &&
+                                settings?.serverSidebarVisibility?.genreMap === false
+                              ) && (
+                                <button
+                                  className="aqua-btn"
+                                  style={{ padding: '1px 8px' }}
+                                  onClick={() => {
+                                    setPrefsInitialTab('genreMap');
+                                    setShowPreferences(true);
+                                  }}
+                                >
+                                  Genre Map
+                                </button>
+                              )}
                               <button
                                 className="aqua-btn"
                                 style={{ padding: '1px 8px', color: '#1d4ed8' }}
@@ -4516,7 +4577,7 @@ export const App: React.FC = () => {
                         >
                           {mediaPort > 0 && ph.remote_path ? (
                             <img
-                              src={`${getMediaBaseUrl(mediaPort)}/artwork?path=${encodeURIComponent(ph.remote_path)}`}
+                              src={appendAuthTokenParam(`${getMediaBaseUrl(mediaPort)}/artwork?path=${encodeURIComponent(ph.remote_path)}`)}
                               alt={ph.title}
                               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                             />
@@ -4811,28 +4872,19 @@ export const App: React.FC = () => {
               fontWeight: 600,
             }}
             onClick={() => setShowPreferences(true)}
-            title={
-              !isDevMode()
-                ? 'Coming soon — rTunes is currently focused on direct network shares, local media, and USB/MTP ePod syncing.'
-                : undefined
-            }
+            title="Click to configure Application Profile & Authentication"
           >
-            <ShieldCheck size={13} color={isDevMode() && authState.authenticated ? '#15803d' : '#475569'} />
-            {isDevMode() ? (
-              authState.authenticated && authState.user ? (
-                <>
-                  SSO: @{authState.user.username} <span className="aqua-dev-badge">[DEV PREVIEW]</span>
-                </>
-              ) : (
-                <>
-                  Mode: Standalone <span className="aqua-dev-badge">[DEV]</span>
-                </>
-              )
-            ) : (
-              <>
-                Mode: Standalone <span className="aqua-coming-soon-pill">SSO: Coming Soon</span>
-              </>
-            )}
+            <ShieldCheck size={13} color={authState.authenticated ? '#15803d' : '#475569'} />
+            <span>
+              Profile: {settings?.appMode || 'client'}
+              {settings?.appMode === 'client' && settings?.clientSource === 'remote' ? ' (Remote)' : ''}
+              {' • '}
+              {authState.authenticated && authState.user
+                ? `SSO: @${authState.user.username}`
+                : settings?.authGateEnabled
+                ? `Gate: ${settings.authMode}`
+                : 'Auth: Open'}
+            </span>
           </span>
         </div>
       </footer>
@@ -4982,7 +5034,7 @@ export const App: React.FC = () => {
               controls
               autoPlay
               style={{ width: '100%', maxHeight: '74vh', background: '#000' }}
-              src={`${getMediaBaseUrl(mediaPort)}/video?id=${activeVideo.id}`}
+              src={appendAuthTokenParam(`${getMediaBaseUrl(mediaPort)}/video?id=${activeVideo.id}`)}
             />
           </div>
         </div>
@@ -5872,6 +5924,76 @@ export const App: React.FC = () => {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showPinUnlockModal && (
+        <div className="aqua-modal-backdrop" onClick={() => setShowPinUnlockModal(false)}>
+          <div
+            className="aqua-window"
+            style={{ width: 380, maxWidth: '92vw' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="aqua-window-titlebar">
+              <span>Server Authentication Required</span>
+              <button className="aqua-btn" onClick={() => setShowPinUnlockModal(false)} style={{ padding: '1px 6px' }}>
+                <X size={13} />
+              </button>
+            </div>
+            <form
+              style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setPinUnlockBusy(true);
+                setPinUnlockError(null);
+                try {
+                  const res = await loginWithPin(pinUnlockInput);
+                  if (!res.ok) {
+                    setPinUnlockError(res.error || 'Invalid PIN.');
+                    return;
+                  }
+                  setPinUnlockInput('');
+                  setShowPinUnlockModal(false);
+                  resetSharedEventSource();
+                  await refreshAllData();
+                } catch (err) {
+                  setPinUnlockError(err instanceof Error ? err.message : String(err));
+                } finally {
+                  setPinUnlockBusy(false);
+                }
+              }}
+            >
+              <div style={{ fontSize: 12, color: '#334155' }}>
+                Enter the rTunes server access PIN to unlock API and media streaming access.
+              </div>
+              <input
+                type="password"
+                className="aqua-input"
+                autoFocus
+                placeholder="Enter PIN..."
+                value={pinUnlockInput}
+                onChange={(e) => setPinUnlockInput(e.target.value)}
+              />
+              {pinUnlockError && (
+                <div style={{ fontSize: 11.5, color: '#b91c1c', fontWeight: 600 }}>{pinUnlockError}</div>
+              )}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button
+                  type="button"
+                  className="aqua-btn"
+                  onClick={() => {
+                    setStoredAuthToken(null);
+                    setShowPinUnlockModal(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="aqua-btn primary" disabled={pinUnlockBusy || !pinUnlockInput.trim()}>
+                  {pinUnlockBusy ? 'Unlocking...' : 'Unlock'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -32,7 +32,7 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 |---|---|---|
 | `src/main.tsx` | React 19 root mount | `src/App.tsx`, `src/styles/rtunes.css` |
 | `src/App.tsx` | Three-pane Aqua shell, Cover Flow, virtualized media tables, LCD transport, dual-buffer next-track preloader, context menus, sidebar device sub-tree | `src/bridge.ts`, `src/types.ts`, `src/components/*` |
-| `src/bridge.ts` | `invokeRpc`, `subscribeEvent` (IPC or SSE `/events`), `getRpcBaseUrl`, `getMediaBaseUrl`, `fetchSyncDelta`, `postPlaybackSync`, `isDevMode`, `formatDuration`, `formatBytes` | `window.rtunesElectron`, `window.electronAPI`, `main.ts`, `server.ts` |
+| `src/bridge.ts` | `invokeRpc`, `subscribeEvent` (IPC or SSE `/events`), `getRpcBaseUrl`, `getMediaBaseUrl`, `fetchSyncDelta`, `postPlaybackSync`, `probeRemoteServerAuth`, `loginWithPin`, `getStoredAuthToken`, `setStoredAuthToken`, `setConfiguredRemoteServerUrl`, `appendAuthTokenParam`, `resetSharedEventSource`, `isDevMode`, `formatDuration`, `formatBytes` | `window.rtunesElectron`, `window.electronAPI`, `main.ts`, `server.ts` |
 | `src/types.ts` | Shared renderer/IPC interfaces (`TrackRow`, `VideoRow`, `BookRow`, `AudiobookRow`, `PhotoRow`, `DeviceInfo`, `DeviceCatalog`, `AppSettings`, `SmartRuleGroup`, etc.) | Consumed across `src/` |
 | `src/styles/rtunes.css` | Late-2000s Snow Leopard Aqua & Brushed Metal CSS theme | `src/main.tsx` |
 
@@ -41,7 +41,7 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 |---|---|---|
 | `src/ai/modelRegistry.ts` | `AI_MODEL_CATALOG`, `getDefaultAiModel` | `AiPlaylistModal.tsx` |
 | `src/ai/PlaylistAgent.ts` | `PlaylistProvider`, `LocalLlamaProvider`, `RemoteMcpServerProvider` stub, `PlaylistAgent`, `PLAYLIST_TOOL_DEFINITIONS` | `src/bridge.ts` (`ai:agent-turn`, `ai:dispose-model`) |
-| `src/components/PreferencesModal.tsx` | Tabs: Paths & Backend, NFS/SMB Shares, Devices, Cache & Transcoder, Authentik SSO, Store & API Keys, Genre Map, Actions & Help, About & Credits | `GenreMapTab.tsx`, `AboutCreditsModal.tsx`, `bridge.ts` |
+| `src/components/PreferencesModal.tsx` | Tabs: Profile & Paths (4-profile + remote auto-handshake + server UI customization), NFS/SMB Shares, Devices, Cache & Transcoder (`.present`, `vaapi`, scheduled updates), Auth & Security (Gate toggle, Local PIN, Authentik SSO, Proxy Header), Store & API Keys, Genre Map, Actions & Help, About & Credits | `GenreMapTab.tsx`, `AboutCreditsModal.tsx`, `bridge.ts`, `system:runtimeInfo` |
 | `src/components/GenreMapTab.tsx` | 2D Subgenre Adjacency Matrix heatmap editor + Live Artist Scene Tester | `genreMatrix:*` IPC channels |
 | `src/components/DeviceSummaryView.tsx` | Device summary, MTP storage pool selector, 1-click MTP migration, transcode settings, capacity bar | `devices:*` IPC channels |
 | `src/components/AddDeviceWizardModal.tsx` | UMS/MTP provisioning wizard | `devices:volumes`, `devices:provision` |
@@ -58,11 +58,11 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 
 | Module | Owns / Exports | Connects To |
 |---|---|---|
-| `electron/main.ts` | `BrowserWindow`, app menu, desktop-only GUI/USB IPC overrides, HTTP `:42815` & optional LAN `server.ts` listener | `rpcHandlers.ts`, `server.ts`, `runtimeBus.ts`, `preload.ts` |
+| `electron/main.ts` | `BrowserWindow`, app menu, `--headless*` handoff, desktop-only GUI/USB IPC overrides, HTTP `:42815` & `desktop-server` LAN `server.ts` listener | `rpcHandlers.ts`, `server.ts`, `runtimeBus.ts`, `preload.ts` |
 | `electron/preload.ts` | `contextBridge` exposing `window.rtunesElectron` & `window.electronAPI` | `electron/main.ts`, `src/bridge.ts` |
-| `electron/rpcHandlers.ts` | Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) & headless server stubs | All shared backend services, `main.ts`, `server.ts` |
-| `electron/server.ts` | Headless `rTunes-Server` HTTP/SSE/Media/Sync (`/api/sync/delta`, `/api/sync/playback`)/Static Web UI/Upload entrypoint (`PORT=3000`) | `rpcHandlers.ts`, `mediaServer.ts`, `runtimeBus.ts`, `db.ts`, `dist/` |
-| `electron/cli.ts` | Headless CLI (`npm run cli -- <command>` via `ELECTRON_RUN_AS_NODE=1`) | `db.ts`, `deviceSync.ts`, `indexer.ts`, `storeArr.ts`, `egenius/`, `platform/` |
+| `electron/rpcHandlers.ts` | Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`, `system:runtimeInfo`, `transcoder:checkUpdates`, `auth:probeRemoteServer`, `auth:pinLogin`) & headless server stubs | All shared backend services, `main.ts`, `server.ts` |
+| `electron/server.ts` | Headless `rTunes-Server` / `--headless-client` HTTP/SSE/Media/Sync (`/api/sync/delta`, `/api/sync/playback`, `/api/auth/info`, `/api/auth/pin-login`)/Static Web UI (`--no-web-ui` opt-out)/Upload (`bootHeadlessServer`, `startUnifiedHttpServer`) | `rpcHandlers.ts`, `mediaServer.ts`, `runtimeBus.ts`, `db.ts`, `indexer.ts`, `transcoder/binaryManager.ts`, `dist/` |
+| `electron/cli.ts` | Headless CLI (`npm run cli -- <command>`) & `--headless` / `--headless-server` / `--headless-client` launcher | `server.ts`, `db.ts`, `deviceSync.ts`, `indexer.ts`, `storeArr.ts`, `egenius/`, `platform/` |
 | `electron/providers/standaloneLocal.ts` | Active local SQLite + direct NFS/SMB provider | `main.ts` |
 | `electron/providers/remoteServer.ts` | Remote `rTunes-Server` delta cache sync (`syncDeltaFromRemoteServer`, `pushPlaybackToRemoteServer`) | `db.ts`, `runtimeBus.ts`, `main.ts`, `rpcHandlers.ts` |
 
@@ -76,15 +76,15 @@ Shared Core (electron/, Electron-free via runtimeBus.ts) ───────�
 |---|---|---|
 | `electron/runtimeBus.ts` | `isElectronGuiRuntime`, `emitRendererEvent`, `onRendererEvent`, `getAppDataPath`, `getAppPath`, `isPackaged`, `getSafeStorage`, `openExternalUrl` | Used by all shared backend modules & `main.ts` |
 | `electron/authOidc.ts` | Electron-free Authentik OIDC / OAuth2 PKCE flow & token refresh (uses `runtimeBus`) | `runtimeBus.ts`, `auth/authentik.ts`, `settings.ts`, `platform/` |
-| `electron/auth/authentik.ts` | Dev-mode SSO boundary (returns standalone guest context when `isDev === false`) | `authOidc.ts`, `main.ts` |
-| `electron/db.ts` | Multi-DB WAL split (`getCoreDb`, `getCacheDb`, `getVideoDb`, `getStoreDb`), legacy `rtunes.sqlite` migration, `computeTrackUid`, `getDeltaSyncBatch`, `applyPlaybackDeltaSync`, `recalculateArtistPopularityScores` | `better-sqlite3`, `platform/`, `runtimeBus.ts`, `logger.ts` |
-| `electron/settings.ts` | `getSettings`, `saveSettings`, `testIntegrationConnection`, `getKeychainSecret`, `setKeychainSecret` | `db.ts`, `platform/`, `logger.ts` |
+| `electron/auth/authentik.ts` | Authentik OIDC SSO gateway boundary | `authOidc.ts`, `main.ts` |
+| `electron/db.ts` | Multi-DB WAL split (`getCoreDb`, `getCacheDb`, `getVideoDb`, `getStoreDb`), legacy `rtunes.sqlite` migration, `computeTrackUid`, `getDeltaSyncBatch`, `applyPlaybackDeltaSync`, `recalculateArtistPopularityScores`, `closeAllDatabases` | `better-sqlite3`, `platform/`, `runtimeBus.ts`, `logger.ts` |
+| `electron/settings.ts` | 4-profile mode resolution (`resolveAppMode`, `isDockerContainer`, `isServerProfile`, `isHeadlessProfile`), salted `scryptSync` PIN helpers (`hashLocalPin`, `verifyLocalPin`, `getStoredLocalPinHash`), `getDefaultServerSidebarVisibility`, `getSettings`, `saveSettings`, `testIntegrationConnection`, `getKeychainSecret`, `setKeychainSecret` | `db.ts`, `platform/`, `logger.ts` |
 | `electron/logger.ts` | `logger` (`debug`, `info`, `warn`, `error`), ring buffer, rotating log files | `runtimeBus.ts` (`log:entry`) |
-| `electron/indexer.ts` | Phased library scanner, ID3/Vorbis/artwork hydration, ListenBrainz/Last.fm/AudioDB popularity, TVMaze/IMDb posters, Plex/Audiobookshelf progress sync | `db.ts`, `settings.ts`, `trackSources.ts`, `egenius/genreMatrix.ts`, `runtimeBus.ts` |
+| `electron/indexer.ts` | Phased library scanner, ID3/Vorbis/artwork hydration, ListenBrainz/Last.fm/AudioDB popularity, TVMaze/IMDb posters, Plex/Audiobookshelf progress sync, `reconcileBackgroundWatchers`, `stopBackgroundWatchers` | `db.ts`, `settings.ts`, `trackSources.ts`, `egenius/genreMatrix.ts`, `runtimeBus.ts` |
 | `electron/trackSources.ts` | `buildTrackMatchKey`, `extractCanonicalMediaSubpath`, `resolveReachableTrackPath`, `scoreAudioQuality`, `parseAlternateSources`, `serializeAlternateSources` | `indexer.ts`, `mediaServer.ts`, `cacheTranscoder.ts` |
 | `electron/mediaServer.ts` | `handleMediaHttpRequest` & HTTP byte-range streaming (`/track`, `/video`, `/artwork`), dynamic FFmpeg live `.mkv`/`.avi` remuxing | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts`, `server.ts` |
 | `electron/cacheTranscoder.ts` | Local SSD LRU cache, 360p H.264/AAC video transcoder, 500×500 cover art sanitizer | `db.ts`, `settings.ts`, `trackSources.ts`, `transcoder/binaryManager.ts`, `runtimeBus.ts` |
-| `electron/transcoder/binaryManager.ts` | Startup check & GitHub Releases auto-updater for `FFmpeg` / `HandBrakeCLI` in `userData/bin`, `detectHardwareEncoder` | `runtimeBus.ts`, `settings.ts` |
+| `electron/transcoder/binaryManager.ts` | Scheduled startup check (`runStartupTranscoderCheck`) & GitHub Releases auto-updater (`checkAndUpdateTranscoderBinaries`) for `FFmpeg` / `FFprobe` / `HandBrakeCLI` in `userData/bin`, `detectHardwareEncoder` (`vt_h264`/`nvenc`/`qsv`/`vaapi`/`libx264`) | `runtimeBus.ts`, `settings.ts` |
 | `electron/smartPlaylists.ts` | `evaluateSmartPlaylist`, `getPlaylistTracks`, `getPlaylistVideos`, `generateRelativeM3u8`, Smart Playlist exclusion helpers | `db.ts`, `logger.ts` |
 | `electron/egenius/*` | `index.ts`, `types.ts`, `affinityCache.ts`, `genreMatrix.ts`, `variantFilter.ts`, `scorer.ts`, `sequencer.ts` | `db.ts`, `settings.ts`, `logger.ts` |
 | `electron/ai/llamaService.ts` | `node-llama-cpp` GGUF downloader/loader (`0–50%` / `50–100%`), `models-manifest.json` cache, 5-tool agent loop | `runtimeBus.ts`, `db.ts`, `settings.ts`, `egenius/affinityCache.ts`, `egenius/genreMatrix.ts` |

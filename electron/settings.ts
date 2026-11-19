@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
@@ -22,8 +23,177 @@ try {
   bundledFfprobePath = '';
 }
 
+export type AppProfile = 'client' | 'headless-client' | 'desktop-server' | 'headless-server';
+export type ClientSource = 'local' | 'remote';
+export type AuthMode = 'standalone' | 'authentik' | 'proxy-headers' | 'local-pin';
+export type TranscoderUpdateSchedule = 'off' | 'daily' | 'weekly';
+
+export interface ServerSidebarVisibility {
+  music: boolean;
+  movies: boolean;
+  tvShows: boolean;
+  musicVideos: boolean;
+  audiobooks: boolean;
+  books: boolean;
+  photos: boolean;
+  store: boolean;
+  devices: boolean;
+  networkShares: boolean;
+  genreMap: boolean;
+}
+
+export interface ResolvedRuntimeMode {
+  appMode: AppProfile;
+  isModeLocked: boolean;
+  lockReason: 'docker' | 'cli' | null;
+  isDocker: boolean;
+  isHeadless: boolean;
+  isServerRole: boolean;
+  webUiEnabled: boolean;
+  cliHost?: string;
+  cliPort?: number;
+}
+
+export function isDockerContainer(): boolean {
+  return (
+    process.env.DOCKER_CONTAINER === 'true' ||
+    process.env.container === 'docker' ||
+    fs.existsSync('/.dockerenv')
+  );
+}
+
+export function isServerProfile(mode: AppProfile): boolean {
+  return mode === 'desktop-server' || mode === 'headless-server';
+}
+
+export function isHeadlessProfile(mode: AppProfile): boolean {
+  return mode === 'headless-client' || mode === 'headless-server';
+}
+
+function readCliFlagValue(argv: string[], flag: string): string | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === flag && i + 1 < argv.length && !argv[i + 1].startsWith('--')) {
+      return argv[i + 1];
+    }
+    if (arg.startsWith(`${flag}=`)) {
+      return arg.slice(flag.length + 1);
+    }
+  }
+  return undefined;
+}
+
+export function resolveAppMode(
+  storedMode?: AppProfile | string,
+  argv: string[] = process.argv
+): ResolvedRuntimeMode {
+  const webUiDisabled =
+    argv.includes('--no-web-ui') ||
+    process.env.RTUNES_WEB_UI === 'false' ||
+    process.env.RTUNES_WEB_UI === '0';
+  const cliHost = readCliFlagValue(argv, '--host') || process.env.RTUNES_HOST || process.env.HOST;
+  const rawPort = readCliFlagValue(argv, '--port') || process.env.RTUNES_PORT || process.env.PORT;
+  const parsedPort = rawPort ? Number(rawPort) : undefined;
+  const cliPort = parsedPort && Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : undefined;
+
+  if (isDockerContainer()) {
+    return {
+      appMode: 'headless-server',
+      isModeLocked: true,
+      lockReason: 'docker',
+      isDocker: true,
+      isHeadless: true,
+      isServerRole: true,
+      webUiEnabled: !webUiDisabled,
+      cliHost,
+      cliPort,
+    };
+  }
+
+  const envMode = process.env.RTUNES_MODE;
+  const hasHeadlessServer =
+    argv.includes('--headless') ||
+    argv.includes('--headless-server') ||
+    envMode === 'headless-server';
+  if (hasHeadlessServer) {
+    return {
+      appMode: 'headless-server',
+      isModeLocked: true,
+      lockReason: 'cli',
+      isDocker: false,
+      isHeadless: true,
+      isServerRole: true,
+      webUiEnabled: !webUiDisabled,
+      cliHost,
+      cliPort,
+    };
+  }
+
+  const hasHeadlessClient =
+    argv.includes('--headless-client') || envMode === 'headless-client';
+  if (hasHeadlessClient) {
+    return {
+      appMode: 'headless-client',
+      isModeLocked: true,
+      lockReason: 'cli',
+      isDocker: false,
+      isHeadless: true,
+      isServerRole: false,
+      webUiEnabled: !webUiDisabled,
+      cliHost,
+      cliPort,
+    };
+  }
+
+  const appMode: AppProfile = storedMode === 'desktop-server' ? 'desktop-server' : 'client';
+  return {
+    appMode,
+    isModeLocked: false,
+    lockReason: null,
+    isDocker: false,
+    isHeadless: false,
+    isServerRole: appMode === 'desktop-server',
+    webUiEnabled: !webUiDisabled,
+    cliHost,
+    cliPort,
+  };
+}
+
+export function getDefaultServerSidebarVisibility(mode: AppProfile): ServerSidebarVisibility {
+  const isHeadlessServer = mode === 'headless-server';
+  return {
+    music: true,
+    movies: true,
+    tvShows: true,
+    musicVideos: true,
+    audiobooks: true,
+    books: true,
+    photos: true,
+    store: true,
+    devices: !isHeadlessServer,
+    networkShares: !isHeadlessServer,
+    genreMap: true,
+  };
+}
+
+export function hashLocalPin(pin: string, existingSalt?: string): string {
+  const salt = existingSalt || crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(pin, salt, 32).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+export function verifyLocalPin(pin: string, storedHash: string): boolean {
+  const [salt, expectedHex] = storedHash.split(':');
+  if (!salt || !expectedHex) return false;
+  const actualBuf = crypto.scryptSync(pin, salt, 32);
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  if (actualBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(actualBuf, expectedBuf);
+}
+
 export interface AppSettings {
-  backendMode?: 'standalone' | 'host_server' | 'docker_server';
+  appMode: AppProfile;
+  clientSource: ClientSource;
   dockerServerUrl?: string;
 
   // Paths
@@ -44,22 +214,31 @@ export interface AppSettings {
   cacheMaxSizeGb: number;
   autoEvictLru: boolean;
   autoCachePlayback: boolean;
-  hardwareAccelMode: 'auto' | 'vt_h264' | 'nvenc' | 'qsv' | 'software';
+  enableClientLocalTranscoding: boolean;
+  transcoderUpdateSchedule: TranscoderUpdateSchedule;
+  lastTranscoderUpdateCheckAt: number;
+  hardwareAccelMode: 'auto' | 'vt_h264' | 'nvenc' | 'qsv' | 'vaapi' | 'software';
   metadataHydrationMode: 'hybrid' | 'on_demand';
   tableColumnsJson: string;
   showOfflineDevices?: boolean;
   lcdArtistClickBehavior?: 'jump' | 'filter';
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
-  enableLanServerMode?: boolean;
   lanServerPort?: number;
+  serverSidebarVisibility: ServerSidebarVisibility;
+  backgroundWatchers: boolean;
 
-  // Authentication (Authentik SSO / OIDC + Homelab Gateway)
-  authMode: 'standalone' | 'authentik';
+  // Authentication (Authentik SSO / Proxy Headers / Local PIN)
+  authGateEnabled: boolean;
+  authMode: AuthMode;
   authentikIssuerUrl: string;
   authentikClientId: string;
   authentikRedirectUri: string;
   homelabGatewayUrl: string;
+  trustedProxyHeader: string;
+  localPinHash?: string;
+  localPinPlaintext?: string;
+  hasLocalPin?: boolean;
 
   // API Keys & Integrations
   listenbrainzToken: string;
@@ -129,8 +308,10 @@ export function getKeychainSecret(account: string): string | null {
 
 export function getDefaultSettings(): AppSettings {
   const defaultCacheDir = platformDriver.getDefaultCacheDir();
+  const runtime = resolveAppMode('client');
   return {
-    backendMode: 'standalone',
+    appMode: runtime.appMode,
+    clientSource: 'local',
     dockerServerUrl: 'https://rtunes-server.local:8443',
 
     nfsSharePath: '',
@@ -170,6 +351,9 @@ export function getDefaultSettings(): AppSettings {
     cacheMaxSizeGb: 50,
     autoEvictLru: true,
     autoCachePlayback: true,
+    enableClientLocalTranscoding: false,
+    transcoderUpdateSchedule: 'weekly',
+    lastTranscoderUpdateCheckAt: 0,
     hardwareAccelMode: 'auto',
     metadataHydrationMode: 'hybrid',
     tableColumnsJson: '',
@@ -177,14 +361,20 @@ export function getDefaultSettings(): AppSettings {
     lcdArtistClickBehavior: 'jump',
     genreMapUseLastfm: false,
     genreMapLastfmWeight: 20,
-    enableLanServerMode: false,
     lanServerPort: 3000,
+    serverSidebarVisibility: getDefaultServerSidebarVisibility(runtime.appMode),
+    backgroundWatchers: true,
 
+    authGateEnabled: false,
     authMode: 'standalone',
     authentikIssuerUrl: '',
     authentikClientId: 'retrotunes-desktop',
     authentikRedirectUri: 'http://127.0.0.1:42813/callback',
     homelabGatewayUrl: '',
+    trustedProxyHeader: 'X-authentik-username',
+    localPinHash: '',
+    localPinPlaintext: '',
+    hasLocalPin: false,
 
     listenbrainzToken: '',
     listenbrainzUsername: '',
@@ -241,9 +431,34 @@ export function getSettings(forceReload = false): AppSettings {
     }
   }
 
+  let legacyInferredMode: AppProfile | undefined;
+  let legacyInferredRemote = false;
+  if (stored.appMode === 'desktop-server' || stored.appMode === 'client') {
+    legacyInferredMode = stored.appMode;
+  } else if (stored.enableLanServerMode === true || stored.backendMode === 'host_server') {
+    legacyInferredMode = 'desktop-server';
+  } else if (stored.backendMode === 'docker_server') {
+    legacyInferredMode = 'client';
+    legacyInferredRemote = true;
+  }
+
+  delete stored.enableLanServerMode;
+  delete stored.backendMode;
+
+  const runtime = resolveAppMode(legacyInferredMode);
+
   const merged: AppSettings = {
     ...defaults,
     ...(stored as Partial<AppSettings>),
+    appMode: runtime.appMode,
+    clientSource:
+      stored.clientSource === 'remote' || (stored.clientSource === undefined && legacyInferredRemote)
+        ? 'remote'
+        : 'local',
+    serverSidebarVisibility: {
+      ...getDefaultServerSidebarVisibility(runtime.appMode),
+      ...((stored.serverSidebarVisibility as Partial<ServerSidebarVisibility>) || {}),
+    },
   };
 
   // Ensure bundled ffmpeg is populated if stored path doesn't exist
@@ -270,6 +485,11 @@ export function getSettings(forceReload = false): AppSettings {
     }
   }
 
+  const storedPinHash = typeof merged.localPinHash === 'string' ? merged.localPinHash : '';
+  merged.hasLocalPin = storedPinHash.includes(':');
+  merged.localPinHash = '';
+  merged.localPinPlaintext = '';
+
   // Ensure localCachePath directory exists
   try {
     fs.mkdirSync(merged.localCachePath, { recursive: true });
@@ -288,8 +508,56 @@ export function getSettings(forceReload = false): AppSettings {
   return merged;
 }
 
+export function getStoredLocalPinHash(): string {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT value FROM settings WHERE key = 'localPinHash'")
+    .get() as { value: string } | undefined;
+  if (!row) return '';
+  try {
+    const parsed = JSON.parse(row.value);
+    return typeof parsed === 'string' ? parsed : '';
+  } catch {
+    return row.value;
+  }
+}
+
 export function saveSettings(partial: Partial<AppSettings>): AppSettings {
   const db = getDb();
+  const runtime = resolveAppMode();
+  const sanitized: Record<string, unknown> = { ...(partial as Record<string, unknown>) };
+
+  // Strip ephemeral / legacy / locked keys
+  delete sanitized.hasLocalPin;
+  delete sanitized.enableLanServerMode;
+  delete sanitized.backendMode;
+
+  if (runtime.isModeLocked) {
+    if (sanitized.appMode !== undefined && sanitized.appMode !== runtime.appMode) {
+      logger.warn('SYSTEM', `Ignored appMode change while locked by ${runtime.lockReason}.`, {
+        requested: sanitized.appMode,
+        lockedTo: runtime.appMode,
+      });
+    }
+    delete sanitized.appMode;
+  } else if (sanitized.appMode !== undefined) {
+    if (sanitized.appMode === 'headless-client' || sanitized.appMode === 'headless-server') {
+      logger.warn('SYSTEM', 'Refused persisting CLI-only headless profile in GUI settings.', {
+        requested: sanitized.appMode,
+      });
+      delete sanitized.appMode;
+    } else if (sanitized.appMode !== 'client' && sanitized.appMode !== 'desktop-server') {
+      sanitized.appMode = 'client';
+    }
+  }
+
+  if (typeof sanitized.localPinPlaintext === 'string' && sanitized.localPinPlaintext.trim().length > 0) {
+    sanitized.localPinHash = hashLocalPin(sanitized.localPinPlaintext.trim());
+  } else if (sanitized.localPinHash === '' || sanitized.localPinHash === '[SET]') {
+    delete sanitized.localPinHash;
+  }
+  delete sanitized.localPinPlaintext;
+
   const upsert = db.prepare(`
     INSERT INTO settings (key, value, updated_at)
     VALUES (?, ?, datetime('now'))
@@ -297,7 +565,7 @@ export function saveSettings(partial: Partial<AppSettings>): AppSettings {
   `);
 
   const tx = db.transaction(() => {
-    for (const [k, v] of Object.entries(partial)) {
+    for (const [k, v] of Object.entries(sanitized)) {
       if (v === undefined) continue;
       if (SECRET_KEYS.includes(k as keyof AppSettings) && typeof v === 'string') {
         setKeychainSecret(k, v);
@@ -309,7 +577,7 @@ export function saveSettings(partial: Partial<AppSettings>): AppSettings {
   tx();
   cachedSettings = null;
   logger.info('SYSTEM', 'Updated application settings in SQLite & OS Keychain.', {
-    updatedKeys: Object.keys(partial),
+    updatedKeys: Object.keys(sanitized),
   });
   return getSettings(true);
 }

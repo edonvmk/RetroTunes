@@ -453,8 +453,11 @@ export interface FileTransportProvider {
 export function getActiveTransportProvider(): FileTransportProvider {
   const settings = getSettings();
   const auth = getAuthState();
+  const isRemoteClient =
+    (settings.appMode === 'client' || settings.appMode === 'headless-client') &&
+    settings.clientSource === 'remote';
 
-  if (settings.backendMode === 'docker_server' && settings.dockerServerUrl) {
+  if (isRemoteClient && settings.dockerServerUrl) {
     const baseUrl = settings.dockerServerUrl.replace(/\/+$/, '');
     return {
       mode: 'docker_server',

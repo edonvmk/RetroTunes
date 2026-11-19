@@ -2,14 +2,16 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { emitRendererEvent, getAppDataPath } from './runtimeBus';
-import { initDatabase } from './db';
-import { getSettings, saveSettings } from './settings';
+import { initDatabase, closeAllDatabases } from './db';
+import { getSettings, saveSettings, resolveAppMode } from './settings';
 import {
   runLibraryScan,
   hasPendingIndexCheckpoint,
   hydrateVideoArtwork,
   startBackgroundMetadataTrickle,
   syncPlexAndAudiobookshelfProgress,
+  reconcileBackgroundWatchers,
+  stopBackgroundWatchers,
 } from './indexer';
 import {
   listMountedVolumes,
@@ -27,7 +29,7 @@ import {
   removeDeviceCatalogItem,
   DeviceProfile,
 } from './deviceSync';
-import { checkAndUpdateTranscoderBinaries } from './transcoder/binaryManager';
+import { runStartupTranscoderCheck } from './transcoder/binaryManager';
 import {
   autoMountSharesOnStartup,
   unmountAllManagedSharesOnQuit,
@@ -40,7 +42,7 @@ import {
 } from './auth/authentik';
 import { startMediaServer } from './mediaServer';
 import { registerCoreRpcHandlers, RpcHandlerFn } from './rpcHandlers';
-import { startUnifiedHttpServer } from './server';
+import { startUnifiedHttpServer, bootHeadlessServer } from './server';
 import { remoteServerProvider } from './providers/remoteServer';
 import { logger } from './logger';
 import { platformDriver } from './platform';
@@ -149,24 +151,26 @@ function registerAllHandlers() {
     return platformDriver.setAutoOpenOnMtp(enabled, launchCmd);
   });
 
-  // --- Settings save triggers live LAN host server start/stop ---
+  // --- Settings save triggers live LAN host server start/stop + watcher reconciliation ---
   registerChannel('settings:save', (partial) => {
     const saved = saveSettings(partial);
     syncOptionalLanServer(saved);
+    reconcileBackgroundWatchers(saved.appMode);
     return saved;
   });
 
-  // --- Authentik OIDC SSO (gated behind dev mode) ---
-  registerChannel('auth:getState', () => getAuthentikAuthState(isDev));
-  registerChannel('auth:login', () => loginWithAuthentik(isDev));
-  registerChannel('auth:logout', () => logoutAuthentik(isDev));
+  // --- Authentik OIDC SSO ---
+  registerChannel('auth:getState', () => getAuthentikAuthState(true));
+  registerChannel('auth:login', () => loginWithAuthentik(true));
+  registerChannel('auth:logout', () => logoutAuthentik(true));
 }
 
 let activeLanServer: { server: import('http').Server; port: number } | null = null;
 
 function syncOptionalLanServer(settings = getSettings()) {
-  const shouldRun = Boolean(settings.enableLanServerMode || settings.backendMode === 'host_server');
+  const shouldRun = settings.appMode === 'desktop-server';
   const desiredPort = Number(settings.lanServerPort) || 3000;
+  const runtime = resolveAppMode(settings.appMode);
 
   if (!shouldRun) {
     if (activeLanServer) {
@@ -187,10 +191,12 @@ function syncOptionalLanServer(settings = getSettings()) {
 
   void startUnifiedHttpServer({
     port: desiredPort,
-    host: '0.0.0.0',
+    host: runtime.cliHost || '0.0.0.0',
     registry: handlerRegistry,
-    serveStaticDist: true,
+    serveStaticDist: runtime.webUiEnabled,
     mountMedia: true,
+    appMode: settings.appMode,
+    enforceAuthGate: true,
   })
     .then((started) => {
       activeLanServer = started;
@@ -328,32 +334,36 @@ function createMainWindow() {
 }
 
 app.whenReady().then(async () => {
+  const runtimeBoot = resolveAppMode(undefined, process.argv);
+  if (runtimeBoot.isHeadless) {
+    logger.info('SYSTEM', `Booting RetroTunes in ${runtimeBoot.appMode} mode...`, {
+      lockReason: runtimeBoot.lockReason,
+      webUiEnabled: runtimeBoot.webUiEnabled,
+    });
+    await bootHeadlessServer();
+    return;
+  }
+
   logger.info('SYSTEM', `Booting RetroTunes (rTunes) - Client Code: ePod Suite...`, { isDev });
   initDatabase();
-  if (!isDev) {
-    const currentSettings = getSettings();
-    if (currentSettings.backendMode === 'docker_server' || currentSettings.authMode !== 'standalone') {
-      saveSettings({
-        ...currentSettings,
-        backendMode: currentSettings.backendMode === 'docker_server' ? 'standalone' : currentSettings.backendMode,
-        authMode: 'standalone',
-      });
-    }
-  }
-  initAuthentikAuth(isDev);
+  const currentSettings = getSettings();
+  initAuthentikAuth(true);
   await startMediaServer();
   registerAllHandlers();
   startHttpFallbackAndOptionalLanServer();
   setupApplicationMenu();
   createMainWindow();
   startMtpUsbPoller();
+  reconcileBackgroundWatchers(currentSettings.appMode);
   const autoMountPromise = autoMountSharesOnStartup().catch(() => {});
   // Resume gentle background metadata & video artwork hydration
   setTimeout(async () => {
     await autoMountPromise;
     const activeSettings = getSettings();
+    const isRemoteClient =
+      activeSettings.appMode === 'client' && activeSettings.clientSource === 'remote';
     const remoteUrl = (
-      (activeSettings.backendMode === 'docker_server' ? activeSettings.dockerServerUrl : '') ||
+      (isRemoteClient ? activeSettings.dockerServerUrl : '') ||
       process.env.RTUNES_SERVER_URL ||
       ''
     ).trim();
@@ -362,20 +372,22 @@ app.whenReady().then(async () => {
         logger.warn('SYSTEM', 'Initial remote delta sync skipped', { error: String(err) });
       });
     }
-    if (hasPendingIndexCheckpoint()) {
+    if (hasPendingIndexCheckpoint() && !isRemoteClient) {
       logger.info('INDEXER', 'Detected interrupted library scan/rebuild checkpoint; resuming automatically...');
       void runLibraryScan(undefined, { resume: true });
     }
-    void hydrateVideoArtwork();
-    void syncPlexAndAudiobookshelfProgress();
-    if (activeSettings.metadataHydrationMode === 'hybrid') {
-      void startBackgroundMetadataTrickle();
+    if (!isRemoteClient) {
+      void hydrateVideoArtwork();
+      void syncPlexAndAudiobookshelfProgress();
+      if (activeSettings.metadataHydrationMode === 'hybrid') {
+        void startBackgroundMetadataTrickle();
+      }
     }
   }, 2500);
 
   // Non-blocking startup check & auto-update for FFmpeg / HandBrakeCLI
   setTimeout(() => {
-    void checkAndUpdateTranscoderBinaries({ autoDownload: true });
+    void runStartupTranscoderCheck(currentSettings.appMode);
   }, 4000);
 
   app.on('activate', () => {
@@ -386,7 +398,17 @@ app.whenReady().then(async () => {
 });
 
 app.on('will-quit', () => {
+  stopBackgroundWatchers();
+  if (activeLanServer) {
+    try {
+      activeLanServer.server.close();
+    } catch {
+      // ignore
+    }
+    activeLanServer = null;
+  }
   void unmountAllManagedSharesOnQuit();
+  closeAllDatabases();
 });
 
 app.on('window-all-closed', () => {

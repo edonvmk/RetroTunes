@@ -814,10 +814,16 @@ export async function bootHeadlessServer(): Promise<void> {
   });
   activePort = started.port;
 
+  const noOpenBrowserFlag =
+    process.argv.includes('--no-open-browser') ||
+    process.argv.includes('--no-browser') ||
+    process.env.RTUNES_OPEN_BROWSER === 'false' ||
+    process.env.RTUNES_OPEN_BROWSER === '0';
   const shouldAutoOpen =
+    !runtime.isDocker &&
     runtime.webUiEnabled &&
-    runtime.autoOpenBrowserOnHeadless &&
-    initialSettings.headlessAutoOpenBrowser !== false;
+    !noOpenBrowserFlag &&
+    (runtime.autoOpenBrowserOnHeadless || Boolean(initialSettings.headlessAutoOpenBrowser));
   if (shouldAutoOpen) {
     const browserHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
     const browserUrl = `http://${browserHost}:${started.port}`;

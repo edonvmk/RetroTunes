@@ -117,9 +117,9 @@ System & Diagnostics:
 
 Headless Server & Client Daemons:
   --headless | --headless-server [--host <0.0.0.0>] [--port <3000>] [--open-browser] [--no-open-browser] [--no-web-ui]
-      Boot authoritative rTunes-Server HTTP/SSE/RPC daemon (auto-opens default web browser on desktop unless --no-open-browser).
+      Boot authoritative rTunes-Server HTTP/SSE/RPC daemon (does not open browser by default unless --open-browser is passed or enabled in Preferences).
   --headless-client [--host <127.0.0.1>] [--port <3000>] [--server <url>] [--open-browser] [--no-open-browser] [--no-web-ui]
-      Boot headless client daemon (auto-opens default web browser on desktop unless --no-open-browser).
+      Boot headless client daemon (does not open browser by default unless --open-browser is passed or enabled in Preferences).
 
 Authentication & Remote Client Control:
   auth setup --username <u> --password <p> [--display-name <n>] [--email <e>] [--guest-roadie] [--json]

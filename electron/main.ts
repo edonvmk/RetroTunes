@@ -218,15 +218,20 @@ function syncOptionalLanServer(
     return;
   }
 
+  const noOpenBrowserFlag =
+    process.argv.includes('--no-open-browser') ||
+    process.argv.includes('--no-browser') ||
+    process.env.RTUNES_OPEN_BROWSER === 'false' ||
+    process.env.RTUNES_OPEN_BROWSER === '0';
   const shouldOpenBrowserNow =
     serveStaticDist &&
+    !noOpenBrowserFlag &&
     ((isHeadlessMode &&
       (options.isInitialBoot || options.modeJustChanged) &&
-      runtime.autoOpenBrowserOnHeadless &&
-      settings.headlessAutoOpenBrowser !== false) ||
+      (runtime.autoOpenBrowserOnHeadless || Boolean(settings.headlessAutoOpenBrowser))) ||
       (settings.appMode === 'desktop-server' &&
         (options.isInitialBoot || options.modeJustChanged) &&
-        Boolean(settings.desktopServerAutoOpenWebUi)));
+        (runtime.autoOpenBrowserOnHeadless || Boolean(settings.desktopServerAutoOpenWebUi))));
 
   if (
     activeLanServer &&

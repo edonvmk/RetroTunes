@@ -620,26 +620,25 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                       flexWrap: 'wrap',
                     }}
                   >
-                    <label
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 8,
-                        fontSize: 11.5,
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={form.headlessAutoOpenBrowser !== false}
-                        onChange={(e) => updateField('headlessAutoOpenBrowser', e.target.checked)}
-                      />
-                      <span>
-                        Auto-open default web browser on desktop when launching Headless Mode (
-                        <code>--open-browser</code> / <code>--no-open-browser</code>)
-                      </span>
-                    </label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <label style={{ fontSize: 11.5, fontWeight: 600, color: '#1e293b' }}>
+                        Default Web Browser on Headless Launch:
+                      </label>
+                      <select
+                        className="aqua-input"
+                        value={form.headlessAutoOpenBrowser ? 'auto-open' : 'do-not-open'}
+                        onChange={(e) =>
+                          updateField('headlessAutoOpenBrowser', e.target.value === 'auto-open')
+                        }
+                      >
+                        <option value="do-not-open">
+                          Do Not Open Browser Automatically (Default — or pass --no-open-browser)
+                        </option>
+                        <option value="auto-open">
+                          Auto-Open Default Web Browser (--open-browser)
+                        </option>
+                      </select>
+                    </div>
                     <button
                       type="button"
                       className="aqua-btn primary"
@@ -873,7 +872,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                           flexWrap: 'wrap',
                         }}
                       >
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
                             <input
                               type="checkbox"
@@ -882,25 +881,32 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                             />
                             <span>Enable Desktop Server Web UI on port {form.lanServerPort ?? 3000}</span>
                           </label>
-                          <label
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 8,
-                              fontSize: 11,
-                              fontWeight: 600,
-                              color: form.desktopServerWebUiEnabled === false ? '#94a3b8' : '#334155',
-                              cursor: form.desktopServerWebUiEnabled === false ? 'not-allowed' : 'pointer',
-                            }}
-                          >
-                            <input
-                              type="checkbox"
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <label
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: form.desktopServerWebUiEnabled === false ? '#94a3b8' : '#334155',
+                              }}
+                            >
+                              Default Web Browser on Startup:
+                            </label>
+                            <select
+                              className="aqua-input"
                               disabled={form.desktopServerWebUiEnabled === false}
-                              checked={Boolean(form.desktopServerAutoOpenWebUi)}
-                              onChange={(e) => updateField('desktopServerAutoOpenWebUi', e.target.checked)}
-                            />
-                            <span>Auto-launch Web UI in default browser when Desktop Server starts</span>
-                          </label>
+                              value={form.desktopServerAutoOpenWebUi ? 'auto-open' : 'do-not-open'}
+                              onChange={(e) =>
+                                updateField('desktopServerAutoOpenWebUi', e.target.value === 'auto-open')
+                              }
+                            >
+                              <option value="do-not-open">
+                                Do Not Open Browser Automatically (Default)
+                              </option>
+                              <option value="auto-open">
+                                Auto-Open Default Web Browser (--open-browser)
+                              </option>
+                            </select>
+                          </div>
                         </div>
                         <button
                           type="button"

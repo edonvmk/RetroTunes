@@ -138,7 +138,7 @@ export function resolveAppMode(
       isHeadless: true,
       isServerRole: true,
       webUiEnabled: !webUiDisabled,
-      autoOpenBrowserOnHeadless: !webUiDisabled && !noOpenBrowser,
+      autoOpenBrowserOnHeadless: !webUiDisabled && explicitOpenBrowser && !noOpenBrowser,
       cliHost,
       cliPort,
     };
@@ -155,7 +155,7 @@ export function resolveAppMode(
       isHeadless: true,
       isServerRole: false,
       webUiEnabled: !webUiDisabled,
-      autoOpenBrowserOnHeadless: !webUiDisabled && !noOpenBrowser,
+      autoOpenBrowserOnHeadless: !webUiDisabled && explicitOpenBrowser && !noOpenBrowser,
       cliHost,
       cliPort,
     };
@@ -177,7 +177,7 @@ export function resolveAppMode(
     isHeadless,
     isServerRole,
     webUiEnabled: (isServerRole || isHeadless) && !webUiDisabled,
-    autoOpenBrowserOnHeadless: isHeadless ? !webUiDisabled && !noOpenBrowser : explicitOpenBrowser,
+    autoOpenBrowserOnHeadless: !webUiDisabled && explicitOpenBrowser && !noOpenBrowser,
     cliHost,
     cliPort,
   };
@@ -425,7 +425,7 @@ export function getDefaultSettings(): AppSettings {
     lanServerPort: 3000,
     desktopServerWebUiEnabled: true,
     desktopServerAutoOpenWebUi: false,
-    headlessAutoOpenBrowser: true,
+    headlessAutoOpenBrowser: false,
     serverSidebarVisibility: getDefaultServerSidebarVisibility(runtime.appMode),
     backgroundWatchers: true,
 

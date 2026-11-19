@@ -481,8 +481,65 @@ export interface ChartTrackItem {
 
 export type AppProfile = 'client' | 'headless-client' | 'desktop-server' | 'headless-server';
 export type ClientSource = 'local' | 'remote';
-export type AuthMode = 'standalone' | 'authentik' | 'proxy-headers' | 'local-pin';
+export type AuthMode = 'standalone' | 'local-accounts' | 'authentik' | 'proxy-headers' | 'local-pin';
 export type TranscoderUpdateSchedule = 'off' | 'daily' | 'weekly';
+
+export type LibraryPermLevel = 0 | 1 | 2;
+export type FeaturePermLevel = 0 | 1 | 2;
+export type SwitchPerm = 0 | 1;
+
+export interface RolePermissions {
+  libMusic: LibraryPermLevel;
+  libMovies: LibraryPermLevel;
+  libTvShows: LibraryPermLevel;
+  libMusicVideos: LibraryPermLevel;
+  libBooks: LibraryPermLevel;
+  libAudiobooks: LibraryPermLevel;
+  libPhotos: LibraryPermLevel;
+  featEgenius: FeaturePermLevel;
+  featGenreMap: FeaturePermLevel;
+  featDevicesSync: SwitchPerm;
+  localCacheTier: 0 | 1 | 2;
+  localCacheLimitMb: number;
+  mediaUpload: 0 | 1 | 2;
+  storeRequest: 0 | 1 | 2;
+  playlists: 0 | 1 | 2;
+  approveUploads: SwitchPerm;
+  approveStore: SwitchPerm;
+  rescanLibrary: SwitchPerm;
+  rebuildDb: SwitchPerm;
+  manageApiKeys: SwitchPerm;
+  viewServerLogs: SwitchPerm;
+  manageUac: SwitchPerm;
+}
+
+export interface RoleRecord {
+  id: number;
+  name: string;
+  description: string;
+  color: string;
+  isSystem: boolean;
+  isSuperAdmin: boolean;
+  permissions: RolePermissions;
+  createdAt: string;
+}
+
+export interface UserRecord {
+  id: number;
+  username: string;
+  displayName: string;
+  email: string;
+  phone: string;
+  authentikSub: string | null;
+  listenbrainzUsername: string;
+  hasListenbrainzToken: boolean;
+  status: 'active' | 'suspended';
+  createdAt: string;
+  lastSeenAt: string | null;
+  roles: RoleRecord[];
+  overrides: Partial<RolePermissions> | null;
+  effectivePermissions: RolePermissions;
+}
 
 export interface ServerSidebarVisibility {
   music: boolean;
@@ -511,9 +568,12 @@ export interface RuntimeModeInfo {
 export interface RemoteAuthInfo {
   serverName: string;
   version: string;
+  serverVersion?: string;
   appMode: AppProfile;
+  needsSetup: boolean;
   authGateEnabled: boolean;
   authMode: AuthMode;
+  allowGuestRoadie: boolean;
   authentikIssuerUrl?: string;
   authentikClientId?: string;
   authentikRedirectUri?: string;
@@ -557,6 +617,8 @@ export interface AppSettings {
 
   authGateEnabled: boolean;
   authMode: AuthMode;
+  allowGuestRoadie?: boolean;
+  hasCompletedOnboarding?: boolean;
   authentikIssuerUrl: string;
   authentikClientId: string;
   authentikRedirectUri: string;

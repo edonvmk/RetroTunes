@@ -208,11 +208,13 @@ let coreDbInstance: Database.Database | null = null;
 let cacheDbInstance: Database.Database | null = null;
 let videoDbInstance: Database.Database | null = null;
 let storeDbInstance: Database.Database | null = null;
+let usersDbInstance: Database.Database | null = null;
 
 let dbFilePath = '';
 let cacheDbFilePath = '';
 let videoDbFilePath = '';
 let storeDbFilePath = '';
+let usersDbFilePath = '';
 let shutdownHooksRegistered = false;
 
 export interface PlaybackDeltaUpdate {
@@ -289,6 +291,7 @@ export function closeAllDatabases(): void {
     ['affinity_cache', cacheDbInstance],
     ['video', videoDbInstance],
     ['store', storeDbInstance],
+    ['users', usersDbInstance],
   ] as const) {
     if (!conn) continue;
     try {
@@ -301,6 +304,7 @@ export function closeAllDatabases(): void {
   cacheDbInstance = null;
   videoDbInstance = null;
   storeDbInstance = null;
+  usersDbInstance = null;
 }
 
 function registerDbShutdownHooks(): void {
@@ -376,7 +380,7 @@ export function computeTrackUid(track: {
 }
 
 export function initDatabase(customPath?: string): Database.Database {
-  if (coreDbInstance && cacheDbInstance && videoDbInstance && storeDbInstance) {
+  if (coreDbInstance && cacheDbInstance && videoDbInstance && storeDbInstance && usersDbInstance) {
     return coreDbInstance;
   }
   const start = Date.now();
@@ -418,6 +422,10 @@ export function initDatabase(customPath?: string): Database.Database {
   const storeOpened = openConfiguredDb(path.join(dataDir, 'store.sqlite'), 'store.sqlite');
   const storeDb = storeOpened.db;
   storeDbFilePath = storeOpened.actualPath;
+
+  const usersOpened = openConfiguredDb(path.join(dataDir, 'users.sqlite'), 'users.sqlite');
+  const usersDb = usersOpened.db;
+  usersDbFilePath = usersOpened.actualPath;
 
   // 1. Initialize core.sqlite schema (Music, Playlists, Smart Playlists, Genre Matrix, Settings, Sync)
   coreDb.exec(`
@@ -599,6 +607,16 @@ export function initDatabase(customPath?: string): Database.Database {
       deleted_at TEXT DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_sync_tombstones_rev ON sync_tombstones(deleted_rev);
+
+    CREATE TABLE IF NOT EXISTS user_track_state (
+      user_id INTEGER NOT NULL,
+      track_uid TEXT NOT NULL,
+      play_count INTEGER DEFAULT 0,
+      loved INTEGER DEFAULT 0,
+      rating INTEGER DEFAULT 0,
+      last_played_at TEXT,
+      PRIMARY KEY (user_id, track_uid)
+    );
   `);
 
   // Safe migration for existing core.sqlite databases
@@ -683,6 +701,12 @@ export function initDatabase(customPath?: string): Database.Database {
     }
     if (!pCols.some((c) => c.name === 'egenius_scene_threshold')) {
       coreDb.exec('ALTER TABLE playlists ADD COLUMN egenius_scene_threshold REAL DEFAULT 0.55');
+    }
+    if (!pCols.some((c) => c.name === 'owner_user_id')) {
+      coreDb.exec('ALTER TABLE playlists ADD COLUMN owner_user_id INTEGER');
+    }
+    if (!pCols.some((c) => c.name === 'is_shared')) {
+      coreDb.exec('ALTER TABLE playlists ADD COLUMN is_shared INTEGER DEFAULT 0');
     }
     const ptCols = coreDb.prepare("PRAGMA table_info('playlist_tracks')").all() as { name: string }[];
     if (ptCols.length > 0 && !ptCols.some((c) => c.name === 'id')) {
@@ -1081,6 +1105,24 @@ export function initDatabase(customPath?: string): Database.Database {
       watched INTEGER DEFAULT 0,
       updated_at TEXT DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS user_video_progress (
+      user_id INTEGER NOT NULL,
+      video_id INTEGER NOT NULL,
+      view_offset_ms INTEGER DEFAULT 0,
+      watched INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, video_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_audiobook_progress (
+      user_id INTEGER NOT NULL,
+      audiobook_id INTEGER NOT NULL,
+      current_time_sec REAL DEFAULT 0,
+      is_finished INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, audiobook_id)
+    );
   `);
 
   // 4. Initialize store.sqlite schema
@@ -1094,6 +1136,13 @@ export function initDatabase(customPath?: string): Database.Database {
       service TEXT NOT NULL,
       status TEXT DEFAULT 'requested',
       payload_json TEXT,
+      approval_status TEXT DEFAULT 'approved',
+      requested_by_user_id INTEGER,
+      requested_by_username TEXT,
+      reviewed_by_user_id INTEGER,
+      reviewed_at TEXT,
+      rejection_reason TEXT,
+      staged_payload_json TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -1111,6 +1160,88 @@ export function initDatabase(customPath?: string): Database.Database {
       destination_path TEXT NOT NULL,
       file_count INTEGER DEFAULT 1,
       arr_triggered INTEGER DEFAULT 0,
+      approval_status TEXT DEFAULT 'approved',
+      requested_by_user_id INTEGER,
+      requested_by_username TEXT,
+      reviewed_by_user_id INTEGER,
+      reviewed_at TEXT,
+      rejection_reason TEXT,
+      staged_payload_json TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+
+  for (const tbl of ['store_requests', 'upload_history'] as const) {
+    const existingCols = storeDb.prepare(`PRAGMA table_info('${tbl}')`).all() as { name: string }[];
+    for (const [col, def] of [
+      ['approval_status', "TEXT DEFAULT 'approved'"],
+      ['requested_by_user_id', 'INTEGER'],
+      ['requested_by_username', 'TEXT'],
+      ['reviewed_by_user_id', 'INTEGER'],
+      ['reviewed_at', 'TEXT'],
+      ['rejection_reason', 'TEXT'],
+      ['staged_payload_json', 'TEXT'],
+    ] as const) {
+      if (!existingCols.some((c) => c.name === col)) {
+        storeDb.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col} ${def}`);
+      }
+    }
+  }
+
+  // 5. Initialize users.sqlite schema (Multi-User Accounts, Scaled RBAC, Sessions & Password Resets)
+  usersDb.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      display_name TEXT NOT NULL,
+      email TEXT DEFAULT '',
+      phone TEXT DEFAULT '',
+      password_hash TEXT DEFAULT '',
+      authentik_sub TEXT UNIQUE,
+      listenbrainz_token TEXT DEFAULT '',
+      listenbrainz_username TEXT DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT DEFAULT (datetime('now')),
+      last_seen_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS roles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      description TEXT DEFAULT '',
+      color TEXT DEFAULT '#5a8dee',
+      is_system INTEGER DEFAULT 0,
+      is_super_admin INTEGER DEFAULT 0,
+      permissions_json TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS user_roles (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (user_id, role_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS user_permission_overrides (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      permissions_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      auth_source TEXT NOT NULL DEFAULT 'local',
+      expires_at INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL,
+      used INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
     );
   `);
@@ -1119,6 +1250,7 @@ export function initDatabase(customPath?: string): Database.Database {
   cacheDbInstance = cacheDb;
   videoDbInstance = videoDb;
   storeDbInstance = storeDb;
+  usersDbInstance = usersDb;
 
   // Idempotent one-time migration of cache & video tables from legacy rtunes.sqlite / core.sqlite
   const splitMigrated = coreDb
@@ -1162,7 +1294,13 @@ export function initDatabase(customPath?: string): Database.Database {
   logger.info(
     'DB',
     'Domain-split SQLite + FTS5 schemas verified and ready.',
-    { corePath: dbFilePath, cachePath: cacheDbFilePath, videoPath: videoDbFilePath, storePath: storeDbFilePath },
+    {
+      corePath: dbFilePath,
+      cachePath: cacheDbFilePath,
+      videoPath: videoDbFilePath,
+      storePath: storeDbFilePath,
+      usersPath: usersDbFilePath,
+    },
     Date.now() - start
   );
   return coreDb;
@@ -1194,6 +1332,13 @@ export function getStoreDb(): Database.Database {
     initDatabase();
   }
   return storeDbInstance!;
+}
+
+export function getUsersDb(): Database.Database {
+  if (!usersDbInstance) {
+    initDatabase();
+  }
+  return usersDbInstance!;
 }
 
 export function getDb(): Database.Database {

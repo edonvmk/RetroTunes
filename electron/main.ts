@@ -44,6 +44,8 @@ import { startMediaServer } from './mediaServer';
 import { registerCoreRpcHandlers, RpcHandlerFn } from './rpcHandlers';
 import { startUnifiedHttpServer, bootHeadlessServer } from './server';
 import { remoteServerProvider } from './providers/remoteServer';
+import { createLocalOwnerCallerContext, runWithCallerContext } from './auth/callerContext';
+import { ensureRbacSeeded } from './auth/rbac';
 import { logger } from './logger';
 import { platformDriver } from './platform';
 
@@ -66,7 +68,9 @@ function registerChannel(channel: string, fn: RpcHandlerFn) {
   ipcMain.handle(channel, async (_event, ...args) => {
     const start = Date.now();
     try {
-      const result = await fn(...args);
+      const result = await runWithCallerContext(createLocalOwnerCallerContext(), () =>
+        fn(...args)
+      );
       if (channel !== 'logs:get' && channel !== 'media:port' && channel !== 'arr:queue') {
         logger.debug('IPC', `Handled ${channel}`, { argsCount: args.length }, Date.now() - start);
       }
@@ -346,6 +350,7 @@ app.whenReady().then(async () => {
 
   logger.info('SYSTEM', `Booting RetroTunes (rTunes) - Client Code: ePod Suite...`, { isDev });
   initDatabase();
+  ensureRbacSeeded();
   const currentSettings = getSettings();
   initAuthentikAuth(true);
   await startMediaServer();

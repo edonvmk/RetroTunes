@@ -4,6 +4,7 @@ import { emitRendererEvent } from './runtimeBus';
 import {
   getDb,
   getCoreDb,
+  getStoreDb,
   getVideoDb,
   getDeltaSyncBatch,
   applyPlaybackDeltaSync,
@@ -20,12 +21,36 @@ import {
 import {
   getSettings,
   saveSettings,
+  redactSettingsForCaller,
   resolveAppMode,
   verifyLocalPin,
   getStoredLocalPinHash,
   testIntegrationConnection,
   AppSettings,
 } from './settings';
+import {
+  CallerContext,
+  ForbiddenError,
+  getCallerContext,
+  RolePermissions,
+} from './auth/callerContext';
+import {
+  changeUserPassword,
+  computeEffectivePermissions,
+  createRole,
+  createUser,
+  deleteRole,
+  deleteUser,
+  generateResetCode,
+  getUserById,
+  getUserPersonalSecrets,
+  listRoles,
+  listUsers,
+  setUserOverrides,
+  setUserRoles,
+  updateRole,
+  updateUser,
+} from './auth/rbac';
 import {
   runLibraryScan,
   getIndexProgress,
@@ -87,9 +112,11 @@ import {
   MixDepthMode,
 } from './egenius';
 import {
+  approvePendingStoreRequest,
   getStorefrontHome,
   searchStoreCatalog,
   requestStoreItem,
+  rejectPendingStoreRequest,
   getArrLiveQueue,
   getMultiSourceTopCharts,
   StoreCatalogItem,
@@ -105,9 +132,11 @@ import {
   NetworkShareInput,
 } from './shareManager';
 import {
+  approvePendingUpload,
   searchUploadMetadata,
   buildUploadPreviewPlan,
   executeUploadAndArrImport,
+  rejectPendingUpload,
   UploadMediaType,
 } from './uploadWizard';
 import { getMediaServerPort } from './mediaServer';
@@ -118,6 +147,126 @@ import { remoteServerProvider } from './providers/remoteServer';
 
 export type RpcHandlerFn = (...args: any[]) => Promise<any> | any;
 export type RpcRegisterFn = (channel: string, fn: RpcHandlerFn) => void;
+
+const CHANNEL_MIN_PERMISSION: Record<string, { key: keyof RolePermissions; min: number }> = {
+  'db:rebuild': { key: 'rebuildDb', min: 1 },
+  'indexer:scan': { key: 'rescanLibrary', min: 1 },
+  'indexer:cancel': { key: 'rescanLibrary', min: 1 },
+  'indexer:syncPopularity': { key: 'rescanLibrary', min: 1 },
+  'indexer:recalculateMedians': { key: 'rescanLibrary', min: 1 },
+  'indexer:cleanAllTitles': { key: 'rescanLibrary', min: 1 },
+  'indexer:deduplicate': { key: 'rescanLibrary', min: 1 },
+  'indexer:scanExtended': { key: 'rescanLibrary', min: 1 },
+  'logs:get': { key: 'viewServerLogs', min: 1 },
+  'logs:clear': { key: 'viewServerLogs', min: 1 },
+  'logs:testEvent': { key: 'viewServerLogs', min: 1 },
+  'settings:save': { key: 'manageApiKeys', min: 1 },
+  'settings:testConnection': { key: 'manageApiKeys', min: 1 },
+  'transcoder:checkUpdateBinaries': { key: 'manageApiKeys', min: 1 },
+  'transcoder:checkUpdates': { key: 'manageApiKeys', min: 1 },
+  'cache:clear': { key: 'localCacheTier', min: 1 },
+  'cache:precacheAllPlaylists': { key: 'localCacheTier', min: 1 },
+  'cache:toggleTrack': { key: 'localCacheTier', min: 1 },
+  'cache:toggleAlbum': { key: 'localCacheTier', min: 1 },
+  'cache:toggleVideo': { key: 'localCacheTier', min: 1 },
+  'cache:toggleShow': { key: 'localCacheTier', min: 1 },
+  'tracks:hydrate': { key: 'libMusic', min: 2 },
+  'tracks:hydrateAlbum': { key: 'libMusic', min: 2 },
+  'books:list': { key: 'libBooks', min: 1 },
+  'audiobooks:list': { key: 'libAudiobooks', min: 1 },
+  'audiobooks:updateProgress': { key: 'libAudiobooks', min: 1 },
+  'photos:list': { key: 'libPhotos', min: 1 },
+  'musicVideos:list': { key: 'libMusicVideos', min: 1 },
+  'egenius:createPlaylist': { key: 'featEgenius', min: 1 },
+  'egenius:refreshPlaylist': { key: 'featEgenius', min: 1 },
+  'egenius:convertToStandard': { key: 'featEgenius', min: 1 },
+  'egenius:explainTrack': { key: 'featEgenius', min: 1 },
+  'playlists:rerunAi': { key: 'featEgenius', min: 1 },
+  'ai:prepare-model': { key: 'featEgenius', min: 1 },
+  'ai:agent-turn': { key: 'featEgenius', min: 1 },
+  'genreMatrix:get': { key: 'featGenreMap', min: 1 },
+  'genreMatrix:testArtists': { key: 'featGenreMap', min: 1 },
+  'genreMatrix:getArtistSlice': { key: 'featGenreMap', min: 1 },
+  'genreMatrix:setCell': { key: 'featGenreMap', min: 2 },
+  'genreMatrix:resetCell': { key: 'featGenreMap', min: 2 },
+  'genreMatrix:rebuild': { key: 'featGenreMap', min: 2 },
+  'upload:searchMetadata': { key: 'mediaUpload', min: 1 },
+  'upload:previewPlan': { key: 'mediaUpload', min: 1 },
+  'upload:execute': { key: 'mediaUpload', min: 1 },
+  'store:request': { key: 'storeRequest', min: 1 },
+  'playlists:save': { key: 'playlists', min: 1 },
+  'playlists:delete': { key: 'playlists', min: 1 },
+  'playlists:reorderTracks': { key: 'playlists', min: 1 },
+  'playlists:addTrack': { key: 'playlists', min: 1 },
+  'playlists:removeTrack': { key: 'playlists', min: 1 },
+  'playlists:addVideo': { key: 'playlists', min: 1 },
+  'playlists:removeVideo': { key: 'playlists', min: 1 },
+  'playlists:addShow': { key: 'playlists', min: 1 },
+  'playlists:regenerate': { key: 'playlists', min: 1 },
+  'playlists:ignoreTrack': { key: 'playlists', min: 1 },
+  'playlists:excludeTrackGlobally': { key: 'playlists', min: 1 },
+  'playlists:restoreExclusion': { key: 'playlists', min: 1 },
+  'uac:listUsers': { key: 'manageUac', min: 1 },
+  'uac:createUser': { key: 'manageUac', min: 1 },
+  'uac:updateUser': { key: 'manageUac', min: 1 },
+  'uac:deleteUser': { key: 'manageUac', min: 1 },
+  'uac:generateResetCode': { key: 'manageUac', min: 1 },
+  'uac:listRoles': { key: 'manageUac', min: 1 },
+  'uac:createRole': { key: 'manageUac', min: 1 },
+  'uac:updateRole': { key: 'manageUac', min: 1 },
+  'uac:deleteRole': { key: 'manageUac', min: 1 },
+  'uac:setUserRoles': { key: 'manageUac', min: 1 },
+  'uac:setUserOverrides': { key: 'manageUac', min: 1 },
+};
+
+export function assertChannelPermission(channel: string, caller: CallerContext): void {
+  if (caller.isSuperAdmin) return;
+
+  const exact = CHANNEL_MIN_PERMISSION[channel];
+  if (exact) {
+    const level = Number(caller.permissions[exact.key] ?? 0);
+    if (level < exact.min) {
+      throw new ForbiddenError(`Permission denied for ${channel} (requires ${exact.key} >= ${exact.min}).`);
+    }
+    return;
+  }
+
+  if (channel.startsWith('shares:') && caller.permissions.manageApiKeys < 1) {
+    throw new ForbiddenError(`Permission denied for ${channel} (requires manageApiKeys).`);
+  }
+  if (channel.startsWith('devices:') && caller.permissions.featDevicesSync < 1) {
+    throw new ForbiddenError(`Permission denied for ${channel} (requires featDevicesSync).`);
+  }
+  if (
+    channel === 'videos:hydrateArtwork' &&
+    Math.max(caller.permissions.libMovies, caller.permissions.libTvShows, caller.permissions.libMusicVideos) < 2
+  ) {
+    throw new ForbiddenError('Permission denied for video artwork editing.');
+  }
+  if (
+    channel === 'uac:listPendingApprovals' &&
+    caller.permissions.approveUploads < 1 &&
+    caller.permissions.approveStore < 1 &&
+    caller.permissions.manageUac < 1
+  ) {
+    throw new ForbiddenError('Permission denied for viewing approval queue.');
+  }
+}
+
+function assertPlaylistWriteAccess(playlistId: number): void {
+  const caller = getCallerContext();
+  if (caller.isSuperAdmin) return;
+  if (caller.permissions.playlists < 1) {
+    throw new ForbiddenError('Your role has Read-Only playlist permissions.');
+  }
+  const pl = getDb()
+    .prepare('SELECT owner_user_id FROM playlists WHERE id = ?')
+    .get(playlistId) as { owner_user_id?: number | null } | undefined;
+  if (!pl) return;
+  if (pl.owner_user_id !== caller.userId && caller.permissions.playlists < 2) {
+    throw new ForbiddenError('Your role can only modify your own personal playlists.');
+  }
+}
 
 const UNSUPPORTED_SERVER_CHANNEL = () => ({ supported: false, mode: 'server' as const });
 
@@ -163,20 +312,28 @@ export function registerCoreRpcHandlers(
   registerChannel('shell:showItemInFolder', UNSUPPORTED_SERVER_CHANNEL);
 
   // --- Settings & Connection Testers ---
-  registerChannel('settings:get', () => getSettings());
+  registerChannel('settings:get', () => redactSettingsForCaller(getSettings(), getCallerContext()));
   registerChannel('settings:save', (partial: Partial<AppSettings>) => {
     const saved = saveSettings(partial);
     reconcileBackgroundWatchers(saved.appMode);
-    return saved;
+    return redactSettingsForCaller(saved, getCallerContext());
   });
   registerChannel('settings:testConnection', (target: any, overrideConfig?: Partial<AppSettings>) =>
     testIntegrationConnection(target, overrideConfig)
   );
 
   // --- Library Tracks & Videos (SQLite + FTS5) ---
-  registerChannel('tracks:search', (query = '', limit = 200000) => searchTracksFts(query, limit));
+  registerChannel('tracks:search', (query = '', limit = 200000) => {
+    const caller = getCallerContext();
+    if (!caller.isSuperAdmin && caller.permissions.libMusic < 1) return [];
+    return searchTracksFts(query, limit);
+  });
   registerChannel('tracks:rate', async (trackId: number, rating: number, isLoved?: boolean) => {
     const db = getDb();
+    const caller = getCallerContext();
+    if (!caller.isSuperAdmin && caller.permissions.libMusic < 1) {
+      throw new ForbiddenError('Music library access is disabled for your role.');
+    }
     const current = db.prepare('SELECT * FROM tracks WHERE id = ?').get(trackId) as TrackRow | undefined;
     if (!current) return null;
 
@@ -188,14 +345,24 @@ export function registerCoreRpcHandlers(
       newLoved,
       trackId
     );
+    if (caller.userId !== null && current.track_uid) {
+      db.prepare(`
+        INSERT INTO user_track_state (user_id, track_uid, loved, rating)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, track_uid) DO UPDATE SET loved = excluded.loved, rating = excluded.rating
+      `).run(caller.userId, current.track_uid, newLoved, newRating);
+    }
 
-    const settings = getSettings();
-    if (settings.listenbrainzToken && current.mbid_recording && (newLoved === 1 || isLoved !== undefined)) {
+    const lbToken =
+      caller.userId !== null
+        ? getUserPersonalSecrets(caller.userId).listenbrainzToken
+        : getSettings().listenbrainzToken;
+    if (lbToken && current.mbid_recording && (newLoved === 1 || isLoved !== undefined)) {
       try {
         await fetch('https://api.listenbrainz.org/1/feedback/recording-feedback', {
           method: 'POST',
           headers: {
-            Authorization: `Token ${settings.listenbrainzToken.trim()}`,
+            Authorization: `Token ${lbToken.trim()}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -218,9 +385,24 @@ export function registerCoreRpcHandlers(
 
   registerChannel('tracks:recordPlay', async (trackId: number) => {
     const db = getDb();
+    const caller = getCallerContext();
     db.prepare("UPDATE tracks SET play_count = play_count + 1, last_played = datetime('now') WHERE id = ?").run(
       trackId
     );
+    if (caller.userId !== null) {
+      const tRow = db.prepare('SELECT track_uid FROM tracks WHERE id = ?').get(trackId) as
+        | { track_uid?: string | null }
+        | undefined;
+      if (tRow?.track_uid) {
+        db.prepare(`
+          INSERT INTO user_track_state (user_id, track_uid, play_count, last_played_at)
+          VALUES (?, ?, 1, datetime('now'))
+          ON CONFLICT(user_id, track_uid) DO UPDATE SET
+            play_count = user_track_state.play_count + 1,
+            last_played_at = datetime('now')
+        `).run(caller.userId, tRow.track_uid);
+      }
+    }
     if (getSettings().autoCachePlayback) {
       queueTrackCache(trackId, true);
     }
@@ -241,9 +423,16 @@ export function registerCoreRpcHandlers(
     return fs.readFileSync(track.lrc_path, 'utf8');
   });
 
-  registerChannel('videos:search', (query = '', typeFilter?: 'movie' | 'tv') =>
-    searchVideosFts(query, typeFilter)
-  );
+  registerChannel('videos:search', (query = '', typeFilter?: 'movie' | 'tv') => {
+    const rows = searchVideosFts(query, typeFilter);
+    const caller = getCallerContext();
+    if (caller.isSuperAdmin) return rows;
+    return rows.filter((v) => {
+      if (v.type === 'movie') return caller.permissions.libMovies >= 1;
+      if (v.type === 'tv') return caller.permissions.libTvShows >= 1;
+      return caller.permissions.libMusicVideos >= 1;
+    });
+  });
   registerChannel('videos:markWatched', (videoId: number, watched: boolean) => {
     const db = getVideoDb();
     db.prepare('UPDATE videos SET watched = ? WHERE id = ?').run(watched ? 1 : 0, videoId);
@@ -322,7 +511,16 @@ export function registerCoreRpcHandlers(
   // --- Regular, Smart, eGenius, GenreMap & AI Playlists ---
   registerChannel('playlists:list', () => {
     const db = getDb();
-    const rows = db.prepare('SELECT * FROM playlists ORDER BY is_smart DESC, name ASC').all() as PlaylistRow[];
+    const caller = getCallerContext();
+    const rows = (
+      caller.isSuperAdmin || caller.userId === null
+        ? db.prepare('SELECT * FROM playlists ORDER BY is_smart DESC, name ASC').all()
+        : db
+            .prepare(
+              'SELECT * FROM playlists WHERE owner_user_id IS NULL OR owner_user_id = ? OR COALESCE(is_shared, 0) = 1 ORDER BY is_smart DESC, name ASC'
+            )
+            .all(caller.userId)
+    ) as PlaylistRow[];
     return rows.map((pl) => {
       const tCount = getPlaylistTracks(pl.id).length;
       const vCount = getPlaylistVideos(pl.id).length;
@@ -358,16 +556,20 @@ export function registerCoreRpcHandlers(
       limitValue?: number | null;
       selectionMethod?: string;
       keepCached?: boolean;
+      isShared?: boolean;
       aiPrompt?: string | null;
       aiMode?: 'standard' | 'smart' | null;
     }) => {
       const db = getDb();
+      const caller = getCallerContext();
       const rulesJson = payload.smartRules ? JSON.stringify(payload.smartRules) : null;
       const mediaType = payload.mediaType || 'music';
+      const isShared = (caller.isSuperAdmin || caller.permissions.playlists >= 2) && Boolean(payload.isShared) ? 1 : 0;
       if (payload.id) {
+        assertPlaylistWriteAccess(payload.id);
         db.prepare(`
           UPDATE playlists
-          SET name = ?, is_smart = ?, media_type = ?, smart_rules_json = ?, limit_type = ?, limit_value = ?, track_limit = ?, selection_method = ?, keep_cached = ?, cached_track_ids_json = NULL, last_regenerated_at = NULL
+          SET name = ?, is_smart = ?, media_type = ?, smart_rules_json = ?, limit_type = ?, limit_value = ?, track_limit = ?, selection_method = ?, keep_cached = ?, is_shared = COALESCE(?, is_shared), cached_track_ids_json = NULL, last_regenerated_at = NULL
           WHERE id = ?
         `).run(
           payload.name,
@@ -379,6 +581,7 @@ export function registerCoreRpcHandlers(
           payload.limitType === 'tracks' ? payload.limitValue ?? null : null,
           payload.selectionMethod || 'popularity_desc',
           payload.keepCached ? 1 : 0,
+          payload.isShared !== undefined ? isShared : null,
           payload.id
         );
         if (payload.keepCached) {
@@ -390,8 +593,8 @@ export function registerCoreRpcHandlers(
       }
       const res = db
         .prepare(`
-          INSERT INTO playlists (name, is_smart, media_type, smart_rules_json, limit_type, limit_value, track_limit, selection_method, keep_cached, ai_prompt, ai_mode)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO playlists (name, is_smart, media_type, smart_rules_json, limit_type, limit_value, track_limit, selection_method, keep_cached, owner_user, owner_user_id, is_shared, ai_prompt, ai_mode)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           payload.name,
@@ -403,6 +606,9 @@ export function registerCoreRpcHandlers(
           payload.limitType === 'tracks' ? payload.limitValue ?? null : null,
           payload.selectionMethod || 'popularity_desc',
           payload.keepCached ? 1 : 0,
+          caller.username,
+          caller.userId,
+          isShared,
           payload.aiPrompt ?? null,
           payload.aiMode ?? null
         );
@@ -536,10 +742,12 @@ export function registerCoreRpcHandlers(
       })
   );
   registerChannel('playlists:delete', (playlistId: number) => {
+    assertPlaylistWriteAccess(playlistId);
     getDb().prepare('DELETE FROM playlists WHERE id = ?').run(playlistId);
     return { ok: true };
   });
   registerChannel('playlists:reorderTracks', (playlistId: number, trackIds: number[]) => {
+    assertPlaylistWriteAccess(playlistId);
     const db = getDb();
     const del = db.prepare('DELETE FROM playlist_tracks WHERE playlist_id = ?');
     const ins = db.prepare(
@@ -555,6 +763,7 @@ export function registerCoreRpcHandlers(
     return { ok: true };
   });
   registerChannel('playlists:addTrack', (playlistId: number, trackId: number) => {
+    assertPlaylistWriteAccess(playlistId);
     const db = getDb();
     const existingCount = (
       db
@@ -572,6 +781,7 @@ export function registerCoreRpcHandlers(
     return { ok: true, duplicate: existingCount > 0, count: existingCount + 1 };
   });
   registerChannel('playlists:removeTrack', (playlistId: number, trackId: number) => {
+    assertPlaylistWriteAccess(playlistId);
     const db = getDb();
     const compactTx = db.transaction(() => {
       db.prepare(
@@ -610,6 +820,7 @@ export function registerCoreRpcHandlers(
       restoreSmartPlaylistExclusion(playlistId, trackId, scope)
   );
   registerChannel('playlists:addVideo', (playlistId: number, videoId: number) => {
+    assertPlaylistWriteAccess(playlistId);
     const coreDb = getCoreDb();
     const videoDb = getVideoDb();
     const pl = coreDb.prepare('SELECT * FROM playlists WHERE id = ?').get(playlistId) as
@@ -629,12 +840,14 @@ export function registerCoreRpcHandlers(
     return { ok: true };
   });
   registerChannel('playlists:removeVideo', (playlistId: number, videoId: number) => {
+    assertPlaylistWriteAccess(playlistId);
     getVideoDb()
       .prepare('DELETE FROM playlist_videos WHERE playlist_id = ? AND video_id = ?')
       .run(playlistId, videoId);
     return { ok: true };
   });
   registerChannel('playlists:addShow', (playlistId: number, showName: string) => {
+    assertPlaylistWriteAccess(playlistId);
     const coreDb = getCoreDb();
     const videoDb = getVideoDb();
     coreDb
@@ -747,13 +960,41 @@ export function registerCoreRpcHandlers(
   // --- Extended Media Sections & Resume Sync ---
   registerChannel(
     'videos:updateProgress',
-    (videoId: number, viewOffsetMs: number, watched: boolean) =>
-      updateVideoPlaybackProgress(videoId, viewOffsetMs, watched)
+    (videoId: number, viewOffsetMs: number, watched: boolean) => {
+      const caller = getCallerContext();
+      if (caller.userId !== null) {
+        getVideoDb()
+          .prepare(
+            `INSERT INTO user_video_progress (user_id, video_id, view_offset_ms, watched, updated_at)
+             VALUES (?, ?, ?, ?, datetime('now'))
+             ON CONFLICT(user_id, video_id) DO UPDATE SET
+               view_offset_ms = excluded.view_offset_ms,
+               watched = excluded.watched,
+               updated_at = datetime('now')`
+          )
+          .run(caller.userId, videoId, viewOffsetMs, watched ? 1 : 0);
+      }
+      return updateVideoPlaybackProgress(videoId, viewOffsetMs, watched);
+    }
   );
   registerChannel(
     'audiobooks:updateProgress',
-    (audiobookId: number, currentTimeSec: number, isFinished: boolean) =>
-      updateAudiobookPlaybackProgress(audiobookId, currentTimeSec, isFinished)
+    (audiobookId: number, currentTimeSec: number, isFinished: boolean) => {
+      const caller = getCallerContext();
+      if (caller.userId !== null) {
+        getVideoDb()
+          .prepare(
+            `INSERT INTO user_audiobook_progress (user_id, audiobook_id, current_time_sec, is_finished, updated_at)
+             VALUES (?, ?, ?, ?, datetime('now'))
+             ON CONFLICT(user_id, audiobook_id) DO UPDATE SET
+               current_time_sec = excluded.current_time_sec,
+               is_finished = excluded.is_finished,
+               updated_at = datetime('now')`
+          )
+          .run(caller.userId, audiobookId, currentTimeSec, isFinished ? 1 : 0);
+      }
+      return updateAudiobookPlaybackProgress(audiobookId, currentTimeSec, isFinished);
+    }
   );
   registerChannel('media:syncPlexAndAbs', () => syncPlexAndAudiobookshelfProgress());
   registerChannel('books:list', () =>
@@ -818,5 +1059,120 @@ export function registerCoreRpcHandlers(
     const storedHash = getStoredLocalPinHash();
     const ok = Boolean(storedHash && verifyLocalPin(String(pin || ''), storedHash));
     return ok ? { ok: true } : { ok: false, error: 'Invalid PIN.' };
+  });
+
+  // --- Multi-User Accounts, Scaled RBAC & Approval Queue ---
+  registerChannel('uac:getMe', () => {
+    const caller = getCallerContext();
+    const user = caller.userId !== null ? getUserById(caller.userId) : null;
+    const effective =
+      caller.userId !== null
+        ? computeEffectivePermissions(caller.userId)
+        : { permissions: caller.permissions, isSuperAdmin: caller.isSuperAdmin };
+    return {
+      user,
+      username: caller.username,
+      displayName: caller.displayName,
+      roles: caller.roles,
+      isGuest: caller.isGuest,
+      isSuperAdmin: effective.isSuperAdmin,
+      authSource: caller.authSource,
+      permissions: effective.permissions,
+    };
+  });
+
+  registerChannel(
+    'uac:updateMyProfile',
+    async (patch: {
+      displayName?: string;
+      email?: string;
+      phone?: string;
+      listenbrainzToken?: string;
+      listenbrainzUsername?: string;
+    }) => {
+      const caller = getCallerContext();
+      if (caller.userId === null) {
+        saveSettings({
+          ...(patch.listenbrainzToken !== undefined ? { listenbrainzToken: patch.listenbrainzToken } : {}),
+          ...(patch.listenbrainzUsername !== undefined ? { listenbrainzUsername: patch.listenbrainzUsername } : {}),
+        });
+        return { ok: true, user: null };
+      }
+      const user = await updateUser(caller.userId, patch);
+      return { ok: true, user };
+    }
+  );
+
+  registerChannel(
+    'uac:changeMyPassword',
+    (currentPassword: string, newPassword: string) => {
+      const caller = getCallerContext();
+      if (caller.userId === null) {
+        throw new ForbiddenError('Password change is only supported for local server accounts.');
+      }
+      return changeUserPassword(caller.userId, currentPassword, newPassword);
+    }
+  );
+
+  registerChannel('uac:listUsers', () => listUsers());
+  registerChannel('uac:createUser', (input: any) => createUser(input));
+  registerChannel('uac:updateUser', (userId: number, patch: any) => updateUser(userId, patch));
+  registerChannel('uac:deleteUser', (userId: number) => deleteUser(userId));
+  registerChannel('uac:generateResetCode', (userId: number) => generateResetCode(userId));
+  registerChannel('uac:listRoles', () => listRoles());
+  registerChannel('uac:createRole', (input: any) => createRole(input));
+  registerChannel('uac:updateRole', (roleId: number, patch: any) => updateRole(roleId, patch));
+  registerChannel('uac:deleteRole', (roleId: number) => deleteRole(roleId));
+  registerChannel('uac:setUserRoles', (userId: number, roleIds: number[]) =>
+    setUserRoles(userId, roleIds)
+  );
+  registerChannel('uac:setUserOverrides', (userId: number, overrides: Partial<RolePermissions> | null) =>
+    setUserOverrides(userId, overrides)
+  );
+
+  registerChannel('uac:listPendingApprovals', () => {
+    const caller = getCallerContext();
+    const storeDb = getStoreDb();
+    const canUploads = caller.isSuperAdmin || caller.permissions.approveUploads >= 1 || caller.permissions.manageUac >= 1;
+    const canStore = caller.isSuperAdmin || caller.permissions.approveStore >= 1 || caller.permissions.manageUac >= 1;
+    const uploads = canUploads
+      ? storeDb
+          .prepare("SELECT * FROM upload_history WHERE approval_status = 'pending' ORDER BY id DESC")
+          .all()
+      : [];
+    const storeRequests = canStore
+      ? storeDb
+          .prepare("SELECT * FROM store_requests WHERE approval_status = 'pending' ORDER BY id DESC")
+          .all()
+      : [];
+    return { uploads, storeRequests };
+  });
+
+  registerChannel('uac:approvePendingItem', (kind: 'upload' | 'store', id: number) => {
+    const caller = getCallerContext();
+    if (kind === 'upload') {
+      if (!caller.isSuperAdmin && caller.permissions.approveUploads < 1) {
+        throw new ForbiddenError('Permission denied: requires approveUploads permission.');
+      }
+      return approvePendingUpload(id, { userId: caller.userId, username: caller.username });
+    }
+    if (!caller.isSuperAdmin && caller.permissions.approveStore < 1) {
+      throw new ForbiddenError('Permission denied: requires approveStore permission.');
+    }
+    return approvePendingStoreRequest(id, { userId: caller.userId, username: caller.username });
+  });
+
+  registerChannel('uac:rejectPendingItem', (kind: 'upload' | 'store', id: number, reason?: string) => {
+    const caller = getCallerContext();
+    if (kind === 'upload') {
+      if (!caller.isSuperAdmin && caller.permissions.approveUploads < 1) {
+        throw new ForbiddenError('Permission denied: requires approveUploads permission.');
+      }
+      return rejectPendingUpload(id, { userId: caller.userId, username: caller.username }, reason);
+    }
+    if (!caller.isSuperAdmin && caller.permissions.approveStore < 1) {
+      throw new ForbiddenError('Permission denied: requires approveStore permission.');
+    }
+    return rejectPendingStoreRequest(id, { userId: caller.userId, username: caller.username }, reason);
   });
 }

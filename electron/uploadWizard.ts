@@ -1,8 +1,10 @@
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
+import { getAppDataPath } from './runtimeBus';
 import { getSettings } from './settings';
 import { computeTrackUid, getCoreDb, getStoreDb, getVideoDb } from './db';
+import { ForbiddenError, getCallerContext } from './auth/callerContext';
 import { logger } from './logger';
 
 export type UploadMediaType =
@@ -430,16 +432,31 @@ export async function buildUploadPreviewPlan(params: {
  * Step 4: Copies files to the formatted destination folder on the share,
  * indexes them into local SQLite immediately, and triggers the *arr API check-off command.
  */
-export async function executeUploadAndArrImport(params: {
+async function cleanupStagedSources(plan: UploadPreviewPlan): Promise<void> {
+  const stagingRoot = path.resolve(getAppDataPath(), 'staging');
+  const candidateDirs = new Set<string>();
+  for (const item of plan.items) {
+    const resolved = path.resolve(item.sourcePath);
+    if (!resolved.startsWith(`${stagingRoot}${path.sep}`)) continue;
+    candidateDirs.add(path.dirname(resolved));
+    await fsp.rm(resolved, { force: true }).catch(() => {});
+  }
+  for (const dir of candidateDirs) {
+    if (dir === stagingRoot) continue;
+    await fsp.rmdir(dir).catch(() => {});
+  }
+}
+
+async function commitUploadPlanToLibrary(params: {
   plan: UploadPreviewPlan;
   match: UploadMetadataMatch;
   season?: number;
   episodeStart?: number;
 }): Promise<{
-  ok: boolean;
   copiedCount: number;
   arrTriggered: boolean;
   arrMessage: string;
+  firstDestDir: string;
 }> {
   const { plan, match } = params;
   const settings = getSettings();
@@ -511,9 +528,9 @@ export async function executeUploadAndArrImport(params: {
       });
       coreDb.prepare(`
         INSERT INTO tracks (
-          track_uid, title, artist, album, album_artist, genre, track_num, disc_num, year, duration,
-          format, bitrate, sample_rate, remote_nfs_path, metadata_parsed
-        ) VALUES (?, ?, ?, ?, ?, '', ?, 1, ?, 0, ?, 0, 0, ?, 0)
+          track_uid, title, artist, album, genre, track_num, disc_num, year, duration,
+          format, bitrate, remote_nfs_path, metadata_loaded
+        ) VALUES (?, ?, ?, ?, '', ?, 1, ?, 0, ?, 0, ?, 0)
         ON CONFLICT(remote_nfs_path) DO UPDATE SET
           track_uid = COALESCE(tracks.track_uid, excluded.track_uid),
           title = excluded.title,
@@ -524,7 +541,6 @@ export async function executeUploadAndArrImport(params: {
         baseTitle,
         artistName,
         albumName,
-        artistName,
         i + 1,
         match.year || 0,
         ext,
@@ -658,25 +674,195 @@ export async function executeUploadAndArrImport(params: {
     logger.warn('ARR_STORE', '*arr scan command failed', { error: String(err) });
   }
 
+  return {
+    copiedCount,
+    arrTriggered,
+    arrMessage,
+    firstDestDir,
+  };
+}
+
+/**
+ * Step 4: Either queues upload into staging for Label approval (mediaUpload === 1)
+ * or copies files immediately to /media, indexes them, and triggers *arr scan (mediaUpload >= 2).
+ */
+export async function executeUploadAndArrImport(params: {
+  plan: UploadPreviewPlan;
+  match: UploadMetadataMatch;
+  season?: number;
+  episodeStart?: number;
+}): Promise<{
+  ok: boolean;
+  queuedForApproval?: boolean;
+  approvalId?: number;
+  copiedCount: number;
+  arrTriggered: boolean;
+  arrMessage: string;
+}> {
+  const caller = getCallerContext();
+  const uploadLevel = caller.isSuperAdmin ? 2 : caller.permissions.mediaUpload;
+  if (uploadLevel < 1) {
+    throw new ForbiddenError('Your role does not allow media uploads.');
+  }
+
+  const { plan, match } = params;
+  const firstDestDir =
+    plan.items.length > 0 ? path.dirname(plan.items[0].destinationPath) : plan.targetRootDir;
+
+  if (uploadLevel === 1) {
+    const info = getStoreDb()
+      .prepare(
+        `INSERT INTO upload_history (
+           media_type, title, destination_path, file_count, arr_triggered,
+           approval_status, requested_by_user_id, requested_by_username, staged_payload_json
+         ) VALUES (?, ?, ?, ?, 0, 'pending', ?, ?, ?)`
+      )
+      .run(
+        plan.mediaType,
+        match.title,
+        firstDestDir || plan.targetRootDir,
+        plan.items.length,
+        caller.userId,
+        caller.username,
+        JSON.stringify(params)
+      );
+    const approvalId = Number(info.lastInsertRowid);
+    logger.info(
+      'ARR_STORE',
+      `Staged Smart Upload #${approvalId} (${plan.mediaType}) by "${caller.username}" awaiting Label approval.`
+    );
+    return {
+      ok: true,
+      queuedForApproval: true,
+      approvalId,
+      copiedCount: 0,
+      arrTriggered: false,
+      arrMessage: 'Staged for Label approval before moving files into library.',
+    };
+  }
+
+  const committed = await commitUploadPlanToLibrary(params);
+  await cleanupStagedSources(plan);
+
   logger.info(
     'ARR_STORE',
-    `Completed Smart Upload (${plan.mediaType}): ${copiedCount} files copied, arrTriggered=${arrTriggered}`
+    `Completed Smart Upload (${plan.mediaType}): ${committed.copiedCount} files copied, arrTriggered=${committed.arrTriggered}`
   );
 
   try {
     getStoreDb()
       .prepare(
-        'INSERT INTO upload_history (media_type, title, destination_path, file_count, arr_triggered) VALUES (?, ?, ?, ?, ?)'
+        `INSERT INTO upload_history (
+           media_type, title, destination_path, file_count, arr_triggered,
+           approval_status, requested_by_user_id, requested_by_username
+         ) VALUES (?, ?, ?, ?, ?, 'approved', ?, ?)`
       )
-      .run(plan.mediaType, match.title, firstDestDir || plan.targetRootDir, copiedCount, arrTriggered ? 1 : 0);
+      .run(
+        plan.mediaType,
+        match.title,
+        committed.firstDestDir || plan.targetRootDir,
+        committed.copiedCount,
+        committed.arrTriggered ? 1 : 0,
+        caller.userId,
+        caller.username
+      );
   } catch {
     // ignore upload history error
   }
 
   return {
     ok: true,
-    copiedCount,
-    arrTriggered,
-    arrMessage,
+    queuedForApproval: false,
+    copiedCount: committed.copiedCount,
+    arrTriggered: committed.arrTriggered,
+    arrMessage: committed.arrMessage,
   };
+}
+
+export async function approvePendingUpload(
+  id: number,
+  reviewer: { userId: number | null; username: string }
+): Promise<{
+  ok: boolean;
+  copiedCount: number;
+  arrTriggered: boolean;
+  arrMessage: string;
+}> {
+  const db = getStoreDb();
+  const row = db.prepare('SELECT * FROM upload_history WHERE id = ?').get(id) as any;
+  if (!row) throw new Error(`Pending upload #${id} not found.`);
+  if (row.approval_status !== 'pending') {
+    throw new Error(`Upload #${id} is already "${row.approval_status}".`);
+  }
+  const staged = JSON.parse(row.staged_payload_json || '{}') as {
+    plan: UploadPreviewPlan;
+    match: UploadMetadataMatch;
+    season?: number;
+    episodeStart?: number;
+  };
+  if (!staged?.plan?.items) {
+    throw new Error(`Upload #${id} is missing staged upload payload.`);
+  }
+
+  const committed = await commitUploadPlanToLibrary(staged);
+  await cleanupStagedSources(staged.plan);
+
+  db.prepare(
+    `UPDATE upload_history SET
+       approval_status = 'approved',
+       destination_path = ?,
+       file_count = ?,
+       arr_triggered = ?,
+       reviewed_by_user_id = ?,
+       reviewed_at = datetime('now')
+     WHERE id = ?`
+  ).run(
+    committed.firstDestDir || row.destination_path,
+    committed.copiedCount,
+    committed.arrTriggered ? 1 : 0,
+    reviewer.userId,
+    id
+  );
+
+  logger.info('ARR_STORE', `Approved & imported staged upload #${id} by ${reviewer.username}`, {
+    copiedCount: committed.copiedCount,
+  });
+
+  return {
+    ok: true,
+    copiedCount: committed.copiedCount,
+    arrTriggered: committed.arrTriggered,
+    arrMessage: committed.arrMessage,
+  };
+}
+
+export async function rejectPendingUpload(
+  id: number,
+  reviewer: { userId: number | null; username: string },
+  reason?: string
+): Promise<{ ok: boolean }> {
+  const db = getStoreDb();
+  const row = db.prepare('SELECT * FROM upload_history WHERE id = ?').get(id) as any;
+  if (!row) throw new Error(`Pending upload #${id} not found.`);
+  if (row.approval_status !== 'pending') {
+    throw new Error(`Upload #${id} is already "${row.approval_status}".`);
+  }
+  try {
+    const staged = JSON.parse(row.staged_payload_json || '{}') as { plan?: UploadPreviewPlan };
+    if (staged?.plan) {
+      await cleanupStagedSources(staged.plan);
+    }
+  } catch {
+    // ignore invalid staged payload during rejection cleanup
+  }
+  db.prepare(
+    `UPDATE upload_history SET
+       approval_status = 'rejected',
+       reviewed_by_user_id = ?,
+       reviewed_at = datetime('now'),
+       rejection_reason = ?
+     WHERE id = ?`
+  ).run(reviewer.userId, reason || '', id);
+  logger.info('ARR_STORE', `Rejected staged upload #${id} by ${reviewer.username}`, { reason });
+  return { ok: true };
 }

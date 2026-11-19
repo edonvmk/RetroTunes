@@ -1,6 +1,7 @@
 import { getCoreDb, getStoreDb } from './db';
 import { getSettings } from './settings';
 import { getAuthState } from './authOidc';
+import { ForbiddenError, getCallerContext } from './auth/callerContext';
 import { logger } from './logger';
 
 export interface StoreCatalogItem {
@@ -577,231 +578,339 @@ export async function searchStoreCatalog(
   }
 }
 
-export async function requestStoreItem(item: StoreCatalogItem): Promise<{
-  ok: boolean;
-  message: string;
-}> {
-  const start = Date.now();
+async function dispatchStoreRequestExternal(
+  item: StoreCatalogItem
+): Promise<{ service: string; payloadJson: string; message: string }> {
   const settings = getSettings();
   const auth = getAuthState();
 
-  try {
-    if (settings.authMode === 'authentik' && settings.homelabGatewayUrl && auth.accessToken) {
-      const gwBase = settings.homelabGatewayUrl.replace(/\/+$/, '');
-      const res = await fetch(`${gwBase}/api/requests/${item.mediaType}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${auth.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(item),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Gateway returned HTTP ${res.status}: ${text}`);
-      }
-      const msg = `Requested "${item.title}" (${auth.user?.username || 'User'})`;
-      logger.info('ARR_STORE', msg, { item }, Date.now() - start);
-      return { ok: true, message: msg };
+  if (settings.authMode === 'authentik' && settings.homelabGatewayUrl && auth.accessToken) {
+    const gwBase = settings.homelabGatewayUrl.replace(/\/+$/, '');
+    const res = await fetch(`${gwBase}/api/requests/${item.mediaType}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${auth.accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(item),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Gateway returned HTTP ${res.status}: ${text}`);
+    }
+    return {
+      service: 'gateway',
+      payloadJson: JSON.stringify(item),
+      message: `Requested "${item.title}" (${auth.user?.username || 'User'})`,
+    };
+  }
+
+  if (item.mediaType === 'album') {
+    const base = settings.lidarrUrl.replace(/\/+$/, '');
+    const apiKey = settings.lidarrApiKey.trim();
+    if (!base || !apiKey) {
+      throw new Error('Configure your Music download service in Preferences -> API Keys to download albums.');
     }
 
-    if (item.mediaType === 'album') {
-      const base = settings.lidarrUrl.replace(/\/+$/, '');
-      const apiKey = settings.lidarrApiKey.trim();
-      if (!base || !apiKey) {
-        throw new Error('Configure your Music download service in Preferences -> API Keys to download albums.');
+    let rootFolder = settings.lidarrRootFolderPath;
+    if (!rootFolder) {
+      const rfRes = await fetch(`${base}/api/v1/rootfolder`, {
+        headers: { 'X-Api-Key': apiKey },
+      });
+      if (rfRes.ok) {
+        const rfs = (await rfRes.json()) as { path: string }[];
+        rootFolder = rfs[0]?.path || '/music';
       }
+    }
 
-      let rootFolder = settings.lidarrRootFolderPath;
-      if (!rootFolder) {
-        const rfRes = await fetch(`${base}/api/v1/rootfolder`, {
-          headers: { 'X-Api-Key': apiKey },
-        });
-        if (rfRes.ok) {
-          const rfs = (await rfRes.json()) as { path: string }[];
-          rootFolder = rfs[0]?.path || '/music';
-        }
+    const lookupTerm = item.foreignId
+      ? `lidarr:${item.foreignId}`
+      : `${item.subtitle} ${item.title}`;
+    const lookupRes = await fetch(
+      `${base}/api/v1/album/lookup?term=${encodeURIComponent(lookupTerm)}`,
+      { headers: { 'X-Api-Key': apiKey } }
+    );
+    const lookupItems = lookupRes.ok ? ((await lookupRes.json()) as Record<string, unknown>[]) : [];
+    const basePayload = lookupItems[0] || item.rawPayload;
+    if (!basePayload) {
+      throw new Error(`Could not find matching release metadata for "${item.title}" by ${item.subtitle}.`);
+    }
+
+    const artistPayload = (basePayload.artist as Record<string, unknown>) || {};
+    const postBody = {
+      ...basePayload,
+      monitored: true,
+      addOptions: { searchForNewAlbum: true },
+      artist: {
+        ...artistPayload,
+        qualityProfileId: settings.lidarrQualityProfileId || 1,
+        metadataProfileId: settings.lidarrMetadataProfileId || 1,
+        rootFolderPath: rootFolder,
+        monitored: true,
+      },
+    };
+
+    const postRes = await fetch(`${base}/api/v1/album`, {
+      method: 'POST',
+      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(postBody),
+    });
+
+    if (!postRes.ok) {
+      const errText = await postRes.text();
+      throw new Error(`Request returned HTTP ${postRes.status}: ${errText.slice(0, 180)}`);
+    }
+
+    return {
+      service: 'lidarr',
+      payloadJson: JSON.stringify(postBody),
+      message: `"${item.title}" by ${item.subtitle} has been added to your download queue.`,
+    };
+  }
+
+  if (item.mediaType === 'movie') {
+    const base = settings.radarrUrl.replace(/\/+$/, '');
+    const apiKey = settings.radarrApiKey.trim();
+    if (!base || !apiKey) {
+      throw new Error('Configure your Movie download service in Preferences -> API Keys to download movies.');
+    }
+
+    let rootFolder = settings.radarrRootFolderPath;
+    if (!rootFolder) {
+      const rfRes = await fetch(`${base}/api/v3/rootfolder`, {
+        headers: { 'X-Api-Key': apiKey },
+      });
+      if (rfRes.ok) {
+        const rfs = (await rfRes.json()) as { path: string }[];
+        rootFolder = rfs[0]?.path || '/movies';
       }
+    }
 
-      const lookupTerm = item.foreignId
-        ? `lidarr:${item.foreignId}`
-        : `${item.subtitle} ${item.title}`;
+    let basePayload = item.rawPayload;
+    if (!basePayload || !item.foreignId) {
       const lookupRes = await fetch(
-        `${base}/api/v1/album/lookup?term=${encodeURIComponent(lookupTerm)}`,
+        `${base}/api/v3/movie/lookup?term=${encodeURIComponent(`${item.title} ${item.year || ''}`)}`,
         { headers: { 'X-Api-Key': apiKey } }
       );
-      const lookupItems = lookupRes.ok ? ((await lookupRes.json()) as Record<string, unknown>[]) : [];
-      const basePayload = lookupItems[0] || item.rawPayload;
-      if (!basePayload) {
-        throw new Error(`Could not find matching release metadata for "${item.title}" by ${item.subtitle}.`);
-      }
-
-      const artistPayload = (basePayload.artist as Record<string, unknown>) || {};
-      const postBody = {
-        ...basePayload,
-        monitored: true,
-        addOptions: { searchForNewAlbum: true },
-        artist: {
-          ...artistPayload,
-          qualityProfileId: settings.lidarrQualityProfileId || 1,
-          metadataProfileId: settings.lidarrMetadataProfileId || 1,
-          rootFolderPath: rootFolder,
-          monitored: true,
-        },
-      };
-
-      const postRes = await fetch(`${base}/api/v1/album`, {
-        method: 'POST',
-        headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(postBody),
-      });
-
-      if (!postRes.ok) {
-        const errText = await postRes.text();
-        throw new Error(`Request returned HTTP ${postRes.status}: ${errText.slice(0, 180)}`);
-      }
-
-      const msg = `"${item.title}" by ${item.subtitle} has been added to your download queue.`;
-      getStoreDb()
-        .prepare(
-          'INSERT INTO store_requests (media_type, title, subtitle, foreign_id, service, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        )
-        .run(item.mediaType, item.title, item.subtitle, item.foreignId || '', 'lidarr', 'requested', JSON.stringify(postBody));
-      logger.info('ARR_STORE', msg, { title: item.title }, Date.now() - start);
-      return { ok: true, message: msg };
+      const list = lookupRes.ok ? ((await lookupRes.json()) as Record<string, unknown>[]) : [];
+      basePayload = list[0];
     }
 
-    if (item.mediaType === 'movie') {
-      const base = settings.radarrUrl.replace(/\/+$/, '');
-      const apiKey = settings.radarrApiKey.trim();
-      if (!base || !apiKey) {
-        throw new Error('Configure your Movie download service in Preferences -> API Keys to download movies.');
-      }
+    if (!basePayload) {
+      throw new Error(`Could not resolve movie "${item.title}" in catalog.`);
+    }
 
-      let rootFolder = settings.radarrRootFolderPath;
-      if (!rootFolder) {
-        const rfRes = await fetch(`${base}/api/v3/rootfolder`, {
-          headers: { 'X-Api-Key': apiKey },
-        });
-        if (rfRes.ok) {
-          const rfs = (await rfRes.json()) as { path: string }[];
-          rootFolder = rfs[0]?.path || '/movies';
-        }
-      }
+    const postBody = {
+      ...basePayload,
+      qualityProfileId: settings.radarrQualityProfileId || 1,
+      rootFolderPath: rootFolder,
+      monitored: true,
+      addOptions: { searchForMovie: true },
+    };
 
-      let basePayload = item.rawPayload;
-      if (!basePayload || !item.foreignId) {
-        const lookupRes = await fetch(
-          `${base}/api/v3/movie/lookup?term=${encodeURIComponent(`${item.title} ${item.year || ''}`)}`,
-          { headers: { 'X-Api-Key': apiKey } }
+    const postRes = await fetch(`${base}/api/v3/movie`, {
+      method: 'POST',
+      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(postBody),
+    });
+
+    if (!postRes.ok) {
+      const errText = await postRes.text();
+      throw new Error(`Request returned HTTP ${postRes.status}: ${errText.slice(0, 180)}`);
+    }
+
+    return {
+      service: 'radarr',
+      payloadJson: JSON.stringify(postBody),
+      message: `"${item.title}" has been added to your movie download queue.`,
+    };
+  }
+
+  if (item.mediaType === 'series') {
+    const base = settings.sonarrUrl.replace(/\/+$/, '');
+    const apiKey = settings.sonarrApiKey.trim();
+    if (!base || !apiKey) {
+      throw new Error('Configure your TV Series download service in Preferences -> API Keys to download shows.');
+    }
+
+    let rootFolder = settings.sonarrRootFolderPath;
+    if (!rootFolder) {
+      const rfRes = await fetch(`${base}/api/v3/rootfolder`, {
+        headers: { 'X-Api-Key': apiKey },
+      });
+      if (rfRes.ok) {
+        const rfs = (await rfRes.json()) as { path: string }[];
+        rootFolder = rfs[0]?.path || '/tv';
+      }
+    }
+
+    let basePayload = item.rawPayload;
+    if (!basePayload) {
+      const term = item.foreignId ? `tvdb:${item.foreignId}` : item.title;
+      const lookupRes = await fetch(
+        `${base}/api/v3/series/lookup?term=${encodeURIComponent(term)}`,
+        { headers: { 'X-Api-Key': apiKey } }
+      );
+      const list = lookupRes.ok ? ((await lookupRes.json()) as Record<string, unknown>[]) : [];
+      basePayload = list[0];
+    }
+
+    if (!basePayload) {
+      throw new Error(`Could not resolve series "${item.title}" in catalog.`);
+    }
+
+    const postBody = {
+      ...basePayload,
+      qualityProfileId: settings.sonarrQualityProfileId || 1,
+      languageProfileId: 1,
+      rootFolderPath: rootFolder,
+      monitored: true,
+      seasonFolder: true,
+      addOptions: { searchForMissingEpisodes: true },
+    };
+
+    const postRes = await fetch(`${base}/api/v3/series`, {
+      method: 'POST',
+      headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(postBody),
+    });
+
+    if (!postRes.ok) {
+      const errText = await postRes.text();
+      throw new Error(`Request returned HTTP ${postRes.status}: ${errText.slice(0, 180)}`);
+    }
+
+    return {
+      service: 'sonarr',
+      payloadJson: JSON.stringify(postBody),
+      message: `"${item.title}" has been added to your TV download queue.`,
+    };
+  }
+
+  throw new Error('Unsupported media type.');
+}
+
+export async function requestStoreItem(item: StoreCatalogItem): Promise<{
+  ok: boolean;
+  queuedForApproval?: boolean;
+  requestId?: number;
+  message: string;
+}> {
+  const start = Date.now();
+  const caller = getCallerContext();
+  const storeLevel = caller.isSuperAdmin ? 2 : caller.permissions.storeRequest;
+  if (storeLevel < 1) {
+    throw new ForbiddenError('Your role does not allow requesting media from the Store.');
+  }
+
+  try {
+    if (storeLevel === 1) {
+      const targetService =
+        item.mediaType === 'album' ? 'lidarr' : item.mediaType === 'movie' ? 'radarr' : 'sonarr';
+      const serialized = JSON.stringify(item);
+      const info = getStoreDb()
+        .prepare(
+          `INSERT INTO store_requests (
+             media_type, title, subtitle, foreign_id, service, status,
+             payload_json, approval_status, requested_by_user_id, requested_by_username, staged_payload_json
+           ) VALUES (?, ?, ?, ?, ?, 'pending', ?, 'pending', ?, ?, ?)`
+        )
+        .run(
+          item.mediaType,
+          item.title,
+          item.subtitle,
+          item.foreignId || '',
+          targetService,
+          serialized,
+          caller.userId,
+          caller.username,
+          serialized
         );
-        const list = lookupRes.ok ? ((await lookupRes.json()) as Record<string, unknown>[]) : [];
-        basePayload = list[0];
-      }
-
-      if (!basePayload) {
-        throw new Error(`Could not resolve movie "${item.title}" in catalog.`);
-      }
-
-      const postBody = {
-        ...basePayload,
-        qualityProfileId: settings.radarrQualityProfileId || 1,
-        rootFolderPath: rootFolder,
-        monitored: true,
-        addOptions: { searchForMovie: true },
-      };
-
-      const postRes = await fetch(`${base}/api/v3/movie`, {
-        method: 'POST',
-        headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(postBody),
-      });
-
-      if (!postRes.ok) {
-        const errText = await postRes.text();
-        throw new Error(`Request returned HTTP ${postRes.status}: ${errText.slice(0, 180)}`);
-      }
-
-      const msg = `"${item.title}" has been added to your movie download queue.`;
-      getStoreDb()
-        .prepare(
-          'INSERT INTO store_requests (media_type, title, subtitle, foreign_id, service, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        )
-        .run(item.mediaType, item.title, item.subtitle, item.foreignId || '', 'radarr', 'requested', JSON.stringify(postBody));
-      logger.info('ARR_STORE', msg, { title: item.title }, Date.now() - start);
-      return { ok: true, message: msg };
+      const requestId = Number(info.lastInsertRowid);
+      const msg = `"${item.title}" submitted for Label approval (Request #${requestId}).`;
+      logger.info('ARR_STORE', msg, { requester: caller.username }, Date.now() - start);
+      return { ok: true, queuedForApproval: true, requestId, message: msg };
     }
 
-    if (item.mediaType === 'series') {
-      const base = settings.sonarrUrl.replace(/\/+$/, '');
-      const apiKey = settings.sonarrApiKey.trim();
-      if (!base || !apiKey) {
-        throw new Error('Configure your TV Series download service in Preferences -> API Keys to download shows.');
-      }
-
-      let rootFolder = settings.sonarrRootFolderPath;
-      if (!rootFolder) {
-        const rfRes = await fetch(`${base}/api/v3/rootfolder`, {
-          headers: { 'X-Api-Key': apiKey },
-        });
-        if (rfRes.ok) {
-          const rfs = (await rfRes.json()) as { path: string }[];
-          rootFolder = rfs[0]?.path || '/tv';
-        }
-      }
-
-      let basePayload = item.rawPayload;
-      if (!basePayload) {
-        const term = item.foreignId ? `tvdb:${item.foreignId}` : item.title;
-        const lookupRes = await fetch(
-          `${base}/api/v3/series/lookup?term=${encodeURIComponent(term)}`,
-          { headers: { 'X-Api-Key': apiKey } }
-        );
-        const list = lookupRes.ok ? ((await lookupRes.json()) as Record<string, unknown>[]) : [];
-        basePayload = list[0];
-      }
-
-      if (!basePayload) {
-        throw new Error(`Could not resolve series "${item.title}" in catalog.`);
-      }
-
-      const postBody = {
-        ...basePayload,
-        qualityProfileId: settings.sonarrQualityProfileId || 1,
-        languageProfileId: 1,
-        rootFolderPath: rootFolder,
-        monitored: true,
-        seasonFolder: true,
-        addOptions: { searchForMissingEpisodes: true },
-      };
-
-      const postRes = await fetch(`${base}/api/v3/series`, {
-        method: 'POST',
-        headers: { 'X-Api-Key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(postBody),
-      });
-
-      if (!postRes.ok) {
-        const errText = await postRes.text();
-        throw new Error(`Request returned HTTP ${postRes.status}: ${errText.slice(0, 180)}`);
-      }
-
-      const msg = `"${item.title}" has been added to your TV download queue.`;
-      getStoreDb()
-        .prepare(
-          'INSERT INTO store_requests (media_type, title, subtitle, foreign_id, service, status, payload_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        )
-        .run(item.mediaType, item.title, item.subtitle, item.foreignId || '', 'sonarr', 'requested', JSON.stringify(postBody));
-      logger.info('ARR_STORE', msg, { title: item.title }, Date.now() - start);
-      return { ok: true, message: msg };
-    }
-
-    return { ok: false, message: 'Unsupported media type.' };
+    const dispatched = await dispatchStoreRequestExternal(item);
+    getStoreDb()
+      .prepare(
+        `INSERT INTO store_requests (
+           media_type, title, subtitle, foreign_id, service, status,
+           payload_json, approval_status, requested_by_user_id, requested_by_username
+         ) VALUES (?, ?, ?, ?, ?, 'requested', ?, 'approved', ?, ?)`
+      )
+      .run(
+        item.mediaType,
+        item.title,
+        item.subtitle,
+        item.foreignId || '',
+        dispatched.service,
+        dispatched.payloadJson,
+        caller.userId,
+        caller.username
+      );
+    logger.info('ARR_STORE', dispatched.message, { title: item.title }, Date.now() - start);
+    return { ok: true, queuedForApproval: false, message: dispatched.message };
   } catch (err) {
+    if (err instanceof ForbiddenError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     logger.error('ARR_STORE', `Store request failed for "${item.title}": ${msg}`, err);
     return { ok: false, message: msg };
   }
+}
+
+export async function approvePendingStoreRequest(
+  id: number,
+  reviewer: { userId: number | null; username: string }
+): Promise<{ ok: boolean; message: string }> {
+  const db = getStoreDb();
+  const row = db.prepare('SELECT * FROM store_requests WHERE id = ?').get(id) as any;
+  if (!row) throw new Error(`Pending store request #${id} not found.`);
+  if (row.approval_status !== 'pending') {
+    throw new Error(`Store request #${id} is already "${row.approval_status}".`);
+  }
+  const item = JSON.parse(row.staged_payload_json || row.payload_json || '{}') as StoreCatalogItem;
+  if (!item?.mediaType || !item?.title) {
+    throw new Error(`Store request #${id} is missing staged request item payload.`);
+  }
+  const dispatched = await dispatchStoreRequestExternal(item);
+  db.prepare(
+    `UPDATE store_requests SET
+       status = 'requested',
+       approval_status = 'approved',
+       service = ?,
+       payload_json = ?,
+       reviewed_by_user_id = ?,
+       reviewed_at = datetime('now')
+     WHERE id = ?`
+  ).run(dispatched.service, dispatched.payloadJson, reviewer.userId, id);
+  logger.info('ARR_STORE', `Approved store request #${id} by ${reviewer.username}`, { title: item.title });
+  return { ok: true, message: dispatched.message };
+}
+
+export function rejectPendingStoreRequest(
+  id: number,
+  reviewer: { userId: number | null; username: string },
+  reason?: string
+): { ok: boolean } {
+  const db = getStoreDb();
+  const row = db.prepare('SELECT * FROM store_requests WHERE id = ?').get(id) as any;
+  if (!row) throw new Error(`Pending store request #${id} not found.`);
+  if (row.approval_status !== 'pending') {
+    throw new Error(`Store request #${id} is already "${row.approval_status}".`);
+  }
+  db.prepare(
+    `UPDATE store_requests SET
+       status = 'rejected',
+       approval_status = 'rejected',
+       reviewed_by_user_id = ?,
+       reviewed_at = datetime('now'),
+       rejection_reason = ?
+     WHERE id = ?`
+  ).run(reviewer.userId, reason || '', id);
+  logger.info('ARR_STORE', `Rejected store request #${id} by ${reviewer.username}`, { reason });
+  return { ok: true };
 }
 
 export async function getArrLiveQueue(): Promise<ArrQueueItem[]> {

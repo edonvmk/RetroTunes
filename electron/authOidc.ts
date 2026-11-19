@@ -17,7 +17,7 @@ export interface SsoUserProfile {
 
 export interface AuthState {
   authenticated: boolean;
-  mode: 'standalone' | 'authentik' | 'proxy-headers' | 'local-pin';
+  mode: 'standalone' | 'local-accounts' | 'authentik' | 'proxy-headers' | 'local-pin';
   user: SsoUserProfile | null;
   accessToken: string | null;
   expiresAt: number | null;

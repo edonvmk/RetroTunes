@@ -8,7 +8,7 @@ import {
   FilePlus,
   RefreshCw,
 } from 'lucide-react';
-import { getRpcBaseUrl, invokeRpc } from '../bridge';
+import { getRpcBaseUrl, getStoredAuthToken, invokeRpc } from '../bridge';
 
 type UploadMediaType =
   | 'music'
@@ -65,6 +65,8 @@ export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
   const [executing, setExecuting] = useState(false);
   const [resultSummary, setResultSummary] = useState<{
     ok: boolean;
+    queuedForApproval?: boolean;
+    approvalId?: number;
     copiedCount: number;
     arrTriggered: boolean;
     arrMessage: string;
@@ -107,6 +109,10 @@ export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${getRpcBaseUrl()}/api/upload-files`);
+    const token = getStoredAuthToken();
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    }
     xhr.upload.onprogress = (evt) => {
       if (evt.lengthComputable && evt.total > 0) {
         setUploadPercent(Math.round((evt.loaded / evt.total) * 100));
@@ -487,15 +493,54 @@ export const UploadMediaWizardModal: React.FC<UploadMediaWizardModalProps> = ({
           )}
 
           {step === 4 && resultSummary && (
-            <div className="epod-capacity-card" style={{ background: '#f0fdf4', borderColor: '#86efac' }}>
-              <h3 style={{ margin: '0 0 8px 0', color: '#15803d', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <CheckCircle2 size={18} /> Upload & *arr Check-Off Complete!
+            <div
+              className="epod-capacity-card"
+              style={{
+                background: resultSummary.queuedForApproval ? '#fffbeb' : '#f0fdf4',
+                borderColor: resultSummary.queuedForApproval ? '#fcd34d' : '#86efac',
+              }}
+            >
+              <h3
+                style={{
+                  margin: '0 0 8px 0',
+                  color: resultSummary.queuedForApproval ? '#b45309' : '#15803d',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <CheckCircle2 size={18} />{' '}
+                {resultSummary.queuedForApproval
+                  ? 'Upload Queued for Label Approval'
+                  : 'Upload & *arr Check-Off Complete!'}
               </h3>
-              <p style={{ fontSize: 12, color: '#166534', margin: '0 0 6px 0' }}>
-                Successfully formatted and copied <strong>{resultSummary.copiedCount}</strong> file(s) to your media share and indexed them in rTunes SQLite.
+              <p
+                style={{
+                  fontSize: 12,
+                  color: resultSummary.queuedForApproval ? '#92400e' : '#166534',
+                  margin: '0 0 6px 0',
+                }}
+              >
+                {resultSummary.queuedForApproval ? (
+                  <>
+                    Your files remain safely staged (Request #{resultSummary.approvalId}) until a{' '}
+                    <strong>Label</strong> administrator approves moving them into the library.
+                  </>
+                ) : (
+                  <>
+                    Successfully formatted and copied <strong>{resultSummary.copiedCount}</strong>{' '}
+                    file(s) to your media share and indexed them in rTunes SQLite.
+                  </>
+                )}
               </p>
-              <p style={{ fontSize: 11.5, color: '#15803d', margin: 0 }}>
-                <strong>*arr Status:</strong> {resultSummary.arrMessage}
+              <p
+                style={{
+                  fontSize: 11.5,
+                  color: resultSummary.queuedForApproval ? '#b45309' : '#15803d',
+                  margin: 0,
+                }}
+              >
+                <strong>Status:</strong> {resultSummary.arrMessage}
               </p>
             </div>
           )}

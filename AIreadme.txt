@@ -26,28 +26,31 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
     - `SmartPlaylistModal.tsx` — Rule builder for dynamic Smart Playlists.
     - `StorefrontView.tsx` — **rTunes Store**, Multi-Source Top Charts, and live `*arr` Downloads Queue.
     - `GenreMapTab.tsx` — ECU-style 2D Subgenre Adjacency Matrix heatmap editor, cell trim/lock controls, and Live Artist Scene Tester (hosted inside **Prefs -> Genre Map**).
-    - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import.
+    - `UploadMediaWizardModal.tsx` — 4-step Smart Media Upload Wizard & `*arr` auto-import / approval staging.
+    - `OnboardingAuthModals.tsx` — First-run Server Setup (`Label` master account), Unified Login/PIN/Reset-Code modal, and Client First-Run Onboarding wizard.
     - `DiagnosticsModal.tsx` — Live `> Logs` viewer and JSON diagnostic export.
 - `electron/` (compiles to `dist-electron/`) — **Electron Main Process & Headless Server (TypeScript)**
-  - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, `--headless*` handoff, desktop GUI/USB IPC overrides, HTTP RPC fallback (`127.0.0.1:42815`), and `desktop-server` LAN HTTP server (`syncOptionalLanServer`).
+  - `electron/main.ts` — App lifecycle, `BrowserWindow`, native `Menu`, `--headless*` handoff, desktop GUI/USB IPC overrides (inside local-owner `CallerContext`), HTTP RPC fallback (`127.0.0.1:42815`), and `desktop-server` LAN HTTP server (`syncOptionalLanServer`).
   - `electron/preload.ts` — Context-isolated `rtunesElectron` bridge (`invoke`, `on`).
-  - `electron/rpcHandlers.ts` — Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`) used by both Electron `main.ts` and headless `server.ts` (with graceful `{ supported: false, mode: 'server' }` stubs for desktop hardware/dialogs).
-  - `electron/server.ts` — Headless `rTunes-Server` / `--headless-client` unified HTTP + SSE (`/events`) + JSON-RPC (`/rpc`) + auth discovery/unlock (`/api/auth/info`, `/api/auth/pin-login`) + auth-gate enforcement + multipart browser upload (`/api/upload-files`) + range media streaming (`/track`, `/video`, `/artwork`) + static `dist/` SPA server (`--no-web-ui` / `RTUNES_WEB_UI=false` opt-out, `PORT=3000`, `HOST=0.0.0.0` or `127.0.0.1` for headless client, `RTUNES_DATA_DIR=/config`, `RTUNES_MEDIA_DIR=/media`).
-  - `electron/db.ts` — Synchronous `better-sqlite3` + FTS5 initialization, migrations, and `recalculateArtistPopularityScores`.
-  - `electron/settings.ts` — 4-profile runtime mode resolution (`resolveAppMode`: `'client'`, `'headless-client'`, `'desktop-server'`, `'headless-server'` + Docker lock), salted `scryptSync` local PIN hashing, settings persistence in SQLite + OS Keychain / `safeStorage`.
+  - `electron/rpcHandlers.ts` — Shared Electron-free RPC handler registry (`registerCoreRpcHandlers`), `assertChannelPermission`, UAC/approval handlers (`uac:*`), and secret redaction.
+  - `electron/server.ts` — Headless `rTunes-Server` / `--headless-client` unified HTTP + SSE (`/events`) + JSON-RPC (`/rpc`) + multi-user auth/setup endpoints (`/api/auth/info`, `/api/auth/setup`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/reset-with-code`, `/api/auth/me`, `/api/auth/pin-login`) + RBAC enforcement (`401`/`403`) + multipart browser upload (`/api/upload-files`) + range media streaming (`/track`, `/video`, `/artwork`) + static `dist/` SPA server (`--no-web-ui` / `RTUNES_WEB_UI=false` opt-out, `PORT=3000`, `HOST=0.0.0.0` or `127.0.0.1`, `RTUNES_DATA_DIR=/config`, `RTUNES_MEDIA_DIR=/media`).
+  - `electron/db.ts` — Synchronous `better-sqlite3` + FTS5 5-domain DB initialization (`getCoreDb`, `getCacheDb`, `getVideoDb`, `getStoreDb`, `getUsersDb`), migrations, and `recalculateArtistPopularityScores`.
+  - `electron/settings.ts` — 4-profile runtime mode resolution (`resolveAppMode`), `redactSettingsForCaller`, salted `scryptSync` local PIN hashing, settings persistence in SQLite + OS Keychain / `safeStorage`.
   - `electron/logger.ts` — Ring-buffered, date/time-stamped structured logger + file rotation.
   - `electron/indexer.ts` — Phased background library scanner, on-demand/hybrid metadata hydration, ListenBrainz popularity, TVMaze/IMDb artwork, Plex/Audiobookshelf progress sync, and profile-aware `reconcileBackgroundWatchers` / `stopBackgroundWatchers`.
   - `electron/cacheTranscoder.ts` — Local SSD LRU pre-cache and FFmpeg/HandBrakeCLI 360p H.264/AAC transcoder + cover art sanitizer.
   - `electron/deviceSync.ts` — Unified MTP (`rtunes-mtp`) + UMS (`DeviceTransportProvider`) sync engine, USB poller, `.m3u8` exporter, `.scrobbler.log` delta sync, and safe eject.
   - `electron/shareManager.ts` — Direct NFS / SMB mount manager and remote `rTunes-Server` transport abstraction.
   - `electron/smartPlaylists.ts` — SQL/filter evaluator for Smart Playlists.
-  - `electron/storeArr.ts` — rTunes Store catalog, multi-source Top Charts (Deezer, Last.fm, TheAudioDB, Library Relative), and Lidarr/Radarr/Sonarr integration.
-  - `electron/uploadWizard.ts` — Metadata lookup, `*arr` naming preview, file transfer, and `*arr` scan trigger.
+  - `electron/storeArr.ts` — rTunes Store catalog, multi-source Top Charts, Lidarr/Radarr/Sonarr requests with `storeRequest` approval staging (`approvePendingStoreRequest` / `rejectPendingStoreRequest`).
+  - `electron/uploadWizard.ts` — Metadata lookup, `*arr` naming preview, staged approval queue (`approvePendingUpload` / `rejectPendingUpload`), file transfer, and `*arr` scan trigger.
   - `electron/authOidc.ts` — Underlying Authentik OIDC / OAuth2 PKCE flow and token management.
   - `electron/auth/authentik.ts` — Authentik SSO gateway boundary.
+  - `electron/auth/callerContext.ts` — Electron-free `AsyncLocalStorage<CallerContext>`, `RolePermissions` scale definitions, and `requirePermission` / `ForbiddenError` / `UnauthorizedError`.
+  - `electron/auth/rbac.ts` — Multi-user account CRUD, async `scrypt` password hashing, persistent `sessions` (`users.sqlite`), `Label`/`Band`/`Roadie` presets + custom roles ("Highest Access Wins"), reset codes, and `RTUNES_ADMIN_USER` bootstrap.
   - `electron/providers/standaloneLocal.ts` — Active default provider for local SQLite + direct NFS/SMB access.
   - `electron/providers/remoteServer.ts` — Remote `rTunes-Server` delta cache & playback sync provider (`syncDeltaFromRemoteServer`, `pushPlaybackToRemoteServer`).
-  - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>` and `--headless` / `--headless-server` / `--headless-client` flags).
+  - `electron/cli.ts` — Headless CLI entrypoint (`ELECTRON_RUN_AS_NODE=1` via `npm run cli -- <command>`, `--headless*` flags, and `reset-password <username> [--password <newpass>]`).
   - `electron/runtimeBus.ts` — Electron-free event bus & path/keychain runtime abstraction for shared backend modules.
   - `electron/transcoder/binaryManager.ts` — Scheduled startup auto-check (`runStartupTranscoderCheck`) & updater for managed `FFmpeg`, `FFprobe`, and `HandBrakeCLI` binaries, plus hardware encoder detection (including Linux VA-API).
   - `electron/mediaServer.ts` — Local HTTP range-streaming server for audio/video playback.
@@ -65,14 +68,15 @@ Do **not** duplicate existing handlers. Always reuse or extend the existing chan
 - **Playlists:** `playlists:list`, `playlists:getTracks`, `playlists:getVideos`, `playlists:create`, `playlists:update`, `playlists:delete`, `playlists:addTrack`, `playlists:removeTrack`, `playlists:addVideo`, `playlists:removeVideo`, `playlists:addShow`, `playlists:getExclusions`, `playlists:ignoreTrack`, `playlists:excludeTrackGlobally`, `playlists:restoreExclusion`, `egenius:createPlaylist`, `egenius:refreshPlaylist`, `egenius:convertToStandard`, `egenius:explainTrack`, `genreMatrix:get`, `genreMatrix:rebuild`, `genreMatrix:setCell`, `genreMatrix:resetCell`, `genreMatrix:testArtists`, `genreMatrix:getArtistSlice`
 - **Devices (MTP & UMS):** `devices:volumes`, `devices:list`, `devices:provision`, `devices:updateProfile`, `devices:delete`, `devices:migrateToMtp`, `devices:sync`, `devices:cancelSync`, `devices:syncProgress`, `devices:eject`, `devices:getCatalog`, `devices:removeItem`
 - **Shares & Upload:** `shares:list`, `shares:save`, `shares:delete`, `shares:mount`, `shares:unmount`, `shares:autoDetect`, `upload:searchMetadata`, `upload:previewPlan`, `upload:execute`
-- **Store & Auth:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `sync:delta`, `sync:playback`, `sync:remoteDelta`, `auth:getState`, `auth:login`, `auth:logout`, `auth:probeRemoteServer`, `auth:pinLogin`
+- **Store & Auth / UAC:** `store:home`, `store:search`, `store:request`, `store:charts`, `arr:queue`, `sync:delta`, `sync:playback`, `sync:remoteDelta`, `auth:getState`, `auth:login`, `auth:logout`, `auth:probeRemoteServer`, `auth:pinLogin`, `uac:getMe`, `uac:updateMyProfile`, `uac:changeMyPassword`, `uac:listUsers`, `uac:createUser`, `uac:updateUser`, `uac:deleteUser`, `uac:generateResetCode`, `uac:listRoles`, `uac:createRole`, `uac:updateRole`, `uac:deleteRole`, `uac:setUserRoles`, `uac:setUserOverrides`, `uac:listPendingApprovals`, `uac:approvePendingItem`, `uac:rejectPendingItem`
 
 ### SQLite Multi-DB Domain Split (`electron/db.ts`)
-Four domain-isolated WAL databases inside `RTUNES_DATA_DIR` (with automatic idempotent migration from legacy `rtunes.sqlite`):
-- **`core.sqlite` (`getCoreDb()` / `getDb()`):** `tracks` (with deterministic `track_uid` + `sync_rev`), `tracks_fts`, `playlists`, `playlist_tracks`, `smart_playlists` view, `smart_playlist_exclusions`, `artist_genre_weights`, `subgenre_affinity_matrix`, `settings`, `network_shares`, `devices`, `device_play_state`, `sync_tombstones`.
+Five domain-isolated WAL databases inside `RTUNES_DATA_DIR` (with automatic idempotent migration from legacy `rtunes.sqlite`):
+- **`core.sqlite` (`getCoreDb()` / `getDb()`):** `tracks` (with deterministic `track_uid` + `sync_rev`), `tracks_fts`, `playlists` (with `owner_user_id`, `is_shared`), `playlist_tracks`, `user_track_state`, `smart_playlists` view, `smart_playlist_exclusions`, `artist_genre_weights`, `subgenre_affinity_matrix`, `settings`, `network_shares`, `devices`, `device_play_state`, `sync_tombstones`.
 - **`affinity_cache.sqlite` (`getCacheDb()`):** `artist_affinity_cache`, `track_affinity_cache`, `external_metadata_cache`.
-- **`video.sqlite` (`getVideoDb()`):** `videos`, `videos_fts`, `playlist_videos`, `tv_episodes`, `books`, `audiobooks`, `photos`, `cache_jobs` (`transcode_jobs` view), `watch_progress`.
-- **`store.sqlite` (`getStoreDb()`):** `store_requests`, `arr_sync_cache`, `upload_history`.
+- **`video.sqlite` (`getVideoDb()`):** `videos`, `videos_fts`, `playlist_videos`, `tv_episodes`, `books`, `audiobooks`, `photos`, `cache_jobs` (`transcode_jobs` view), `watch_progress`, `user_video_progress`, `user_audiobook_progress`.
+- **`store.sqlite` (`getStoreDb()`):** `store_requests` (with approval staging columns), `arr_sync_cache`, `upload_history` (with approval staging columns).
+- **`users.sqlite` (`getUsersDb()`):** `users`, `roles`, `user_roles`, `user_permission_overrides`, `sessions`, `password_reset_tokens`.
 
 ---
 

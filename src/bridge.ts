@@ -1,4 +1,4 @@
-import type { RemoteAuthInfo } from './types';
+import type { RemoteAuthInfo, RolePermissions, UserRecord } from './types';
 
 declare global {
   interface Window {
@@ -126,6 +126,119 @@ export async function loginWithPin(
     resetSharedEventSource();
   }
   return json;
+}
+
+export async function setupServerMasterAccount(
+  payload: {
+    username: string;
+    displayName?: string;
+    email?: string;
+    password: string;
+    accessMode?: 'local-accounts' | 'guest-lan' | 'authentik';
+    allowGuestRoadie?: boolean;
+  },
+  serverUrl?: string
+): Promise<{
+  ok: boolean;
+  token?: string;
+  user?: UserRecord;
+  permissions?: RolePermissions;
+  error?: string;
+}> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/api/auth/setup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const json = (await res.json()) as {
+    ok: boolean;
+    token?: string;
+    user?: UserRecord;
+    permissions?: RolePermissions;
+    error?: string;
+  };
+  if (res.ok && json.ok && json.token) {
+    setStoredAuthToken(json.token);
+    resetSharedEventSource();
+  }
+  return json;
+}
+
+export async function loginWithPassword(
+  username: string,
+  password: string,
+  serverUrl?: string
+): Promise<{
+  ok: boolean;
+  token?: string;
+  user?: UserRecord;
+  permissions?: RolePermissions;
+  error?: string;
+}> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const json = (await res.json()) as {
+    ok: boolean;
+    token?: string;
+    user?: UserRecord;
+    permissions?: RolePermissions;
+    error?: string;
+  };
+  if (res.ok && json.ok && json.token) {
+    setStoredAuthToken(json.token);
+    resetSharedEventSource();
+  }
+  return json;
+}
+
+export async function resetPasswordWithCode(
+  payload: { username: string; code: string; newPassword: string },
+  serverUrl?: string
+): Promise<{ ok: boolean; error?: string }> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/api/auth/reset-with-code`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return (await res.json()) as { ok: boolean; error?: string };
+}
+
+export async function logoutServerSession(serverUrl?: string): Promise<void> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  try {
+    await fetch(`${base}/api/auth/logout`, {
+      method: 'POST',
+      headers: buildAuthHeaders(),
+    });
+  } catch {
+    // ignore network errors on logout
+  }
+  setStoredAuthToken(null);
+  resetSharedEventSource();
+}
+
+export async function fetchAuthMe(serverUrl?: string): Promise<{
+  ok: boolean;
+  user: UserRecord | null;
+  username: string;
+  displayName: string;
+  roles: string[];
+  isGuest: boolean;
+  isSuperAdmin: boolean;
+  permissions: RolePermissions;
+}> {
+  const base = (serverUrl || getConfiguredRemoteServerUrl() || getRpcBaseUrl()).trim().replace(/\/+$/, '');
+  const res = await fetch(`${base}/api/auth/me`, { headers: buildAuthHeaders() });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
 export interface SyncDeltaResponse {

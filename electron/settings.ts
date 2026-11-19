@@ -5,6 +5,8 @@ import { execFileSync } from 'child_process';
 import { getDb } from './db';
 import { logger } from './logger';
 import { platformDriver } from './platform';
+import type { CallerContext } from './auth/callerContext';
+import { getUserPersonalSecrets } from './auth/rbac';
 
 // Resolve bundled ffmpeg / ffprobe sidecar paths
 let bundledFfmpegPath = '';
@@ -25,7 +27,7 @@ try {
 
 export type AppProfile = 'client' | 'headless-client' | 'desktop-server' | 'headless-server';
 export type ClientSource = 'local' | 'remote';
-export type AuthMode = 'standalone' | 'authentik' | 'proxy-headers' | 'local-pin';
+export type AuthMode = 'standalone' | 'local-accounts' | 'authentik' | 'proxy-headers' | 'local-pin';
 export type TranscoderUpdateSchedule = 'off' | 'daily' | 'weekly';
 
 export interface ServerSidebarVisibility {
@@ -228,9 +230,11 @@ export interface AppSettings {
   serverSidebarVisibility: ServerSidebarVisibility;
   backgroundWatchers: boolean;
 
-  // Authentication (Authentik SSO / Proxy Headers / Local PIN)
+  // Authentication (Authentik SSO / Local Accounts / Proxy Headers / Local PIN)
   authGateEnabled: boolean;
   authMode: AuthMode;
+  allowGuestRoadie: boolean;
+  hasCompletedOnboarding: boolean;
   authentikIssuerUrl: string;
   authentikClientId: string;
   authentikRedirectUri: string;
@@ -367,6 +371,8 @@ export function getDefaultSettings(): AppSettings {
 
     authGateEnabled: false,
     authMode: 'standalone',
+    allowGuestRoadie: false,
+    hasCompletedOnboarding: false,
     authentikIssuerUrl: '',
     authentikClientId: 'retrotunes-desktop',
     authentikRedirectUri: 'http://127.0.0.1:42813/callback',
@@ -485,6 +491,22 @@ export function getSettings(forceReload = false): AppSettings {
     }
   }
 
+  if (stored.hasCompletedOnboarding === undefined) {
+    const hasConfiguredPaths = Boolean(
+      (typeof stored.musicRootPath === 'string' && stored.musicRootPath.trim()) ||
+        (typeof stored.nfsSharePath === 'string' && stored.nfsSharePath.trim()) ||
+        (typeof stored.dockerServerUrl === 'string' &&
+          stored.dockerServerUrl.trim() &&
+          stored.dockerServerUrl !== 'https://rtunes-server.local:8443')
+    );
+    let hasExistingTracks = false;
+    if (!hasConfiguredPaths) {
+      const row = db.prepare('SELECT 1 FROM tracks LIMIT 1').get();
+      hasExistingTracks = Boolean(row);
+    }
+    merged.hasCompletedOnboarding = hasConfiguredPaths || hasExistingTracks;
+  }
+
   const storedPinHash = typeof merged.localPinHash === 'string' ? merged.localPinHash : '';
   merged.hasLocalPin = storedPinHash.includes(':');
   merged.localPinHash = '';
@@ -506,6 +528,28 @@ export function getSettings(forceReload = false): AppSettings {
 
   cachedSettings = merged;
   return merged;
+}
+
+export function redactSettingsForCaller(
+  settings: AppSettings,
+  caller: CallerContext
+): AppSettings {
+  const clone: AppSettings = { ...settings, localPinHash: '', localPinPlaintext: '' };
+  if (!caller.isSuperAdmin && caller.permissions.manageApiKeys < 1) {
+    for (const key of SECRET_KEYS) {
+      if (key === 'listenbrainzToken') continue;
+      (clone as unknown as Record<string, unknown>)[key] = '';
+    }
+    clone.listenbrainzToken = '';
+    clone.listenbrainzUsername = '';
+  }
+
+  if (caller.userId !== null) {
+    const personal = getUserPersonalSecrets(caller.userId);
+    clone.listenbrainzToken = personal.listenbrainzToken;
+    clone.listenbrainzUsername = personal.listenbrainzUsername;
+  }
+  return clone;
 }
 
 export function getStoredLocalPinHash(): string {

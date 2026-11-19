@@ -51,6 +51,7 @@ import {
   LogEntry,
   PhotoRow,
   PlaylistRow,
+  RemoteAuthInfo,
   SyncProgress,
   TrackRow,
   VideoRow,
@@ -62,10 +63,9 @@ import {
   getConfiguredRemoteServerUrl,
   getMediaBaseUrl,
   invokeRpc,
-  loginWithPin,
   postPlaybackSync,
+  probeRemoteServerAuth,
   resetSharedEventSource,
-  setStoredAuthToken,
   subscribeEvent,
 } from './bridge';
 import { PreferencesModal } from './components/PreferencesModal';
@@ -77,6 +77,11 @@ import { DownloadsQueueView, StorefrontView } from './components/StorefrontView'
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { UploadMediaWizardModal } from './components/UploadMediaWizardModal';
 import { AiPlaylistModal } from './components/AiPlaylistModal';
+import {
+  ClientOnboardingModal,
+  ServerSetupModal,
+  UnifiedAuthModal,
+} from './components/OnboardingAuthModals';
 
 const EGeniusAtomIcon: React.FC<{ selected?: boolean; size?: number }> = ({
   selected = false,
@@ -338,9 +343,10 @@ export const App: React.FC = () => {
   const [showUploadWizard, setShowUploadWizard] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showPinUnlockModal, setShowPinUnlockModal] = useState(false);
-  const [pinUnlockInput, setPinUnlockInput] = useState('');
-  const [pinUnlockError, setPinUnlockError] = useState<string | null>(null);
-  const [pinUnlockBusy, setPinUnlockBusy] = useState(false);
+  const [showServerSetupModal, setShowServerSetupModal] = useState(false);
+  const [showClientOnboardingModal, setShowClientOnboardingModal] = useState(false);
+  const [activeAuthInfo, setActiveAuthInfo] = useState<RemoteAuthInfo | null>(null);
+  const [onboardingServerUrl, setOnboardingServerUrl] = useState<string | undefined>(undefined);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
   const hasRecordedPlayRef = useRef<number | null>(null);
 
@@ -364,6 +370,9 @@ export const App: React.FC = () => {
       ]);
       setMediaPort(port);
       setSettings(cfg);
+      if (window.rtunesElectron && cfg.hasCompletedOnboarding === false && cfg.appMode === 'client') {
+        setShowClientOnboardingModal(true);
+      }
       if (cfg.tableColumnsJson) {
         try {
           const parsedCols = JSON.parse(cfg.tableColumnsJson) as TableColumnConfig[];
@@ -412,7 +421,23 @@ export const App: React.FC = () => {
   }, [devices, nav, settings?.showOfflineDevices]);
 
   useEffect(() => {
-    void refreshAllData('');
+    if (!window.rtunesElectron) {
+      void probeRemoteServerAuth()
+        .then((info) => {
+          setActiveAuthInfo(info);
+          if (info.needsSetup) {
+            setShowServerSetupModal(true);
+            setInitialLoading(false);
+            return;
+          }
+          void refreshAllData('');
+        })
+        .catch(() => {
+          void refreshAllData('');
+        });
+    } else {
+      void refreshAllData('');
+    }
 
     let lastBatchRefreshAt = 0;
     let batchRefreshInFlight = false;
@@ -499,8 +524,18 @@ export const App: React.FC = () => {
 
     const handleAuthRequired = () => {
       if (!window.rtunesElectron) {
-        setPinUnlockError(null);
-        setShowPinUnlockModal(true);
+        void probeRemoteServerAuth()
+          .then((info) => {
+            setActiveAuthInfo(info);
+            if (info.needsSetup) {
+              setShowServerSetupModal(true);
+            } else {
+              setShowPinUnlockModal(true);
+            }
+          })
+          .catch(() => {
+            setShowPinUnlockModal(true);
+          });
       }
     };
     window.addEventListener('rtunes:auth-required', handleAuthRequired);
@@ -5928,74 +5963,75 @@ export const App: React.FC = () => {
         </div>
       )}
 
+      {showServerSetupModal && (
+        <ServerSetupModal
+          serverUrl={onboardingServerUrl}
+          onClose={onboardingServerUrl ? () => setShowServerSetupModal(false) : undefined}
+          onCompleted={() => {
+            setShowServerSetupModal(false);
+            setOnboardingServerUrl(undefined);
+            resetSharedEventSource();
+            void refreshAllData();
+          }}
+        />
+      )}
+
       {showPinUnlockModal && (
-        <div className="aqua-modal-backdrop" onClick={() => setShowPinUnlockModal(false)}>
-          <div
-            className="aqua-window"
-            style={{ width: 380, maxWidth: '92vw' }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="aqua-window-titlebar">
-              <span>Server Authentication Required</span>
-              <button className="aqua-btn" onClick={() => setShowPinUnlockModal(false)} style={{ padding: '1px 6px' }}>
-                <X size={13} />
-              </button>
-            </div>
-            <form
-              style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}
-              onSubmit={async (e) => {
-                e.preventDefault();
-                setPinUnlockBusy(true);
-                setPinUnlockError(null);
-                try {
-                  const res = await loginWithPin(pinUnlockInput);
-                  if (!res.ok) {
-                    setPinUnlockError(res.error || 'Invalid PIN.');
-                    return;
-                  }
-                  setPinUnlockInput('');
-                  setShowPinUnlockModal(false);
-                  resetSharedEventSource();
-                  await refreshAllData();
-                } catch (err) {
-                  setPinUnlockError(err instanceof Error ? err.message : String(err));
-                } finally {
-                  setPinUnlockBusy(false);
-                }
-              }}
-            >
-              <div style={{ fontSize: 12, color: '#334155' }}>
-                Enter the rTunes server access PIN to unlock API and media streaming access.
-              </div>
-              <input
-                type="password"
-                className="aqua-input"
-                autoFocus
-                placeholder="Enter PIN..."
-                value={pinUnlockInput}
-                onChange={(e) => setPinUnlockInput(e.target.value)}
-              />
-              {pinUnlockError && (
-                <div style={{ fontSize: 11.5, color: '#b91c1c', fontWeight: 600 }}>{pinUnlockError}</div>
-              )}
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                <button
-                  type="button"
-                  className="aqua-btn"
-                  onClick={() => {
-                    setStoredAuthToken(null);
-                    setShowPinUnlockModal(false);
-                  }}
-                >
-                  Cancel
-                </button>
-                <button type="submit" className="aqua-btn primary" disabled={pinUnlockBusy || !pinUnlockInput.trim()}>
-                  {pinUnlockBusy ? 'Unlocking...' : 'Unlock'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <UnifiedAuthModal
+          serverUrl={onboardingServerUrl}
+          authInfo={activeAuthInfo}
+          onClose={() => setShowPinUnlockModal(false)}
+          onUnlocked={() => {
+            setShowPinUnlockModal(false);
+            setOnboardingServerUrl(undefined);
+            resetSharedEventSource();
+            void refreshAllData();
+          }}
+        />
+      )}
+
+      {showClientOnboardingModal && (
+        <ClientOnboardingModal
+          onDismiss={async () => {
+            setShowClientOnboardingModal(false);
+            await invokeRpc('settings:save', { hasCompletedOnboarding: true }).catch(() => {});
+          }}
+          onSelectLocal={async () => {
+            const saved = await invokeRpc<AppSettings>('settings:save', {
+              appMode: 'client',
+              clientSource: 'local',
+              hasCompletedOnboarding: true,
+            });
+            setSettings(saved);
+            setShowClientOnboardingModal(false);
+            setShowPreferences(true);
+          }}
+          onSelectRemote={async (url, info) => {
+            const saved = await invokeRpc<AppSettings>('settings:save', {
+              appMode: 'client',
+              clientSource: 'remote',
+              dockerServerUrl: url,
+              hasCompletedOnboarding: true,
+              authMode: info.authMode || 'standalone',
+              authentikIssuerUrl: info.authentikIssuerUrl || settings?.authentikIssuerUrl || '',
+              authentikClientId: info.authentikClientId || settings?.authentikClientId || 'retrotunes-desktop',
+            });
+            setSettings(saved);
+            setActiveAuthInfo(info);
+            setOnboardingServerUrl(url);
+            setShowClientOnboardingModal(false);
+            if (info.needsSetup) {
+              setShowServerSetupModal(true);
+              return;
+            }
+            if (info.authGateEnabled && info.authMode !== 'standalone' && !info.allowGuestRoadie) {
+              setShowPinUnlockModal(true);
+              return;
+            }
+            await invokeRpc('sync:remoteDelta', url).catch(() => {});
+            await refreshAllData();
+          }}
+        />
       )}
 
       {/* =====================================================================

@@ -15,6 +15,11 @@ import { getCacheStats } from './cacheTranscoder';
 import { getArrLiveQueue } from './storeArr';
 import { standaloneLocalProvider } from './providers/standaloneLocal';
 import {
+  ensureRbacSeeded,
+  generateResetCodeForUsername,
+  resetUserPasswordDirect,
+} from './auth/rbac';
+import {
   computeGenreArtistSlice,
   generateMix,
   MixDepthMode,
@@ -493,9 +498,45 @@ async function main() {
       process.exitCode = await cmdPlaylistEgenius(flags, asJson);
       return;
     }
+    if (group === 'reset-password') {
+      const targetUser = (sub || (typeof flags.username === 'string' ? flags.username : '')).trim();
+      if (!targetUser) {
+        console.error('Usage: npm run cli -- reset-password <username> [--password <newpass>] [--json]');
+        process.exitCode = 1;
+        return;
+      }
+      initDatabase();
+      ensureRbacSeeded();
+      const directPass = typeof flags.password === 'string' ? flags.password : '';
+      if (directPass) {
+        if (directPass.length < 4) {
+          throw new Error('Password must be at least 4 characters.');
+        }
+        const user = await resetUserPasswordDirect(targetUser, directPass);
+        out(
+          { ok: true, mode: 'direct', username: user.username, message: `Password updated for "${user.username}".` },
+          asJson
+        );
+      } else {
+        const res = generateResetCodeForUsername(targetUser);
+        out(
+          {
+            ok: true,
+            mode: 'reset-code',
+            username: res.username,
+            code: res.code,
+            expiresAt: new Date(res.expiresAt).toISOString(),
+            message: `One-time reset code generated for "${res.username}": ${res.code} (valid 30 min)`,
+          },
+          asJson
+        );
+      }
+      process.exitCode = 0;
+      return;
+    }
 
     console.error(
-      'Usage: npm run cli -- <doctor | device list | device sync [--dry-run] [--uuid <id>] | db stats | db scan [--path <dir>] | store queue | playlist egenius --track-id <id> [--limit 25|50] [--mode hits|balanced|deep]> [--json]'
+      'Usage: npm run cli -- <doctor | device list | device sync [--dry-run] [--uuid <id>] | db stats | db scan [--path <dir>] | store queue | playlist egenius --track-id <id> [--limit 25|50] [--mode hits|balanced|deep] | reset-password <username> [--password <newpass>]> [--json]'
     );
     process.exitCode = 1;
   } catch (err) {

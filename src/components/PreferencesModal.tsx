@@ -1368,11 +1368,25 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                   onChange={(e) => updateField('authMode', e.target.value as AuthMode)}
                 >
                   <option value="standalone">Standalone / Open (No login gate)</option>
+                  <option value="local-accounts">Multi-User Local Accounts (Label / Band / Roadie + Roles)</option>
                   <option value="local-pin">Local Access PIN (Salted scrypt + Bearer Token)</option>
                   <option value="authentik">Authentik SSO + Homelab Gateway (OAuth2 PKCE JWT)</option>
                   <option value="proxy-headers">Reverse Proxy Trusted Header (Traefik / Nginx / Authentik ForwardAuth)</option>
                 </select>
               </div>
+
+              {isServerRole && (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.allowGuestRoadie)}
+                      onChange={(e) => updateField('allowGuestRoadie', e.target.checked)}
+                    />
+                    <span>Allow unauthenticated Guest LAN playback with Roadie (read-only) permissions</span>
+                  </label>
+                </div>
+              )}
 
               {form.authMode === 'local-pin' && (
                 <div style={{ marginBottom: 12, padding: 10, borderRadius: 6, background: '#f8fafc', border: '1px solid #cbd5e1' }}>

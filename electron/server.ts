@@ -14,7 +14,7 @@ import {
   PlaybackDeltaUpdate,
 } from './db';
 import { getAppDataPath, getAppPath, isPackaged, onRendererEvent } from './runtimeBus';
-import { registerCoreRpcHandlers, RpcHandlerFn } from './rpcHandlers';
+import { registerCoreRpcHandlers, assertChannelPermission, RpcHandlerFn } from './rpcHandlers';
 import { handleMediaHttpRequest } from './mediaServer';
 import {
   AppProfile,
@@ -26,6 +26,28 @@ import {
   saveSettings,
   verifyLocalPin,
 } from './settings';
+import {
+  CallerContext,
+  createGuestCallerContext,
+  createLocalOwnerCallerContext,
+  ForbiddenError,
+  runWithCallerContext,
+  UnauthorizedError,
+} from './auth/callerContext';
+import {
+  authenticateLocalUser,
+  bootstrapEnvAdminIfNeeded,
+  consumeResetCode,
+  createSession,
+  createUser,
+  ensureRbacSeeded,
+  getUserById,
+  getUserCount,
+  hashToken,
+  provisionExternalUser,
+  resolveSessionToken,
+  revokeSessionToken,
+} from './auth/rbac';
 import {
   hasPendingIndexCheckpoint,
   reconcileBackgroundWatchers,
@@ -59,6 +81,8 @@ export interface UnifiedHttpServerOptions {
 }
 
 const activePinTokens = new Map<string, number>();
+const authentikTokenCache = new Map<string, { caller: CallerContext; expiresAt: number }>();
+const oidcUserinfoEndpointCache = new Map<string, string>();
 
 function extractBearerToken(req: http.IncomingMessage, reqUrl: URL): string {
   const authHeader = String(req.headers.authorization || '').trim();
@@ -68,46 +92,133 @@ function extractBearerToken(req: http.IncomingMessage, reqUrl: URL): string {
   return (reqUrl.searchParams.get('token') || '').trim();
 }
 
-function isJwtNotExpired(token: string): boolean {
-  const parts = token.split('.');
-  if (parts.length !== 3) return true;
+async function resolveAuthentikCaller(
+  token: string,
+  settings: AppSettings
+): Promise<CallerContext | null> {
+  const cacheKey = hashToken(token);
+  const cached = authentikTokenCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.caller;
+  }
+  authentikTokenCache.delete(cacheKey);
+
+  const issuer = (settings.authentikIssuerUrl || '').trim().replace(/\/+$/, '');
+  if (!issuer) return null;
+
   try {
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as { exp?: number };
-    return !payload.exp || payload.exp * 1000 > Date.now();
+    let userinfoUrl = oidcUserinfoEndpointCache.get(issuer);
+    if (!userinfoUrl) {
+      const discUrl = issuer.endsWith('.well-known/openid-configuration')
+        ? issuer
+        : `${issuer}/.well-known/openid-configuration`;
+      const discRes = await fetch(discUrl, { signal: AbortSignal.timeout(4000) });
+      if (!discRes.ok) return null;
+      const doc = (await discRes.json()) as { userinfo_endpoint?: string };
+      if (!doc.userinfo_endpoint) return null;
+      userinfoUrl = doc.userinfo_endpoint;
+      oidcUserinfoEndpointCache.set(issuer, userinfoUrl);
+    }
+
+    const uiRes = await fetch(userinfoUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!uiRes.ok) return null;
+    const info = (await uiRes.json()) as Record<string, unknown>;
+    const groups = Array.isArray(info.groups) ? (info.groups as string[]) : [];
+    const isAdmin = groups.some((g) => String(g).toLowerCase().includes('admin'));
+    const username = String(info.preferred_username || info.email || info.sub || '').trim();
+    if (!username) return null;
+
+    const caller = provisionExternalUser({
+      username,
+      displayName: String(info.name || username),
+      email: String(info.email || ''),
+      authentikSub: info.sub ? String(info.sub) : null,
+      isAdmin,
+      authSource: 'authentik',
+    });
+    if (!caller) return null;
+
+    authentikTokenCache.set(cacheKey, {
+      caller,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    });
+    return caller;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function isRequestAuthorized(
+async function resolveRequestCaller(
   req: http.IncomingMessage,
   reqUrl: URL,
   settings: AppSettings,
   enforceGate: boolean
-): boolean {
-  if (!enforceGate || !settings.authGateEnabled || settings.authMode === 'standalone') {
-    return true;
+): Promise<CallerContext | null> {
+  if (!enforceGate) {
+    return createLocalOwnerCallerContext();
   }
+
+  const token = extractBearerToken(req, reqUrl);
+  if (token) {
+    const sessionCaller = resolveSessionToken(token);
+    if (sessionCaller) {
+      return sessionCaller;
+    }
+
+    if (settings.authMode === 'local-pin') {
+      const expiresAt = activePinTokens.get(token);
+      if (expiresAt && expiresAt > Date.now()) {
+        return {
+          ...createLocalOwnerCallerContext(),
+          authSource: 'local-pin',
+        };
+      }
+      activePinTokens.delete(token);
+    }
+
+    if (settings.authMode === 'authentik') {
+      const ssoCaller = await resolveAuthentikCaller(token, settings);
+      if (ssoCaller) {
+        return ssoCaller;
+      }
+    }
+  }
+
   if (settings.authMode === 'proxy-headers') {
     const headerKey = (settings.trustedProxyHeader || 'X-authentik-username').trim().toLowerCase();
     const headerVal = req.headers[headerKey];
-    if (Array.isArray(headerVal)) return headerVal.some((v) => v.trim().length > 0);
-    return typeof headerVal === 'string' && headerVal.trim().length > 0;
-  }
-  const token = extractBearerToken(req, reqUrl);
-  if (!token) return false;
-  if (settings.authMode === 'local-pin') {
-    const expiresAt = activePinTokens.get(token);
-    if (!expiresAt || expiresAt <= Date.now()) {
-      activePinTokens.delete(token);
-      return false;
+    const rawUser = Array.isArray(headerVal) ? headerVal[0] : headerVal;
+    const username = typeof rawUser === 'string' ? rawUser.trim() : '';
+    if (username) {
+      return provisionExternalUser({
+        username,
+        displayName: username,
+        isAdmin: getUserCount() === 0,
+        authSource: 'proxy-headers',
+      });
     }
-    return true;
   }
-  if (settings.authMode === 'authentik') {
-    return isJwtNotExpired(token);
+
+  if (settings.allowGuestRoadie && getUserCount() > 0) {
+    return createGuestCallerContext();
   }
-  return false;
+
+  if (!settings.authGateEnabled && (settings.authMode === 'standalone' || getUserCount() === 0)) {
+    return createLocalOwnerCallerContext();
+  }
+
+  if (settings.authGateEnabled && settings.authMode === 'standalone') {
+    return createLocalOwnerCallerContext();
+  }
+
+  if (settings.authGateEnabled && settings.allowGuestRoadie) {
+    return createGuestCallerContext();
+  }
+
+  return null;
 }
 
 function readJsonBody(req: http.IncomingMessage): Promise<string> {
@@ -230,9 +341,12 @@ export function startUnifiedHttpServer(
             ok: true,
             serverName: os.hostname(),
             version: '1.0.0',
+            serverVersion: '1.0.0',
             appMode: effectiveAppMode,
+            needsSetup: isServerRole && getUserCount() === 0,
             authGateEnabled: Boolean(settings.authGateEnabled),
             authMode: settings.authMode,
+            allowGuestRoadie: Boolean(settings.allowGuestRoadie),
             authentikIssuerUrl: settings.authMode === 'authentik' ? settings.authentikIssuerUrl : '',
             authentikClientId: settings.authMode === 'authentik' ? settings.authentikClientId : '',
             authentikRedirectUri: settings.authMode === 'authentik' ? settings.authentikRedirectUri : '',
@@ -240,6 +354,139 @@ export function startUnifiedHttpServer(
               settings.authMode === 'proxy-headers' ? settings.trustedProxyHeader : '',
           })
         );
+        return;
+      }
+
+      if (req.method === 'POST' && reqPath === '/api/auth/setup') {
+        if (!isServerRole) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'Setup is only available on server hosts.' }));
+          return;
+        }
+        if (getUserCount() > 0) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'Server master account has already been set up.' }));
+          return;
+        }
+        try {
+          const parsed = JSON.parse((await readJsonBody(req)) || '{}') as {
+            username?: string;
+            displayName?: string;
+            email?: string;
+            password?: string;
+            accessMode?: 'local-accounts' | 'guest-lan' | 'authentik';
+            allowGuestRoadie?: boolean;
+            authentikIssuerUrl?: string;
+            authentikClientId?: string;
+            authentikRedirectUri?: string;
+          };
+          const username = String(parsed.username || '').trim();
+          const password = String(parsed.password || '');
+          if (!username || password.length < 4) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Username and password (min 4 chars) are required.' }));
+            return;
+          }
+          const user = await createUser({
+            username,
+            displayName: parsed.displayName?.trim() || username,
+            email: parsed.email?.trim() || '',
+            password,
+            roleNames: ['Label'],
+          });
+          const chosenMode = parsed.accessMode === 'authentik' ? 'authentik' : 'local-accounts';
+          const guestEnabled =
+            parsed.accessMode === 'guest-lan' || Boolean(parsed.allowGuestRoadie);
+          saveSettings({
+            authGateEnabled: true,
+            authMode: chosenMode,
+            allowGuestRoadie: guestEnabled,
+            hasCompletedOnboarding: true,
+            ...(parsed.authentikIssuerUrl ? { authentikIssuerUrl: parsed.authentikIssuerUrl } : {}),
+            ...(parsed.authentikClientId ? { authentikClientId: parsed.authentikClientId } : {}),
+            ...(parsed.authentikRedirectUri ? { authentikRedirectUri: parsed.authentikRedirectUri } : {}),
+          });
+          const { token, expiresAt } = createSession(user.id, 'local');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              ok: true,
+              token,
+              expiresAt,
+              user,
+              permissions: user.effectivePermissions,
+            })
+          );
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        }
+        return;
+      }
+
+      if (req.method === 'POST' && reqPath === '/api/auth/login') {
+        try {
+          const parsed = JSON.parse((await readJsonBody(req)) || '{}') as {
+            username?: string;
+            password?: string;
+          };
+          const result = await authenticateLocalUser(
+            String(parsed.username || ''),
+            String(parsed.password || '')
+          );
+          if (!result) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Invalid credentials or suspended account.' }));
+            return;
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              ok: true,
+              token: result.token,
+              expiresAt: result.expiresAt,
+              user: result.user,
+              permissions: result.user.effectivePermissions,
+            })
+          );
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        }
+        return;
+      }
+
+      if (req.method === 'POST' && reqPath === '/api/auth/logout') {
+        const token = extractBearerToken(req, reqUrl);
+        if (token) {
+          revokeSessionToken(token);
+          activePinTokens.delete(token);
+          authentikTokenCache.delete(hashToken(token));
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (req.method === 'POST' && reqPath === '/api/auth/reset-with-code') {
+        try {
+          const parsed = JSON.parse((await readJsonBody(req)) || '{}') as {
+            username?: string;
+            code?: string;
+            newPassword?: string;
+          };
+          await consumeResetCode(
+            String(parsed.username || ''),
+            String(parsed.code || ''),
+            String(parsed.newPassword || '')
+          );
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err) {
+          const status = err instanceof UnauthorizedError ? 401 : 400;
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        }
         return;
       }
 
@@ -265,6 +512,7 @@ export function startUnifiedHttpServer(
       }
 
       const isProtectedEndpoint =
+        reqPath === '/api/auth/me' ||
         reqPath === '/rpc' ||
         reqPath === '/events' ||
         reqPath === '/api/upload-files' ||
@@ -274,118 +522,186 @@ export function startUnifiedHttpServer(
         reqPath === '/artwork' ||
         reqPath === '/api/v1/stream';
 
-      if (isProtectedEndpoint && !isRequestAuthorized(req, reqUrl, settings, enforceAuthGate)) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
+      let caller: CallerContext | null = null;
+      if (isProtectedEndpoint) {
+        caller = await resolveRequestCaller(req, reqUrl, settings, enforceAuthGate);
+        if (!caller) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              ok: false,
+              error: 'Unauthorized',
+              authMode: settings.authMode,
+              needsSetup: isServerRole && getUserCount() === 0,
+            })
+          );
+          return;
+        }
+      }
+
+      if (req.method === 'GET' && reqPath === '/api/auth/me' && caller) {
+        const user = caller.userId !== null ? getUserById(caller.userId) : null;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
-            ok: false,
-            error: 'Unauthorized',
-            authMode: settings.authMode,
+            ok: true,
+            user,
+            username: caller.username,
+            displayName: caller.displayName,
+            roles: caller.roles,
+            isGuest: caller.isGuest,
+            isSuperAdmin: caller.isSuperAdmin,
+            authSource: caller.authSource,
+            permissions: caller.permissions,
           })
         );
         return;
       }
 
-      if (req.method === 'GET' && reqPath === '/api/sync/delta') {
-        if (!isServerRole) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'Sync endpoints disabled in client mode.' }));
-          return;
-        }
-        const sinceRev = Number(reqUrl.searchParams.get('since_rev')) || 0;
-        const limit = Math.min(5000, Math.max(1, Number(reqUrl.searchParams.get('limit')) || 2000));
-        const payload = getDeltaSyncBatch(sinceRev, limit);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(payload));
-        return;
-      }
-
-      if (req.method === 'POST' && reqPath === '/api/sync/playback') {
-        if (!isServerRole) {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: 'Sync endpoints disabled in client mode.' }));
-          return;
-        }
-        try {
-          const body = await readJsonBody(req);
-          const parsed = JSON.parse(body || '{}') as { updates?: PlaybackDeltaUpdate[] };
-          const result = applyPlaybackDeltaSync(Array.isArray(parsed.updates) ? parsed.updates : []);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
-      }
-
-      if (req.method === 'GET' && reqPath === '/events') {
-        res.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          Connection: 'keep-alive',
-          'Access-Control-Allow-Origin': '*',
-        });
-        res.write(': connected\n\n');
-
-        const unsubscribe = onRendererEvent((channel, payload) => {
-          try {
-            res.write(`data: ${JSON.stringify({ channel, payload })}\n\n`);
-          } catch {
-            // ignore closed socket
-          }
-        });
-
-        const keepAlive = setInterval(() => {
-          try {
-            res.write(': ping\n\n');
-          } catch {
-            clearInterval(keepAlive);
-          }
-        }, 25000);
-
-        req.on('close', () => {
-          clearInterval(keepAlive);
-          unsubscribe();
-        });
-        return;
-      }
-
-      if (req.method === 'POST' && reqPath === '/api/upload-files') {
-        try {
-          await handleFileUploadRequest(req, res);
-        } catch (err) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
-        }
-        return;
-      }
-
-      if (req.method === 'POST' && reqPath === '/rpc') {
-        let body = '';
-        req.on('data', (chunk) => (body += chunk));
-        req.on('end', async () => {
-          try {
-            const { channel, args } = JSON.parse(body) as { channel: string; args?: unknown[] };
-            const fn = registry.get(channel);
-            if (!fn) {
+      if (caller) {
+        let handledAsyncStream = false;
+        await runWithCallerContext(caller, async () => {
+          if (req.method === 'GET' && reqPath === '/api/sync/delta') {
+            if (!isServerRole) {
               res.writeHead(404, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ ok: false, error: `Unknown RPC channel: ${channel}` }));
+              res.end(JSON.stringify({ ok: false, error: 'Sync endpoints disabled in client mode.' }));
               return;
             }
-            const data = await fn(...(args || []));
+            if (!caller.isSuperAdmin && caller.permissions.libMusic < 1) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Forbidden: Music library access disabled.' }));
+              return;
+            }
+            const sinceRev = Number(reqUrl.searchParams.get('since_rev')) || 0;
+            const limit = Math.min(5000, Math.max(1, Number(reqUrl.searchParams.get('limit')) || 2000));
+            const payload = getDeltaSyncBatch(sinceRev, limit);
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: true, data }));
-          } catch (err) {
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+            res.end(JSON.stringify(payload));
+            return;
+          }
+
+          if (req.method === 'POST' && reqPath === '/api/sync/playback') {
+            if (!isServerRole) {
+              res.writeHead(404, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Sync endpoints disabled in client mode.' }));
+              return;
+            }
+            if (!caller.isSuperAdmin && caller.permissions.libMusic < 1) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Forbidden: Music library access disabled.' }));
+              return;
+            }
+            try {
+              const body = await readJsonBody(req);
+              const parsed = JSON.parse(body || '{}') as { updates?: PlaybackDeltaUpdate[] };
+              const result = applyPlaybackDeltaSync(Array.isArray(parsed.updates) ? parsed.updates : []);
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(result));
+            } catch (err) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+            }
+            return;
+          }
+
+          if (req.method === 'GET' && reqPath === '/events') {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              Connection: 'keep-alive',
+              'Access-Control-Allow-Origin': '*',
+            });
+            res.write(': connected\n\n');
+
+            const unsubscribe = onRendererEvent((channel, payload) => {
+              try {
+                res.write(`data: ${JSON.stringify({ channel, payload })}\n\n`);
+              } catch {
+                // ignore closed socket
+              }
+            });
+
+            const keepAlive = setInterval(() => {
+              try {
+                res.write(': ping\n\n');
+              } catch {
+                clearInterval(keepAlive);
+              }
+            }, 25000);
+
+            req.on('close', () => {
+              clearInterval(keepAlive);
+              unsubscribe();
+            });
+            return;
+          }
+
+          if (req.method === 'POST' && reqPath === '/api/upload-files') {
+            if (!caller.isSuperAdmin && caller.permissions.mediaUpload < 1) {
+              res.writeHead(403, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Forbidden: Media uploads are disabled for your role.' }));
+              return;
+            }
+            try {
+              await handleFileUploadRequest(req, res);
+            } catch (err) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+            }
+            return;
+          }
+
+          if (req.method === 'POST' && reqPath === '/rpc') {
+            try {
+              const body = await readJsonBody(req);
+              const { channel, args } = JSON.parse(body || '{}') as { channel: string; args?: unknown[] };
+              assertChannelPermission(channel, caller);
+              const fn = registry.get(channel);
+              if (!fn) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, error: `Unknown RPC channel: ${channel}` }));
+                return;
+              }
+              const data = await fn(...(args || []));
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: true, data }));
+            } catch (err) {
+              const status =
+                err instanceof ForbiddenError
+                  ? 403
+                  : err instanceof UnauthorizedError
+                  ? 401
+                  : 500;
+              res.writeHead(status, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+            }
+            return;
+          }
+
+          if ((reqPath === '/track' || reqPath === '/api/v1/stream') && !caller.isSuperAdmin && caller.permissions.libMusic < 1) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Forbidden: Music streaming is disabled for your role.' }));
+            return;
+          }
+
+          if (
+            reqPath === '/video' &&
+            !caller.isSuperAdmin &&
+            Math.max(caller.permissions.libMovies, caller.permissions.libTvShows, caller.permissions.libMusicVideos) < 1
+          ) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Forbidden: Video streaming is disabled for your role.' }));
+            return;
+          }
+
+          if (mountMedia && handleMediaHttpRequest(req, res)) {
+            handledAsyncStream = true;
+            return;
           }
         });
-        return;
-      }
-
-      if (mountMedia && handleMediaHttpRequest(req, res)) {
-        return;
+        if (res.writableEnded || handledAsyncStream || reqPath === '/events') {
+          return;
+        }
       }
 
       if (serveStaticDist && req.method === 'GET' && serveStaticAsset(req.url || '/', distDir, res)) {
@@ -438,7 +754,16 @@ export async function bootHeadlessServer(): Promise<void> {
     process.env.RTUNES_MODE = 'headless-server';
   }
   initDatabase();
-  const initialSettings = getSettings();
+  ensureRbacSeeded();
+  const bootstrappedEnvAdmin = await bootstrapEnvAdminIfNeeded();
+  let initialSettings = getSettings();
+  if (bootstrappedEnvAdmin && !initialSettings.authGateEnabled && initialSettings.authMode === 'standalone') {
+    initialSettings = saveSettings({
+      authGateEnabled: true,
+      authMode: 'local-accounts',
+      hasCompletedOnboarding: true,
+    });
+  }
   const runtime = resolveAppMode(initialSettings.appMode);
   const isServerRole = isServerProfile(runtime.appMode);
 

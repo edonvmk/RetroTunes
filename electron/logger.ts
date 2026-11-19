@@ -152,8 +152,8 @@ class DiagnosticLogger {
       sanitized !== undefined ? ` | ${JSON.stringify(sanitized)}` : '';
     const formattedLine = `[${formattedTime}] [${level.padEnd(5)}] [${subsystem.padEnd(14)}] ${message}${durationStr}${detailStr}\n`;
 
-    // Console output
-    if (level === 'ERROR') {
+    // Console output (keep stdout pure JSON when CLI --json is requested)
+    if (level === 'ERROR' || process.argv.includes('--json')) {
       console.error(formattedLine.trim());
     } else if (level === 'WARN') {
       console.warn(formattedLine.trim());

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import { emitRendererEvent, getAppDataPath } from './runtimeBus';
+import { emitRendererEvent, getAppDataPath, openExternalUrl } from './runtimeBus';
 import { initDatabase, closeAllDatabases } from './db';
 import {
   getSettings,
@@ -174,12 +174,17 @@ function registerAllHandlers() {
   registerChannel('auth:logout', () => logoutAuthentik(true));
 }
 
-let activeLanServer: { server: import('http').Server; port: number } | null = null;
+let activeLanServer: {
+  server: import('http').Server;
+  port: number;
+  serveStaticDist: boolean;
+} | null = null;
 
-function syncOptionalLanServer(settings = getSettings()) {
+function syncOptionalLanServer(settings = getSettings(), options: { isInitialBoot?: boolean } = {}) {
   const shouldRun = settings.appMode === 'desktop-server';
   const desiredPort = Number(settings.lanServerPort) || 3000;
   const runtime = resolveAppMode(settings.appMode);
+  const serveStaticDist = runtime.webUiEnabled && settings.desktopServerWebUiEnabled !== false;
 
   if (!shouldRun) {
     if (activeLanServer) {
@@ -190,7 +195,11 @@ function syncOptionalLanServer(settings = getSettings()) {
     return;
   }
 
-  if (activeLanServer && activeLanServer.port === desiredPort) {
+  if (
+    activeLanServer &&
+    activeLanServer.port === desiredPort &&
+    activeLanServer.serveStaticDist === serveStaticDist
+  ) {
     return;
   }
   if (activeLanServer) {
@@ -202,13 +211,18 @@ function syncOptionalLanServer(settings = getSettings()) {
     port: desiredPort,
     host: runtime.cliHost || '0.0.0.0',
     registry: handlerRegistry,
-    serveStaticDist: runtime.webUiEnabled,
+    serveStaticDist,
     mountMedia: true,
     appMode: settings.appMode,
     enforceAuthGate: true,
   })
     .then((started) => {
-      activeLanServer = started;
+      activeLanServer = { ...started, serveStaticDist };
+      if (options.isInitialBoot && serveStaticDist && settings.desktopServerAutoOpenWebUi) {
+        const browserUrl = `http://127.0.0.1:${started.port}`;
+        logger.info('SYSTEM', `Auto-launching Desktop Server Web UI in browser: ${browserUrl}`);
+        openExternalUrl(browserUrl);
+      }
     })
     .catch((err) => {
       logger.warn('SYSTEM', `Failed to start LAN server on port ${desiredPort}`, { error: String(err) });
@@ -223,7 +237,7 @@ function startHttpFallbackAndOptionalLanServer() {
     mountMedia: true,
   }).catch(() => {});
 
-  syncOptionalLanServer(getSettings());
+  syncOptionalLanServer(getSettings(), { isInitialBoot: true });
 }
 
 function sendUiEvent(channel: string) {

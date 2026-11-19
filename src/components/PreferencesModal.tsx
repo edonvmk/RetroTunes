@@ -773,7 +773,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                       gap: 12,
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                       <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
                         <input
                           type="checkbox"
@@ -795,6 +795,72 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                         />
                       </div>
                     </div>
+
+                    {effectiveAppMode === 'desktop-server' && (
+                      <div
+                        style={{
+                          padding: '8px 10px',
+                          borderRadius: 6,
+                          background: '#f8fafc',
+                          border: '1px solid #cbd5e1',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          gap: 12,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={form.desktopServerWebUiEnabled !== false}
+                              onChange={(e) => updateField('desktopServerWebUiEnabled', e.target.checked)}
+                            />
+                            <span>Enable Desktop Server Web UI on port {form.lanServerPort ?? 3000}</span>
+                          </label>
+                          <label
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 8,
+                              fontSize: 11,
+                              fontWeight: 600,
+                              color: form.desktopServerWebUiEnabled === false ? '#94a3b8' : '#334155',
+                              cursor: form.desktopServerWebUiEnabled === false ? 'not-allowed' : 'pointer',
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              disabled={form.desktopServerWebUiEnabled === false}
+                              checked={Boolean(form.desktopServerAutoOpenWebUi)}
+                              onChange={(e) => updateField('desktopServerAutoOpenWebUi', e.target.checked)}
+                            />
+                            <span>Auto-launch Web UI in default browser when Desktop Server starts</span>
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          className="aqua-btn primary"
+                          disabled={form.desktopServerWebUiEnabled === false}
+                          onClick={async () => {
+                            try {
+                              await invokeRpc('settings:save', form);
+                              const res = await invokeRpc<{ ok: boolean; url: string }>('system:openWebUi');
+                              setStatusBanner(
+                                res.ok
+                                  ? `Launched Web UI at ${res.url}`
+                                  : `Web UI active at ${res.url} (open in your browser)`
+                              );
+                            } catch (err) {
+                              setStatusBanner(err instanceof Error ? err.message : String(err));
+                            }
+                          }}
+                        >
+                          Launch Web UI Now
+                        </button>
+                      </div>
+                    )}
 
                     <div>
                       <strong style={{ display: 'block', fontSize: 11.5, marginBottom: 6 }}>

@@ -1,6 +1,6 @@
 import fs from 'fs';
 import os from 'os';
-import { emitRendererEvent } from './runtimeBus';
+import { emitRendererEvent, openExternalUrl } from './runtimeBus';
 import {
   getDb,
   getCoreDb,
@@ -291,10 +291,25 @@ export function registerCoreRpcHandlers(
   registerChannel('system:runtimeInfo', () => {
     const settings = getSettings();
     const runtime = resolveAppMode(settings.appMode);
+    const webUiEnabled =
+      runtime.appMode === 'desktop-server'
+        ? runtime.webUiEnabled && settings.desktopServerWebUiEnabled !== false
+        : runtime.webUiEnabled;
     return {
       ...runtime,
+      webUiEnabled,
       serverName: os.hostname(),
     };
+  });
+  registerChannel('system:openWebUi', (customUrl?: string) => {
+    const settings = getSettings();
+    const port = Number(settings.lanServerPort) || 3000;
+    const targetUrl =
+      typeof customUrl === 'string' && (customUrl.startsWith('http://') || customUrl.startsWith('https://'))
+        ? customUrl
+        : `http://127.0.0.1:${port}`;
+    const opened = openExternalUrl(targetUrl);
+    return { ok: opened, url: targetUrl };
   });
   registerChannel('media:port', () => getPort());
   registerChannel(

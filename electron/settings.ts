@@ -52,6 +52,7 @@ export interface ResolvedRuntimeMode {
   isHeadless: boolean;
   isServerRole: boolean;
   webUiEnabled: boolean;
+  autoOpenBrowserOnHeadless: boolean;
   cliHost?: string;
   cliPort?: number;
 }
@@ -93,6 +94,11 @@ export function resolveAppMode(
     argv.includes('--no-web-ui') ||
     process.env.RTUNES_WEB_UI === 'false' ||
     process.env.RTUNES_WEB_UI === '0';
+  const noOpenBrowser =
+    argv.includes('--no-open-browser') ||
+    argv.includes('--no-browser') ||
+    process.env.RTUNES_OPEN_BROWSER === 'false' ||
+    process.env.RTUNES_OPEN_BROWSER === '0';
   const cliHost = readCliFlagValue(argv, '--host') || process.env.RTUNES_HOST || process.env.HOST;
   const rawPort = readCliFlagValue(argv, '--port') || process.env.RTUNES_PORT || process.env.PORT;
   const parsedPort = rawPort ? Number(rawPort) : undefined;
@@ -107,6 +113,7 @@ export function resolveAppMode(
       isHeadless: true,
       isServerRole: true,
       webUiEnabled: !webUiDisabled,
+      autoOpenBrowserOnHeadless: false,
       cliHost,
       cliPort,
     };
@@ -126,6 +133,7 @@ export function resolveAppMode(
       isHeadless: true,
       isServerRole: true,
       webUiEnabled: !webUiDisabled,
+      autoOpenBrowserOnHeadless: !webUiDisabled && !noOpenBrowser,
       cliHost,
       cliPort,
     };
@@ -142,6 +150,7 @@ export function resolveAppMode(
       isHeadless: true,
       isServerRole: false,
       webUiEnabled: !webUiDisabled,
+      autoOpenBrowserOnHeadless: !webUiDisabled && !noOpenBrowser,
       cliHost,
       cliPort,
     };
@@ -155,7 +164,8 @@ export function resolveAppMode(
     isDocker: false,
     isHeadless: false,
     isServerRole: appMode === 'desktop-server',
-    webUiEnabled: !webUiDisabled,
+    webUiEnabled: appMode === 'desktop-server' && !webUiDisabled,
+    autoOpenBrowserOnHeadless: false,
     cliHost,
     cliPort,
   };
@@ -228,6 +238,8 @@ export interface AppSettings {
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
   lanServerPort?: number;
+  desktopServerWebUiEnabled?: boolean;
+  desktopServerAutoOpenWebUi?: boolean;
   serverSidebarVisibility: ServerSidebarVisibility;
   backgroundWatchers: boolean;
 
@@ -398,6 +410,8 @@ export function getDefaultSettings(): AppSettings {
     genreMapUseLastfm: false,
     genreMapLastfmWeight: 20,
     lanServerPort: 3000,
+    desktopServerWebUiEnabled: true,
+    desktopServerAutoOpenWebUi: false,
     serverSidebarVisibility: getDefaultServerSidebarVisibility(runtime.appMode),
     backgroundWatchers: true,
 

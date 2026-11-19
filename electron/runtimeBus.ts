@@ -1,3 +1,4 @@
+import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -123,10 +124,27 @@ export function getSafeStorage(): {
 }
 
 export function openExternalUrl(url: string): boolean {
+  const cleanUrl = (url || '').trim();
+  if (!cleanUrl || (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://'))) {
+    return false;
+  }
   const electron = getElectronModule();
   if (electron?.shell?.openExternal) {
-    void electron.shell.openExternal(url);
+    void electron.shell.openExternal(cleanUrl);
     return true;
   }
-  return false;
+  try {
+    if (process.platform === 'win32') {
+      execFile('cmd.exe', ['/c', 'start', '', cleanUrl], { windowsHide: true }, () => {});
+      return true;
+    }
+    if (process.platform === 'darwin') {
+      execFile('open', [cleanUrl], () => {});
+      return true;
+    }
+    execFile('xdg-open', [cleanUrl], () => {});
+    return true;
+  } catch {
+    return false;
+  }
 }

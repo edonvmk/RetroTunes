@@ -13,7 +13,13 @@ import {
   applyPlaybackDeltaSync,
   PlaybackDeltaUpdate,
 } from './db';
-import { getAppDataPath, getAppPath, isPackaged, onRendererEvent } from './runtimeBus';
+import {
+  getAppDataPath,
+  getAppPath,
+  isPackaged,
+  onRendererEvent,
+  openExternalUrl,
+} from './runtimeBus';
 import { registerCoreRpcHandlers, assertChannelPermission, RpcHandlerFn } from './rpcHandlers';
 import { handleMediaHttpRequest } from './mediaServer';
 import {
@@ -807,6 +813,13 @@ export async function bootHeadlessServer(): Promise<void> {
     enforceAuthGate: isServerRole,
   });
   activePort = started.port;
+
+  if (runtime.webUiEnabled && runtime.autoOpenBrowserOnHeadless) {
+    const browserHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
+    const browserUrl = `http://${browserHost}:${started.port}`;
+    logger.info('SYSTEM', `Auto-launching ${runtime.appMode} Web UI in browser: ${browserUrl}`);
+    openExternalUrl(browserUrl);
+  }
 
   reconcileBackgroundWatchers(runtime.appMode);
   setTimeout(() => {

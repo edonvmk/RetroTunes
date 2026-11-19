@@ -62,7 +62,7 @@ RetroTunes (`rTunes` — Client Code: `ePod Suite`) is an Electron + React + Typ
 
 ### Registered IPC Channels (`electron/main.ts`)
 Do **not** duplicate existing handlers. Always reuse or extend the existing channels:
-- **System & Logs:** `system:isDev`, `system:runtimeInfo`, `system:credentialStoreLabel`, `media:port`, `logs:get`, `logs:clear`, `logs:testEvent`
+- **System & Logs:** `system:isDev`, `system:runtimeInfo`, `system:openWebUi`, `system:credentialStoreLabel`, `media:port`, `logs:get`, `logs:clear`, `logs:testEvent`
 - **OS Dialogs & Settings:** `dialog:selectDirectory`, `dialog:selectFile`, `dialog:selectFiles`, `settings:get`, `settings:save`, `settings:testConnection`
 - **Tracks & Videos:** `tracks:search`, `tracks:rate`, `tracks:recordPlay`, `tracks:nowPlaying`, `tracks:hydrate`, `tracks:hydrateAlbum`, `tracks:getLyrics`, `videos:search`, `videos:markWatched`, `videos:hydrateArtwork`, `videos:updateProgress`, `audiobooks:updateProgress`
 - **Extended Media & Sync:** `books:list`, `audiobooks:list`, `photos:list`, `musicVideos:list`, `media:syncPlexAndAbs`

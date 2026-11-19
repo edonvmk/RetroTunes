@@ -563,6 +563,7 @@ export interface RuntimeModeInfo {
   isHeadless: boolean;
   isServerRole: boolean;
   webUiEnabled: boolean;
+  autoOpenBrowserOnHeadless?: boolean;
 }
 
 export interface RemoteAuthInfo {
@@ -613,6 +614,8 @@ export interface AppSettings {
   genreMapUseLastfm?: boolean;
   genreMapLastfmWeight?: number;
   lanServerPort?: number;
+  desktopServerWebUiEnabled?: boolean;
+  desktopServerAutoOpenWebUi?: boolean;
   serverSidebarVisibility: ServerSidebarVisibility;
   backgroundWatchers: boolean;
 

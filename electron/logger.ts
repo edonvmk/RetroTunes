@@ -61,7 +61,6 @@ class DiagnosticLogger {
       process.platform === 'darwin' && !process.env.RTUNES_DATA_DIR
         ? path.join(os.homedir(), 'Library', 'Logs', 'RetroTunes')
         : path.join(getAppDataPath(), 'logs');
-    const workspaceLogDir = path.join(process.cwd(), 'logs');
 
     try {
       fs.mkdirSync(homeLogDir, { recursive: true });
@@ -69,22 +68,13 @@ class DiagnosticLogger {
       // Fallback if outside sandbox or restricted
     }
 
-    try {
-      fs.mkdirSync(workspaceLogDir, { recursive: true });
-    } catch {
-      // Ignore
-    }
-
     this.logFilePath = path.join(homeLogDir, 'rtunes.log');
-    this.workspaceLogPath = path.join(workspaceLogDir, 'rtunes.log');
-    this.sessionLogPath = path.join(workspaceLogDir, `rtunes_${this.sessionId}.log`);
+    this.workspaceLogPath = this.logFilePath;
+    this.sessionLogPath = path.join(homeLogDir, `rtunes_${this.sessionId}.log`);
 
     const banner = `\n================================================================================\n[SESSION START] ${formatLocalDateTime(now)} (Session ID: ${this.sessionId})\n================================================================================\n`;
-    this.appendToFile(this.workspaceLogPath, banner);
+    this.appendToFile(this.logFilePath, banner);
     this.appendToFile(this.sessionLogPath, banner);
-    if (this.logFilePath !== this.workspaceLogPath) {
-      this.appendToFile(this.logFilePath, banner);
-    }
   }
 
   private sanitizeDetails(details: unknown): unknown {

@@ -3,7 +3,12 @@ import path from 'path';
 import fs from 'fs';
 import { emitRendererEvent, getAppDataPath } from './runtimeBus';
 import { initDatabase, closeAllDatabases } from './db';
-import { getSettings, saveSettings, resolveAppMode } from './settings';
+import {
+  getSettings,
+  saveSettings,
+  resolveAppMode,
+  resolveEffectiveRemoteServerUrl,
+} from './settings';
 import {
   runLibraryScan,
   hasPendingIndexCheckpoint,
@@ -367,11 +372,9 @@ app.whenReady().then(async () => {
     const activeSettings = getSettings();
     const isRemoteClient =
       activeSettings.appMode === 'client' && activeSettings.clientSource === 'remote';
-    const remoteUrl = (
-      (isRemoteClient ? activeSettings.dockerServerUrl : '') ||
-      process.env.RTUNES_SERVER_URL ||
-      ''
-    ).trim();
+    const remoteUrl = isRemoteClient
+      ? resolveEffectiveRemoteServerUrl(activeSettings.dockerServerUrl)
+      : resolveEffectiveRemoteServerUrl(process.env.RTUNES_SERVER_URL);
     if (remoteUrl) {
       void remoteServerProvider.syncDeltaFromRemoteServer(remoteUrl).catch((err) => {
         logger.warn('SYSTEM', 'Initial remote delta sync skipped', { error: String(err) });

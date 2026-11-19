@@ -197,6 +197,7 @@ export interface AppSettings {
   appMode: AppProfile;
   clientSource: ClientSource;
   dockerServerUrl?: string;
+  remoteServerToken?: string;
 
   // Paths
   nfsSharePath: string;
@@ -281,6 +282,7 @@ export interface AppSettings {
 }
 
 const SECRET_KEYS: (keyof AppSettings)[] = [
+  'remoteServerToken',
   'listenbrainzToken',
   'lastfmApiKey',
   'theAudioDbApiKey',
@@ -296,6 +298,32 @@ const SECRET_KEYS: (keyof AppSettings)[] = [
 ];
 
 const KEYCHAIN_SERVICE = 'com.retrotunes.epodsuite';
+
+export function normalizeConfiguredServerUrl(raw?: string | null): string {
+  const cleaned = typeof raw === 'string' ? raw.trim().replace(/\/+$/, '') : '';
+  if (!cleaned || cleaned === 'https://rtunes-server.local:8443') return '';
+  return cleaned;
+}
+
+export function resolveEffectiveRemoteServerUrl(
+  explicitUrl?: string | null,
+  argv: string[] = process.argv
+): string {
+  return (
+    normalizeConfiguredServerUrl(explicitUrl) ||
+    normalizeConfiguredServerUrl(readCliFlagValue(argv, '--server')) ||
+    normalizeConfiguredServerUrl(process.env.RTUNES_SERVER_URL) ||
+    normalizeConfiguredServerUrl(getSettings().dockerServerUrl)
+  );
+}
+
+export function resolveEffectiveRemoteServerToken(explicitToken?: string | null): string {
+  return (
+    (typeof explicitToken === 'string' ? explicitToken.trim() : '') ||
+    (process.env.RTUNES_SERVER_TOKEN || '').trim() ||
+    (getSettings().remoteServerToken || '').trim()
+  );
+}
 
 export function setKeychainSecret(account: string, secret: string): boolean {
   try {
@@ -316,7 +344,8 @@ export function getDefaultSettings(): AppSettings {
   return {
     appMode: runtime.appMode,
     clientSource: 'local',
-    dockerServerUrl: 'https://rtunes-server.local:8443',
+    dockerServerUrl: '',
+    remoteServerToken: '',
 
     nfsSharePath: '',
     musicRootPath: '',
@@ -456,6 +485,9 @@ export function getSettings(forceReload = false): AppSettings {
   const merged: AppSettings = {
     ...defaults,
     ...(stored as Partial<AppSettings>),
+    dockerServerUrl: normalizeConfiguredServerUrl(
+      typeof stored.dockerServerUrl === 'string' ? stored.dockerServerUrl : defaults.dockerServerUrl
+    ),
     appMode: runtime.appMode,
     clientSource:
       stored.clientSource === 'remote' || (stored.clientSource === undefined && legacyInferredRemote)
@@ -534,7 +566,12 @@ export function redactSettingsForCaller(
   settings: AppSettings,
   caller: CallerContext
 ): AppSettings {
-  const clone: AppSettings = { ...settings, localPinHash: '', localPinPlaintext: '' };
+  const clone: AppSettings = {
+    ...settings,
+    localPinHash: '',
+    localPinPlaintext: '',
+    remoteServerToken: '',
+  };
   if (!caller.isSuperAdmin && caller.permissions.manageApiKeys < 1) {
     for (const key of SECRET_KEYS) {
       if (key === 'listenbrainzToken') continue;

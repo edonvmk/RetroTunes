@@ -289,6 +289,21 @@ function serveStaticAsset(reqPath: string, distDir: string, res: http.ServerResp
   return true;
 }
 
+function resolveStaticDistDir(): string {
+  const candidates = [
+    path.join(process.cwd(), 'dist'),
+    path.resolve(getAppPath(), 'dist'),
+    path.resolve(__dirname, '..', 'dist'),
+    path.resolve(__dirname, '..', '..', 'dist'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'index.html'))) {
+      return dir;
+    }
+  }
+  return path.resolve(getAppPath(), 'dist');
+}
+
 export function startUnifiedHttpServer(
   options: UnifiedHttpServerOptions
 ): Promise<{ server: http.Server; port: number }> {
@@ -300,7 +315,7 @@ export function startUnifiedHttpServer(
     mountMedia = false,
     enforceAuthGate = false,
   } = options;
-  const distDir = path.resolve(getAppPath(), 'dist');
+  const distDir = resolveStaticDistDir();
 
   return new Promise((resolve, reject) => {
     const srv = http.createServer(async (req, res) => {

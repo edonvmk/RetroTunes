@@ -23,6 +23,8 @@ import {
   saveSettings,
   redactSettingsForCaller,
   resolveAppMode,
+  normalizeConfiguredServerUrl,
+  resolveEffectiveRemoteServerUrl,
   verifyLocalPin,
   getStoredLocalPinHash,
   testIntegrationConnection,
@@ -1018,10 +1020,10 @@ export function registerCoreRpcHandlers(
   registerChannel('sync:playback', (updates: PlaybackDeltaUpdate[]) =>
     applyPlaybackDeltaSync(Array.isArray(updates) ? updates : [])
   );
-  registerChannel('sync:remoteDelta', (serverUrl?: string) => {
-    const url = (serverUrl || getSettings().dockerServerUrl || process.env.RTUNES_SERVER_URL || '').trim();
+  registerChannel('sync:remoteDelta', (serverUrl?: string, authToken?: string) => {
+    const url = resolveEffectiveRemoteServerUrl(serverUrl);
     if (!url) return { ok: false, skipped: true };
-    return remoteServerProvider.syncDeltaFromRemoteServer(url);
+    return remoteServerProvider.syncDeltaFromRemoteServer(url, authToken);
   });
 
   // --- Standalone/Server auth default (overridden by electron/main.ts in GUI) ---
@@ -1036,6 +1038,15 @@ export function registerCoreRpcHandlers(
   registerChannel('auth:getState', serverAuth);
   registerChannel('auth:login', serverAuth);
   registerChannel('auth:logout', serverAuth);
+  registerChannel('auth:setRemoteToken', (token: string | null, serverUrl?: string) => {
+    const cleanedToken = (token || '').trim();
+    const cleanedUrl = normalizeConfiguredServerUrl(serverUrl);
+    saveSettings({
+      remoteServerToken: cleanedToken,
+      ...(cleanedUrl ? { dockerServerUrl: cleanedUrl, clientSource: 'remote' } : {}),
+    });
+    return { ok: true };
+  });
   registerChannel('auth:probeRemoteServer', async (serverUrl: string) => {
     const base = String(serverUrl || '').trim().replace(/\/+$/, '');
     if (!base) return { ok: false, error: 'Missing server URL.' };

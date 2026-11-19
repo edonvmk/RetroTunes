@@ -263,12 +263,33 @@ function openConfiguredDb(targetPath: string, fallbackName: string): { db: Datab
   try {
     db = new Database(targetPath);
   } catch (err) {
+    const errCode = (err as { code?: string })?.code || '';
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (
+      errCode === 'ERR_DLOPEN_FAILED' ||
+      errMsg.includes('NODE_MODULE_VERSION') ||
+      errMsg.includes('was compiled against a different Node.js version')
+    ) {
+      throw new Error(
+        `Native SQLite ABI mismatch loading better-sqlite3 (${errMsg}). Run under Electron (ELECTRON_RUN_AS_NODE=1) or rebuild better-sqlite3 for Node ${process.version}.`
+      );
+    }
+    const isPermissionError =
+      errCode === 'EACCES' ||
+      errCode === 'EROFS' ||
+      errCode === 'EPERM' ||
+      errCode === 'SQLITE_CANTOPEN' ||
+      errCode === 'SQLITE_READONLY' ||
+      /permission denied|read-only|unable to open database file/i.test(errMsg);
+    if (!isPermissionError) {
+      throw err;
+    }
     const fallbackDir = path.join(os.tmpdir(), 'retrotunes-data');
     fs.mkdirSync(fallbackDir, { recursive: true });
     actualPath = path.join(fallbackDir, fallbackName);
     logger.warn(
       'DB',
-      `Primary DB path ${targetPath} was not writable (${String(err)}); using fallback ${actualPath}`
+      `Primary DB path ${targetPath} was not writable (${errMsg}); using fallback ${actualPath}`
     );
     db = new Database(actualPath);
   }
@@ -1785,6 +1806,61 @@ export function searchVideosFts(query: string, typeFilter?: 'movie' | 'tv'): Vid
   }
 }
 
+export interface DomainDbHealth {
+  domain: 'core' | 'affinity_cache' | 'video' | 'store' | 'users';
+  fileName: string;
+  path: string;
+  exists: boolean;
+  sizeBytes: number;
+  integrity: string;
+  ok: boolean;
+}
+
+export function getDomainDatabaseHealth(): DomainDbHealth[] {
+  const entries: {
+    domain: DomainDbHealth['domain'];
+    fileName: string;
+    filePath: string;
+    getter: () => Database.Database;
+  }[] = [
+    { domain: 'core', fileName: 'core.sqlite', filePath: dbFilePath, getter: getCoreDb },
+    { domain: 'affinity_cache', fileName: 'affinity_cache.sqlite', filePath: cacheDbFilePath, getter: getCacheDb },
+    { domain: 'video', fileName: 'video.sqlite', filePath: videoDbFilePath, getter: getVideoDb },
+    { domain: 'store', fileName: 'store.sqlite', filePath: storeDbFilePath, getter: getStoreDb },
+    { domain: 'users', fileName: 'users.sqlite', filePath: usersDbFilePath, getter: getUsersDb },
+  ];
+
+  return entries.map((entry) => {
+    let exists = false;
+    let sizeBytes = 0;
+    let integrity = 'unknown';
+    try {
+      const conn = entry.getter();
+      const row = conn.prepare('PRAGMA integrity_check').get() as { integrity_check?: string } | undefined;
+      integrity = row?.integrity_check || 'unknown';
+    } catch (err) {
+      integrity = err instanceof Error ? err.message : String(err);
+    }
+    try {
+      if (entry.filePath && fs.existsSync(entry.filePath)) {
+        exists = true;
+        sizeBytes = fs.statSync(entry.filePath).size;
+      }
+    } catch {
+      // ignore stat errors
+    }
+    return {
+      domain: entry.domain,
+      fileName: entry.fileName,
+      path: entry.filePath,
+      exists,
+      sizeBytes,
+      integrity,
+      ok: exists && integrity === 'ok',
+    };
+  });
+}
+
 export function getDatabaseDiagnostics() {
   const coreDb = getCoreDb();
   const videoDb = getVideoDb();
@@ -1798,7 +1874,7 @@ export function getDatabaseDiagnostics() {
   const ftsCount = (coreDb.prepare('SELECT COUNT(*) as c FROM tracks_fts').get() as { c: number }).c;
 
   let dbSizeBytes = 0;
-  for (const p of [dbFilePath, cacheDbFilePath, videoDbFilePath, storeDbFilePath]) {
+  for (const p of [dbFilePath, cacheDbFilePath, videoDbFilePath, storeDbFilePath, usersDbFilePath]) {
     try {
       if (p && fs.existsSync(p)) {
         dbSizeBytes += fs.statSync(p).size;
@@ -1810,6 +1886,10 @@ export function getDatabaseDiagnostics() {
 
   return {
     dbFilePath,
+    cacheDbFilePath,
+    videoDbFilePath,
+    storeDbFilePath,
+    usersDbFilePath,
     dbSizeBytes,
     tracksCount,
     ftsCount,

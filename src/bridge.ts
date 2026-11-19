@@ -73,8 +73,8 @@ export function getStoredAuthToken(): string {
 
 export function setStoredAuthToken(token: string | null): void {
   if (typeof window === 'undefined') return;
+  const cleaned = (token || '').trim();
   try {
-    const cleaned = (token || '').trim();
     if (cleaned) {
       window.localStorage?.setItem('rtunes_auth_token', cleaned);
     } else {
@@ -82,6 +82,12 @@ export function setStoredAuthToken(token: string | null): void {
     }
   } catch {
     // ignore storage errors
+  }
+  if (window.rtunesElectron?.invoke) {
+    const remoteUrl = getConfiguredRemoteServerUrl();
+    void window.rtunesElectron
+      .invoke('auth:setRemoteToken', cleaned || '', remoteUrl || undefined)
+      .catch(() => {});
   }
 }
 

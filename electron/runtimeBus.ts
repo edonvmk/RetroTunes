@@ -1,3 +1,4 @@
+import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -85,7 +86,23 @@ export function getAppPath(): string {
       // fall through
     }
   }
-  return process.cwd();
+  const cwd = process.cwd();
+  if (fs.existsSync(path.join(cwd, 'dist', 'index.html'))) {
+    return cwd;
+  }
+  const candidates = [
+    path.resolve(__dirname, '..'),
+    path.resolve(__dirname, '..', '..'),
+  ];
+  for (const candidate of candidates) {
+    if (
+      fs.existsSync(path.join(candidate, 'dist', 'index.html')) ||
+      fs.existsSync(path.join(candidate, 'package.json'))
+    ) {
+      return candidate;
+    }
+  }
+  return cwd;
 }
 
 export function isPackaged(): boolean {

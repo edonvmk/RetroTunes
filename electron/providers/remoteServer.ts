@@ -3,6 +3,10 @@ import path from 'path';
 import crypto from 'crypto';
 import { getCoreDb, PlaybackDeltaUpdate, TrackRow } from '../db';
 import { emitRendererEvent, getAppDataPath } from '../runtimeBus';
+import {
+  resolveEffectiveRemoteServerToken,
+  resolveEffectiveRemoteServerUrl,
+} from '../settings';
 import { logger } from '../logger';
 
 /**
@@ -55,8 +59,18 @@ export const remoteServerProvider = {
     };
   },
 
-  async syncDeltaFromRemoteServer(serverUrl: string): Promise<RemoteDeltaSyncResult> {
-    const base = serverUrl.trim().replace(/\/+$/, '');
+  async syncDeltaFromRemoteServer(
+    serverUrl?: string,
+    authToken?: string
+  ): Promise<RemoteDeltaSyncResult> {
+    const base = resolveEffectiveRemoteServerUrl(serverUrl);
+    if (!base) {
+      throw new Error('No remote rTunes-Server URL configured.');
+    }
+    const token = resolveEffectiveRemoteServerToken(authToken);
+    const authHeaders: Record<string, string> = token
+      ? { Authorization: `Bearer ${token}` }
+      : {};
     const db = getCoreDb();
     const revRow = db
       .prepare("SELECT CAST(value AS INTEGER) AS rev FROM settings WHERE key = 'remote_sync_rev'")
@@ -134,8 +148,15 @@ export const remoteServerProvider = {
 
     let hasMore = true;
     while (hasMore) {
-      const res = await fetch(`${base}/api/sync/delta?since_rev=${sinceRev}&limit=2000`);
+      const res = await fetch(`${base}/api/sync/delta?since_rev=${sinceRev}&limit=2000`, {
+        headers: authHeaders,
+      });
       if (!res.ok) {
+        if (res.status === 401) {
+          throw new Error(
+            'Delta sync failed (HTTP 401: remote server authentication required — run "cli client login" or sign in).'
+          );
+        }
         throw new Error(`Delta sync failed (HTTP ${res.status})`);
       }
       const batch = (await res.json()) as RemoteDeltaResponse;
@@ -195,7 +216,10 @@ export const remoteServerProvider = {
           const cachedArtFile = path.join(artDir, `${artHash}.jpg`);
           if (!downloadedHashes.has(artHash) && !fs.existsSync(cachedArtFile)) {
             try {
-              const artRes = await fetch(`${base}/artwork?path=${encodeURIComponent(remoteArt)}`);
+              const artRes = await fetch(
+                `${base}/artwork?path=${encodeURIComponent(remoteArt)}`,
+                { headers: authHeaders }
+              );
               if (artRes.ok) {
                 fs.writeFileSync(cachedArtFile, Buffer.from(await artRes.arrayBuffer()));
                 downloadedHashes.set(artHash, cachedArtFile);
@@ -239,12 +263,17 @@ export const remoteServerProvider = {
 
   async pushPlaybackToRemoteServer(
     serverUrl: string,
-    updates: PlaybackDeltaUpdate[]
+    updates: PlaybackDeltaUpdate[],
+    authToken?: string
   ): Promise<{ ok: boolean; current_rev: number; applied: number }> {
-    const base = serverUrl.trim().replace(/\/+$/, '');
+    const base = resolveEffectiveRemoteServerUrl(serverUrl);
+    const token = resolveEffectiveRemoteServerToken(authToken);
     const res = await fetch(`${base}/api/sync/playback`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       body: JSON.stringify({ updates }),
     });
     if (!res.ok) {

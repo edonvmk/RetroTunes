@@ -584,6 +584,7 @@ export interface AppSettings {
   appMode: AppProfile;
   clientSource: ClientSource;
   dockerServerUrl?: string;
+  remoteServerToken?: string;
 
   nfsSharePath: string;
   musicRootPath: string;

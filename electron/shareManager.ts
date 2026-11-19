@@ -459,6 +459,7 @@ export function getActiveTransportProvider(): FileTransportProvider {
 
   if (isRemoteClient && settings.dockerServerUrl) {
     const baseUrl = settings.dockerServerUrl.replace(/\/+$/, '');
+    const remoteToken = (process.env.RTUNES_SERVER_TOKEN || settings.remoteServerToken || '').trim();
     return {
       mode: 'docker_server',
       resolveStreamOrFileUrl(localOrNfsPath: string) {
@@ -468,6 +469,8 @@ export function getActiveTransportProvider(): FileTransportProvider {
         const headers: Record<string, string> = {};
         if (auth.authenticated && auth.accessToken) {
           headers.Authorization = `Bearer ${auth.accessToken}`;
+        } else if (remoteToken) {
+          headers.Authorization = `Bearer ${remoteToken}`;
         }
         return headers;
       },
